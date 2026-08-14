@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""逐帧拆解: PC→MCU→RK→MCU→PC 完整过程"""
+import sys; sys.path.insert(0,'d:/pro/test')
+from tests.verify_protocol_v2 import pack_heartbeat, pack_cmd, unpack_frame
+
+def show(title, data):
+    plen=(data[1]<<8)|data[2]; seq=int.from_bytes(data[5:13],'big')
+    tlv=data[13:13+plen]
+    t_type=(tlv[0]<<8)|tlv[1]; t_len=(tlv[2]<<8)|tlv[3]
+    val=tlv[4:4+t_len]
+    cmd=(val[0]<<8)|val[1] if len(val)>=2 else 0
+    params=val[2:] if len(val)>2 else b''
+
+    print('  %s' % title)
+    print('  hex: %s' % data.hex())
+    print('  解析: 0x5A | Len=%-4d | HCRC | Seq=%-5d | ' % (plen, seq), end='')
+    if t_type==0x0000: print('Type=0x0000(HB) TLV_Len=0')
+    elif t_type==0x5000:
+        print('Type=0x5000 TLV_Len=%-2d | CmdID=0x%04X | Params=%s(%dB)' % (t_len, cmd, params.hex() if params else '空', len(params)))
+    print()
+
+# ================================================================
+# 先看最简单情况: 只发一个测试命令, 帧内只有一个 TLV
+# ================================================================
+print('='*80)
+print('逐帧拆解: 一个 gtest_start 命令的完整生命周期')
+print('='*80)
+
+pc_seq = 0x64  # 100
+rk_seq = 30
+
+# ═══════════════════════════════════════════════════════════
+print("""
+  PC ──TCP──▶ MCU ──USART1──▶ RK3588
+   seq1=100                   seq2=30
+       ▲                          │
+       │         响应              │
+       └──────── TCP ─────────────┘
+              seq1=100
+""")
+
+# ── Step 1 ──
+print('─'*80)
+print('Step 1: PC 打包 → TCP 发送')
+print('─'*80)
+print('  PC 构造: Type=0x5000, CmdID=0x0001, Params=[0x01,0x00,0x00,0x80]')
+print('  PC 选择 pc_seq = 100 (0x64)')
+print()
+pc_frame = pack_cmd(0x0001, bytes([0x01,0x00,0x00,0x80]), pc_seq)
+show('  线路上实际字节:', pc_frame)
+
+# ── Step 2 ──
+print('─'*80)
+print('Step 2: MCU 收到 → 状态机解析 → 解包 TLV')
+print('─'*80)
+frame = unpack_frame(pc_frame[5:], (pc_frame[1]<<8)|pc_frame[2])
+u = frame['units'][0]
+print('  tlv_sm_feed() 逐字节喂入 → 完整帧就绪')
+print('  tlv_unpack() 解析:')
+print('    Seq      = %d (0x%X)    ← 这就是 pc_seq' % (frame['sequence'], frame['sequence']))
+print('    TLV[0]:')
+print('      Type    = 0x%04X  → 命令容器' % u['type'])
+print('      CmdID   = 0x%04X  → gtest_start' % u['cmd'])
+print('      Params  = %s' % frame['payload'][u['data_off']:u['data_off']+u['data_len']].hex())
+print()
+
+# ── Step 3 ──
+print('─'*80)
+print('Step 3: MCU → PC 回 ACK (立即)')
+print('─'*80)
+print('  MCU 打包 ACK: CmdID=0x0001, Params=[0x03], seq=pc_seq=100')
+print()
+ack = pack_cmd(0x0001, bytes([0x03]), pc_seq)
+show('  线路上实际字节:', ack)
+print('  PC 收到: seq=100 匹配原始请求 ✓, status=0x03')
+
+# ── Step 4 ──
+print('─'*80)
+print('Step 4: MCU → RK3588 转发 (重打包)')
+print('─'*80)
+print('  用 rk_seq_counter = 30 重新打包 (不是 pc_seq=100!)')
+print('  CmdID 和 Params 不变, 只换 Seq + 重算 CRC')
+print('  _pending_add(): 记录 {rk_seq=30 → pc_seq=100}')
+print()
+fwd = pack_cmd(0x0001, bytes([0x01,0x00,0x00,0x80]), rk_seq)
+show('  线路上实际字节:', fwd)
+print('  ★ 注意: Seq=30, 和 PC 端的 Seq=100 不同!')
+print()
+
+# ── Step 5 ──
+print('─'*80)
+print('Step 5: RK3588 执行 → 打包结果 → USART1 发送')
+print('─'*80)
+print('  RK 收到: 解析出 CmdID=0x0001, 启动 gtest')
+print('  RK 执行测试...')
+print('  RK 打包结果: echo 收到的 seq=30 (不是 100!)')
+print('  CmdID=0x0029(结果), Params=[0x00,0x00,0x00,0x01](PASS)')
+print()
+result = pack_cmd(0x0029, bytes([0x00,0x00,0x00,0x01]), rk_seq)
+show('  线路上实际字节:', result)
+
+# ── Step 6 ──
+print('─'*80)
+print('Step 6: MCU 收到 RK 响应 → 状态机解析 → _pending_take')
+print('─'*80)
+frame2 = unpack_frame(result[5:], (result[1]<<8)|result[2])
+u2 = frame2['units'][0]
+print('  tlv_sm_feed() 解析完整帧:')
+print('    Seq  = %d  ← RK 回传的 rk_seq' % frame2['sequence'])
+print()
+print('  _pending_take(seq=30):')
+print('    遍历 pending 队列, 找到 seq=30 的条目')
+print('    → 取回 pc_seq = %d (0x%X)' % (pc_seq, pc_seq))
+print('    → 移除 pending[30]')
+print()
+
+# ── Step 7 ──
+print('─'*80)
+print('Step 7: MCU → PC 上报结果')
+print('─'*80)
+print('  用取回的 pc_seq = %d 重打包' % pc_seq)
+print('  CmdID=0x0029(结果), Params=[0x00,0x00,0x00,0x01](PASS)')
+print()
+report = pack_cmd(0x0029, bytes([0x00,0x00,0x00,0x01]), pc_seq)
+show('  线路上实际字节:', report)
+print('  ★ PC 收到 seq=100, 匹配原始请求 → 知道这次测试的结果')
+
+# ═══════════════════════════════════════════════════════════
+# 对比: 两个方向的帧, Seq 不同
+# ═══════════════════════════════════════════════════════════
+print()
+print('='*80)
+print('关键对比: 同一条命令, PC侧 vs RK侧 的 Seq 不同')
+print('='*80)
+print()
+print('  PC → MCU:        %s  Seq=%-5d  ← pc_seq' % (pc_frame.hex(), pc_seq))
+print('  MCU → RK (转发):  %s  Seq=%-5d  ← rk_seq' % (fwd.hex(), rk_seq))
+print()
+print('  MCU → PC (ACK):  %s  Seq=%-5d  ← pc_seq (echo)' % (ack.hex(), pc_seq))
+print('  RK  → MCU (结果): %s  Seq=%-5d  ← rk_seq (echo)' % (result.hex(), rk_seq))
+print('  MCU → PC (结果):  %s  Seq=%-5d  ← pc_seq (从pending取回)' % (report.hex(), pc_seq))
+print()
+print('  pending 队列: {rk_seq=%d → pc_seq=%d}' % (rk_seq, pc_seq))
+print('  映射方向:     RK 侧 seq ──→ PC 侧 seq')
+print()
+
+# ═══════════════════════════════════════════════════════════
+# 多TLV场景: 混合本地命令 + 转发命令
+# ═══════════════════════════════════════════════════════════
+print('='*80)
+print('多 TLV 场景: PC 一帧发 reboot + gtest_start, MCU 分离处理')
+print('='*80)
+print("""
+  PC 构造一帧, 内含 2 个 TLV:
+    TLV[0]: Type=0x5000, CmdID=0x003E (reboot, MCU本地)
+    TLV[1]: Type=0x5000, CmdID=0x0001 (gtest_start, 转发RK)
+
+  MCU 收帧 → tlv_unpack() 解析出 2 个 TLV → tlv_dispatch() 遍历:
+    TLV[0] cmd=0x003E → _h_reboot() 本地执行 GPIO 复位
+    TLV[1] cmd=0x0001 → _h_test_cmd() 转发 pcToRk_Queue
+
+  "重组去除mcu执行的tlv":
+    从 2 个 TLV 中滤掉本地处理的 0x003E
+    剩余的 0x0001 用 rk_seq 重打包 → 1个TLV帧 → USART1 → RK
+""")
+
+# 构造2-TLV帧 (手动, 验证协议支持)
+print('  原始PC帧 (2个TLV, seq=200):')
+multi_pc_seq = 200
+# 手动: TLV[0]=reboot, TLV[1]=gtest_start
+# 这不是 pack_cmd 能直接生成的, 但协议支持
+# 这里展示逻辑: tlv_dispatch 逐个处理
+print('    TLV[0]: Type=0x5000 Len=3 Value=[0x00 0x3E 0x01] → reboot (本地)')
+print('    TLV[1]: Type=0x5000 Len=6 Value=[0x00 0x01 0x01 0x00 0x00 0x80] → gtest_start (转发)')
+print()
+print('  MCU dispatch 结果:')
+print('    → 执行 _h_reboot():  GPIO 复位 RK3588')
+print('    → _h_test_cmd():     入队 pcToRk_Queue, 立即回 ACK')
+print('    → rk_task 取队:      用 rk_seq=31 打包单个 CmdID=0x0001 → USART1')
+print()

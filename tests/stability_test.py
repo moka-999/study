@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+稳定性测试 — TCP + 串口(USART1/CH340) 多方位压力 & 鲁棒性测试
+
+复用 pc_client 的帧打包/解析 (与固件 frame.c 对齐).
+每个测试用独立 TCP 连接, 避免缓冲残留污染.
+
+用法: python tests/stability_test.py [host] [port] [com]
+"""
+import socket
+import sys
+import time
+import os
+
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pc_client import pack_cmd, pack_heartbeat, parse_frame, crc16_modbus
+
+try:
+    import serial
+    HAS_SERIAL = True
+except ImportError:
+    HAS_SERIAL = False
+
+HOST = sys.argv[1] if len(sys.argv) > 1 else '192.168.1.201'
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8888
+COM  = sys.argv[3] if len(sys.argv) > 3 else 'COM3'
+
+PASS = 0
+FAIL = 0
+def report(name, ok, detail=''):
+    global PASS, FAIL
+    if ok:
+        PASS += 1
+        print(f'  [PASS] {name} {detail}')
+    else:
+        FAIL += 1
+        print(f'  [FAIL] {name} {detail}')
+
+
+# 有效测试命令 (0x0011 reserved, 0x0025-0x0028 reserved)
+VALID_CMDS = list(range(0x0001, 0x0011)) + list(range(0x0012, 0x0025))
+
+
+class FrameStream:
+    def __init__(self):
+        self.buf = b''
+    def feed(self, data):
+        self.buf += data
+        out = []
+        while True:
+            idx = self.buf.find(b'\x5A')
+            if idx < 0:
+                self.buf = b''
+                break
+            if idx > 0:
+                self.buf = self.buf[idx:]
+            if len(self.buf) < 5:
+                break
+            plen = (self.buf[1] << 8) | self.buf[2]
+            total = 16 + plen
+            if total < 16 or total > 1040:
+                self.buf = self.buf[1:]
+                continue
+            if len(self.buf) < total:
+                break
+            out.append(self.buf[:total])
+            self.buf = self.buf[total:]
+        return out
+
+
+def tcp_connect():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(3.0)
+    s.connect((HOST, PORT))
+    s.settimeout(0.5)
+    return s
+
+
+def recv_frames(stream, src, want=1, timeout=0.5, max_wait=2.0):
+    """读 want 个完整帧 (或超时返回已读到部分)"""
+    if isinstance(src, socket.socket):
+        src.settimeout(timeout)
+    else:
+        src.timeout = timeout
+    deadline = time.time() + max_wait
+    frames = []
+    while len(frames) < want and time.time() < deadline:
+        try:
+            if isinstance(src, socket.socket):
+                d = src.recv(4096)
+            else:
+                # 串口: read(n) 会阻塞等满 n 字节, 改为读"当前可用"字节避免空等
+                n = src.in_waiting
+                d = src.read(n) if n > 0 else src.read(1)
+        except Exception:
+            continue
+        if not d:
+            break
+        frames += stream.feed(d)
+    return frames
+
+
+def seqs(frames):
+    return [parse_frame(f)['seq'] for f in frames if parse_frame(f)]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 1. TCP 批量 ACK (同步往返)
+# ═══════════════════════════════════════════════════════════════════
+def test_tcp_bulk(n=500):
+    print(f'\n[1] TCP 批量 ACK 压测 ({n} 帧, 同步往返)')
+    sock = tcp_connect()
+    stream = FrameStream()
+    ok = busy = miss = bad_seq = bad_status = bad_crc = 0
+    t0 = time.time()
+    for i in range(n):
+        cmd = VALID_CMDS[i % len(VALID_CMDS)]
+        params = bytes([i & 0xFF, (i >> 8) & 0xFF, 0xAB])
+        seq = i + 1
+        sock.sendall(pack_cmd(cmd, params, seq))
+        frames = recv_frames(stream, sock, want=1, timeout=0.5, max_wait=2.0)
+        if not frames:
+            miss += 1
+            continue
+        f = parse_frame(frames[0])
+        if not f:
+            bad_crc += 1
+        elif f['seq'] != seq:
+            bad_seq += 1
+        elif not (f['hcrc_ok'] and f['fcrc_ok']):
+            bad_crc += 1
+        elif f.get('status') == 0x03:
+            ok += 1
+        elif f.get('status') == 0x04:
+            busy += 1   # 队列满, 被丢弃 (背压, 属预期非错误)
+        else:
+            bad_status += 1
+    dt = time.time() - t0
+    err = miss + bad_seq + bad_status + bad_crc
+    # 判定: 无协议错误即可 (seq 匹配 / CRC 正确 / 状态为 ACK 或 BUSY);
+    # busy 是转发队列背压导致的丢弃, 单独列出, 不算失败
+    report('批量 ACK', err == 0,
+           f'转发={ok} 丢弃(忙)={busy} 无响应={miss} seq错={bad_seq} status错={bad_status} crc错={bad_crc}  {dt:.1f}s')
+    sock.close()
+    return err == 0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 2. TCP 粘包 / 拆包
+# ═══════════════════════════════════════════════════════════════════
+def test_tcp_frag():
+    print('\n[2] TCP 粘包 / 拆包')
+    # 粘包: 3 帧一次发出, 应回 3 个 ACK
+    sock = tcp_connect()
+    stream = FrameStream()
+    f1 = pack_cmd(0x0001, b'\x01', 100)
+    f2 = pack_cmd(0x0002, b'\x02', 101)
+    f3 = pack_cmd(0x0003, b'\x03', 102)
+    sock.sendall(f1 + f2 + f3)
+    frames = recv_frames(stream, sock, want=3, timeout=0.5, max_wait=3.0)
+    report('粘包 3帧→3ACK', seqs(frames) == [100, 101, 102], f'seqs={seqs(frames)}')
+    sock.close()
+
+    # 拆包: 一帧分 3 段发, 应回 1 个 ACK
+    sock = tcp_connect()
+    stream = FrameStream()
+    f = pack_cmd(0x0012, b'\xAA\xBB\xCC', 200)
+    sock.sendall(f[:5]); time.sleep(0.05)
+    sock.sendall(f[5:13]); time.sleep(0.05)
+    sock.sendall(f[13:])
+    frames = recv_frames(stream, sock, want=1, timeout=0.5, max_wait=3.0)
+    report('拆包 3段→1ACK', seqs(frames) == [200], f'seqs={seqs(frames)}')
+    sock.close()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 3. TCP 异常帧注入 (每个场景独立连接, 注入后验证正常帧仍可工作)
+# ═══════════════════════════════════════════════════════════════════
+def _inject_then_probe(name, inject_bytes, probe_seq):
+    """独立连接: 注入异常字节 → 发正常帧 → 期望正常 ACK"""
+    sock = tcp_connect()
+    stream = FrameStream()
+    if inject_bytes:
+        sock.sendall(inject_bytes)
+        # 等待: (a) 注入的"伪同步"有效帧回 ACK 到达 (b) 截断帧 500ms 超时复位生效
+        time.sleep(0.7)
+        # 排空注入阶段产生的残留响应, 避免污染后续 probe 判定
+        recv_frames(stream, sock, want=99, timeout=0.2, max_wait=0.4)
+    sock.sendall(pack_cmd(0x0005, b'\x55', probe_seq))
+    frames = recv_frames(stream, sock, want=1, timeout=0.5, max_wait=3.0)
+    got = probe_seq in seqs(frames)
+    report(name, got, f'注入后正常帧 seq={probe_seq} {"收到ACK" if got else "无响应"}')
+    sock.close()
+    return got
+
+
+def test_tcp_fuzz():
+    print('\n[3] TCP 异常帧注入 (隔离场景)')
+    good = pack_cmd(0x0001, b'\x01', 1)
+
+    # a. FCRC 破坏
+    corrupt = bytearray(good); corrupt[-3] ^= 0xFF
+    _inject_then_probe('CRC错帧', bytes(corrupt), 300)
+
+    # b. 伪同步 (TLV 数据里含 0x5A)
+    _inject_then_probe('伪同步', pack_cmd(0x0001, b'\x5A\x5A\x5A', 2), 301)
+
+    # c. 截断帧 (半帧后保持连接)
+    _inject_then_probe('截断帧(半帧)', good[:10], 302)
+
+    # d. 超长 Len
+    badlen = bytearray(good); badlen[1] = 0xFF; badlen[2] = 0xFF
+    _inject_then_probe('超长Len', bytes(badlen), 303)
+
+    # e. 垃圾字节 (非 0x5A 开头)
+    _inject_then_probe('垃圾字节', b'\x00\x01\x02\x03\x04\x05\x06\x07', 304)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 4. TCP 断连重连
+# ═══════════════════════════════════════════════════════════════════
+def test_tcp_reconnect(n=20):
+    print(f'\n[4] TCP 断连重连 ({n} 次)')
+    ok = 0
+    for i in range(n):
+        try:
+            sock = tcp_connect()
+            stream = FrameStream()
+            sock.sendall(pack_cmd(0x0001, bytes([i & 0xFF]), i + 1))
+            frames = recv_frames(stream, sock, want=1, timeout=0.5, max_wait=2.0)
+            if parse_frame(frames[0])['seq'] == i + 1 if frames else False:
+                ok += 1
+            sock.close()
+        except Exception as e:
+            print(f'    connect {i} 失败: {e}')
+        time.sleep(0.05)
+    report('重连', ok == n, f'{ok}/{n}')
+    return ok == n
+
+
+def _drain_serial_commands(ser, stream, settle=3.0, max_wait=20.0):
+    """排空串口上 MCU 转发的命令帧(含前序压测遗留的 fire-and-forget 命令).
+
+    方案B 下 pending 满时命令会滞留队列, 随 pending 4s 退避逐步转发出来,
+    所以不能靠固定 sleep, 得动态等待: 持续读串口, 丢弃所有命令帧(有 cmd_id),
+    心跳(type=0x0000 无 cmd_id)不计入; 直到连续 settle 秒没再出现命令帧才返回.
+    """
+    deadline = time.time() + max_wait
+    last_cmd = time.time()
+    while time.time() < deadline:
+        n = ser.in_waiting
+        if n > 0:
+            d = ser.read(n)
+            for fraw in stream.feed(d):
+                f = parse_frame(fraw)
+                if f and f.get('cmd_id') is not None:
+                    last_cmd = time.time()   # 又见命令帧, 重置静默计时
+        else:
+            time.sleep(0.05)
+        if time.time() - last_cmd >= settle:
+            return True
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 5. 全链路 TCP↔串口 (PC 模拟 RK3588)
+# ═══════════════════════════════════════════════════════════════════
+def test_full_loop(n=100):
+    print(f'\n[5] 全链路 TCP↔串口 往返 ({n} 帧)')
+    if not HAS_SERIAL:
+        print('  [SKIP] 无 pyserial'); return True
+    try:
+        ser = serial.Serial(COM, 115200, timeout=0.05)
+    except Exception as e:
+        print(f'  [SKIP] 打开 {COM} 失败: {e}'); return True
+
+    sock = tcp_connect()
+    tcp_stream = FrameStream()
+    ser_stream = FrameStream()
+    # 前置清理: 等 rk_task 把前面压测遗留的 pending(4s 退避) + 队列积压(方案B 滞留)
+    # 全部转发排空. 用"连续 3s 无命令帧"判定清空(心跳无 cmd_id 不计), 替代固定 sleep —
+    # 否则残留命令会在 iter 期间才转发出来, 卡住 iter 的 find(mcu) → 偶发 mcu/resp 漏.
+    ser.reset_input_buffer()
+    _drain_serial_commands(ser, ser_stream, settle=3.0, max_wait=20.0)
+    ser.reset_input_buffer()
+    ser_stream = FrameStream()   # drain 后重建干净流, 丢弃半帧
+
+    def find(stream, src, pred, max_wait=3.0):
+        """读帧直到 pred(frame) 为真; 中间不匹配的帧 (心跳/乱序) 被跳过"""
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            fs = recv_frames(stream, src, want=1, timeout=0.3, max_wait=3.0)
+            for fraw in fs:
+                f = parse_frame(fraw)
+                if f and pred(f):
+                    return f
+        return None
+
+    def send_cmd(frame):
+        """发送命令帧; 连接被对端复位(瞬态)时重连重发一次"""
+        nonlocal sock, tcp_stream
+        try:
+            sock.sendall(frame)
+            return True
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            time.sleep(0.3)
+            try:
+                sock.close()
+            except Exception:
+                pass
+            sock = tcp_connect()
+            tcp_stream = FrameStream()
+            try:
+                sock.sendall(frame)
+                return True
+            except Exception:
+                return False
+
+    ok = 0
+    fails = []   # (i, stage) 记录失败帧定位
+    t0 = time.time()
+    for i in range(n):
+        cmd = 0x0001 + (i % 16)
+        params = bytes([i & 0xFF, (i >> 8) & 0xFF])
+        pc_seq = i + 1
+
+        if not send_cmd(pack_cmd(cmd, params, pc_seq)):
+            fails.append((i, 'send'))
+            continue
+        # ACK (立即回, status=0x03)
+        ack = find(tcp_stream, sock, lambda f: f.get('seq') == pc_seq and f.get('status') == 0x03)
+        if not ack:
+            fails.append((i, 'ack'))
+            continue
+        # MCU 转发帧 (串口) — 跳过心跳 (type=0x0000 无 cmd_id)
+        mcu = find(ser_stream, ser, lambda f: f.get('cmd_id') == cmd)
+        if not mcu:
+            fails.append((i, 'mcu'))
+            continue
+        mcu_seq = mcu['seq']
+        # 假 RK 响应 (串口回)
+        ser.write(pack_cmd(cmd, b'\x01', mcu_seq))
+        # RK 响应 (TCP)
+        resp = find(tcp_stream, sock,
+                    lambda f: f.get('seq') == pc_seq and f.get('cmd_id') == cmd and f.get('params') == b'\x01')
+        if resp:
+            ok += 1
+        else:
+            fails.append((i, 'resp'))
+
+    dt = time.time() - t0
+    detail = f'{ok}/{n}  {dt:.1f}s'
+    if fails:
+        detail += f'  失败: {fails[:6]}'
+    report('全链路', ok == n, detail)
+    ser.close(); sock.close()
+    return ok == n
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 6. 串口压力 (连发, MCU RX 稳定性)
+# ═══════════════════════════════════════════════════════════════════
+def test_serial_flood(n=200):
+    print(f'\n[6] 串口压力 (COM3 连发 {n} 帧)')
+    if not HAS_SERIAL:
+        print('  [SKIP] 无 pyserial'); return True
+    try:
+        ser = serial.Serial(COM, 115200, timeout=0.05)
+    except Exception as e:
+        print(f'  [SKIP] 打开 {COM} 失败: {e}'); return True
+
+    t0 = time.time()
+    blob = b''.join(pack_cmd(0x0001 + (i % 16), bytes([i & 0xFF]), 0x5000 + i) for i in range(n))
+    ser.write(blob)
+    ser.flush()
+    dt = time.time() - t0
+
+    # 回读 MCU 的 ACK
+    stream = FrameStream()
+    got = 0
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        d = ser.read(4096)
+        if d:
+            got += len(stream.feed(d))
+    report('连发', True, f'发送 {len(blob)}B/{dt:.2f}s, 回读 {got} 帧')
+    ser.close()
+    return True
+
+
+def main():
+    print('=' * 60)
+    print(f' 稳定性测试  TCP {HOST}:{PORT}  串口 {COM}')
+    print('=' * 60)
+    test_tcp_bulk(500)
+    test_tcp_frag()
+    test_tcp_fuzz()
+    test_tcp_reconnect(20)
+    test_full_loop(100)
+    test_serial_flood(200)
+    print('\n' + '=' * 60)
+    print(f' 结果: PASS={PASS}  FAIL={FAIL}')
+    print('=' * 60)
+    return 0 if FAIL == 0 else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

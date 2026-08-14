@@ -1,0 +1,189 @@
+/*
+ * ===================================================================
+ * 驱动验证任务 — SPI2 回环 + I2C 地址扫描
+ * ===================================================================
+ * 输出: USART1 (PA9/PA10 → CH340 → PC, 115200 8N1)
+ * QSPI 测试已独立到 qspi_test.c
+ * ===================================================================
+ */
+#include "main.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "usart.h"
+#include "ad7124.h"
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+
+extern UART_HandleTypeDef huart1;
+
+static void _uart_puts(const char *s)
+{
+    HAL_UART_Transmit(&huart1, (uint8_t *)s, strlen(s), 100);
+}
+
+static void _uart_print(const char *fmt, ...)
+{
+    char buf[128];
+    va_list va;
+    va_start(va, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, va);
+    va_end(va);
+    if (n > 0) HAL_UART_Transmit(&huart1, (uint8_t *)buf, n, 100);
+}
+
+static void _hex_dump(const char *label, const uint8_t *data, int len)
+{
+    _uart_print("  %s [%d]: ", label, len);
+    for (int i = 0; i < len; i++)
+        _uart_print("%02X ", data[i]);
+    _uart_puts("\r\n");
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * SPI2 回环测试
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static int _test_spi2_loopback(void)
+{
+    _uart_puts("--- SPI2 Loopback ---\r\n");
+    _uart_puts("  (需要短接 PB15(MOSI) <-> PB14(MISO))\r\n");
+
+    extern SPI_HandleTypeDef hspi2;
+
+    /* 降低速率到 ~197KHz (MBR=7), 跳线友好 */
+    uint32_t cfg1_save = hspi2.Instance->CFG1;
+    uint32_t cfg1_new = (cfg1_save & ~(7u << 28)) | (7u << 28);
+    hspi2.Instance->CFG1 = cfg1_new;
+
+    if (!(hspi2.Instance->CR1 & SPI_CR1_SPE))
+        SET_BIT(hspi2.Instance->CR1, SPI_CR1_SPE);
+
+    uint8_t tx[16], rx[16];
+    for (int i = 0; i < 16; i++) tx[i] = (uint8_t)(0xA0 + i);
+
+    int ret = HAL_SPI_TransmitReceive(&hspi2, tx, rx, 16, 100);
+    hspi2.Instance->CFG1 = cfg1_save;
+
+    if (ret != HAL_OK) {
+        _uart_print("  FAIL: SPI Transfer error (%d)\r\n", ret);
+        return -1;
+    }
+
+    _hex_dump("TX", tx, 16);
+    _hex_dump("RX", rx, 16);
+
+    int ok = (memcmp(tx, rx, 16) == 0);
+    _uart_print("  %s\r\n", ok ? "LOOPBACK OK" : "LOOPBACK FAIL");
+    _uart_puts("--- SPI2 TEST END ---\r\n\r\n");
+    return ok ? 0 : -1;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * I2C 地址扫描
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static void _i2c_scan(const char *name, I2C_HandleTypeDef *hi2c)
+{
+    _uart_print("--- %s Scan ---\r\n", name);
+    int found = 0;
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        if (HAL_I2C_IsDeviceReady(hi2c, (uint16_t)(addr << 1), 1, 10) == HAL_OK) {
+            _uart_print("  Device @ 0x%02X (7bit)\r\n", addr);
+            found++;
+        }
+    }
+    if (found == 0) _uart_puts("  (no device found)\r\n");
+    _uart_print("  %d device(s) total\r\n\r\n", found);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * AD7124 驱动验证 (逻辑分析仪, 不挂芯片)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static void _test_ad7124(void)
+{
+    _uart_puts("--- AD7124 Driver Test (SPI2, PB12=CS) ---\r\n");
+    _uart_puts("  (挂逻辑分析仪: CS/SCK/MOSI/MISO)\r\n");
+
+    /* PB12 作 CS (输出推挽, 初始高) */
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIO_InitTypeDef g = {0};
+    g.Pin   = GPIO_PIN_12;
+    g.Mode  = GPIO_MODE_OUTPUT_PP;
+    g.Pull  = GPIO_PULLUP;
+    g.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOB, &g);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
+
+    /* 降速到 ~197KHz (MBR=7), 逻辑分析仪友好 */
+    extern SPI_HandleTypeDef hspi2;
+    uint32_t cfg1_save = hspi2.Instance->CFG1;
+    uint32_t cfg1_new = (cfg1_save & ~(7u << 28)) | (7u << 28);
+    hspi2.Instance->CFG1 = cfg1_new;
+
+    extern spi_if_t spi2_if;
+    ad7124_t adc = { .spi = &spi2_if, .cs_port = GPIOB, .cs_pin = GPIO_PIN_12, .id = 0 };
+
+    _uart_puts("[1] Reset (64 SCLK)... ");
+    int ret = ad7124_reset(&adc);
+    _uart_print("%s\r\n", ret == 0 ? "OK" : "FAIL");
+
+    _uart_puts("[2] Read ID... ");
+    ret = ad7124_read_id(&adc);
+    _uart_print("%s (id=0x%02X, exp=0x%02X)\r\n",
+               ret == 0 ? "OK" : "FAIL", adc.id, AD7124_ID_SILICON);
+
+    _uart_puts("[3] Init (config CH0-2, CH3 disabled)... ");
+    ret = ad7124_init(&adc);
+    _uart_print("%s (%d)\r\n", ret == 0 ? "OK" : "FAIL", ret);
+
+    _uart_puts("[4] Read CH0 raw... ");
+    int32_t raw = 0;
+    ret = ad7124_read_ch(&adc, 0, &raw);
+    _uart_print("%s (raw=%ld)\r\n", ret == 0 ? "OK" : "FAIL", raw);
+
+    _uart_puts("[5] Read all 3ch... ");
+    int32_t raw_all[4]; uint8_t got;
+    ret = ad7124_read_all(&adc, raw_all, 4, &got);
+    _uart_print("%s (got=%d: CH0=%ld CH1=%ld CH2=%ld)\r\n",
+               ret == 0 ? "OK" : "FAIL", got, raw_all[0], raw_all[1], raw_all[2]);
+
+    _uart_puts("--- AD7124 TEST DONE ---\r\n\r\n");
+    _uart_puts("  逻辑分析仪验证点:\r\n");
+    _uart_puts("  - Reset: CS↓ 8×0xFF CS↑ (64 SCLK)\r\n");
+    _uart_puts("  - Read ID: CS↓ 0x45 0x00 CS↑\r\n");
+    _uart_puts("  - Init: 10 个寄存器写 (3ch×3 + ADC_CTRL + CH3=0), CS↓ cmd+data CS↑\r\n");
+    _uart_puts("  - Read CH0: CS↓ 0x42 0x00 0x00 0x00 0x00 CS↑ (STATUS + DATA24)\r\n\r\n");
+
+    hspi2.Instance->CFG1 = cfg1_save;  /* 恢复原始速率 */
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 入口
+ * ═══════════════════════════════════════════════════════════════════ */
+
+void StartTestTask(void *argument)
+{
+    (void)argument;
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    _uart_puts("\r\n\r\n");
+    _uart_puts("========================================\r\n");
+    _uart_puts("  Apollo V2 — Driver Self Test\r\n");
+    _uart_puts("========================================\r\n\r\n");
+
+    _test_spi2_loopback();
+
+    extern I2C_HandleTypeDef hi2c1, hi2c3;
+    _i2c_scan("I2C1 (PB8/PB9)", &hi2c1);
+    _i2c_scan("I2C3 (PH7/PH8)", &hi2c3);
+
+    _test_ad7124();
+
+    _uart_puts("========================================\r\n");
+    _uart_puts("  Self Test Complete\r\n");
+    _uart_puts("========================================\r\n");
+
+    vTaskDelete(NULL);
+}
