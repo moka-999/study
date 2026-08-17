@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/uart_router.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/uart_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/i2c_hw.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/bsp_gpio.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/pwm_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/qspi_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/spi_hw.c
@@ -98,3 +99,34 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# ===================================================================
+# Bootloader — 最小跳转 (0x08000000, 128KB)
+# 烧录顺序: boot.elf 先, test.elf 后
+# 用显式命令构建, 绕开 CMake executable 规则 (全局 -T/编译flags 会泄漏)
+# ===================================================================
+set(BOOT_OBJ ${CMAKE_BINARY_DIR}/boot.s.o)
+set(BOOT_ELF ${CMAKE_BINARY_DIR}/boot.elf)
+set(BOOT_FLAGS -mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-d16)
+
+add_custom_command(
+    OUTPUT ${BOOT_OBJ}
+    COMMAND ${CMAKE_C_COMPILER} ${BOOT_FLAGS} -x assembler-with-cpp
+            -c ${CMAKE_CURRENT_SOURCE_DIR}/boot/boot.s -o ${BOOT_OBJ}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/boot/boot.s
+    COMMENT "Assembling boot/boot.s"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT ${BOOT_ELF}
+    COMMAND ${CMAKE_C_COMPILER} ${BOOT_FLAGS}
+            -nostartfiles -nostdlib
+            -T ${CMAKE_CURRENT_SOURCE_DIR}/boot/STM32H743_boot.ld
+            ${BOOT_OBJ} -o ${BOOT_ELF}
+    DEPENDS ${BOOT_OBJ} ${CMAKE_CURRENT_SOURCE_DIR}/boot/STM32H743_boot.ld
+    COMMENT "Linking boot.elf"
+    VERBATIM
+)
+
+add_custom_target(boot ALL DEPENDS ${BOOT_ELF})

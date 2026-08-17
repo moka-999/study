@@ -60,7 +60,9 @@ RAM (xrw)      : ORIGIN = 0x24000000, LENGTH = 512K
 RAM_D2 (xrw)      : ORIGIN = 0x30000000, LENGTH = 288K
 RAM_D3 (xrw)      : ORIGIN = 0x38000000, LENGTH = 64K
 ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 2048K
+/* App 区: 0x08020000 起 (预留 128KB Bootloader @ 0x08000000, H743 扇区=128KB)
+ * 在线升级方案见 doc/driver_tasks.md §11, Bootloader 待 B2 联调后开发 */
+FLASH (rx)      : ORIGIN = 0x08020000, LENGTH = 1920K
 }
 
 /* Highest address of the user mode stack */
