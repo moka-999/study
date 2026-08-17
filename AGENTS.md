@@ -54,11 +54,14 @@ PC ──TCP:8888──► MCU(STM32H743) ──USART1──► RK3588
 cd build_debug && ninja
 ```
 
-### 烧录（SWD）
+### 烧录（SWD）— 两步: 先 Bootloader 后 App
 ```bash
-STM32_Programmer_CLI.exe -c port=SWD -w test.elf
-STM32_Programmer_CLI.exe -c port=SWD -rst   # 复位运行
+STM32_Programmer_CLI.exe -c port=SWD -w build_debug/boot.elf   # Bootloader @ 0x08000000
+STM32_Programmer_CLI.exe -c port=SWD -w build_debug/test.elf   # App @ 0x08020000
+STM32_Programmer_CLI.exe -c port=SWD -rst                      # 复位运行
 ```
+> Bootloader = 最小跳转 (boot/boot.s, 校验 App 向量表后跳转, 无升级逻辑)。
+> App 编译在 0x08020000 (linker + VECT_TAB_OFFSET 已改)。在线升级 (W25Q256 搬移) 待 B2 联调后开发。
 
 ### 工具链路径
 ```
@@ -70,9 +73,13 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 - MCU IP：`192.168.1.201:8888`
 
 ### 崩溃诊断（HardFault 排查）
-- 诊断地址：`crash_log` = 0x20009600（16×uint32），`tcp_diag` = 0x20009640（用 `nm test.elf | grep crash_log` 验证为准）
+- 诊断地址：`crash_log` = 0x20009600（16×uint32），`tcp_diag` = 0x20009640（用 `nm test.elf | grep crash_log` 验证为准）→ **实测(20260817): crash_log=0x200094E0, tcp_diag=0x20009520**（.crash_log 段 NOLOAD, 复位不清零, 排查时先 `-w32 0x20009520 0 0 0 0 0 0 0 0` 清空再复位）
 - 反汇编：`arm-none-eabi-objdump -d --start-address=<pc-0x100> --stop-address=<pc+0x100> test.elf`
 - **判断异常栈**：用 `EXC_RETURN(LR) bit2`（1=PSP线程 / 0=MSP handler），**不要**用 `__get_CONTROL()&2`（进异常时硬件已清 SPSEL，判断必错）
+
+### App 偏移启动坑（20260817 实测发现）
+- **`system_stm32h7xx.c` 的 `USER_VECT_TAB_ADDRESS` 必须解除注释**，否则 `SCB->VTOR` 设置代码被 `#if defined(...)` 编译掉 → 向量表留在 0x08000000（bootloader 空白区）→ 任何中断触发即 IACCVIOL 跑飞。CubeMX 重生成会把它注释回去，须恢复（VECT_TAB_OFFSET=0x020000 已设）。
+- 诊断手法：`-coreReg PC LR MSP XPSR` 读 PC 定位跑飞点；`-r32 0xE000ED28 1`（CFSR）看故障类型；`-r32 0xE000ED08 1` 看 VTOR。
 
 ### 运行测试
 ```bash
@@ -119,11 +126,49 @@ python tests/full_chain_stress.py
 - ✅ 已修复 3 个固件 bug（重传热循环 / 转发丢命令 / ACK回环）+ 多个测试脚本 bug
 - ✅ git 已初始化，推送到 Gitea `LILIHONG/stm32h743`（私有）
 
-**下一步（待办）**：
-1. 写 BSP 驱动：AD7124(SPI4) / PAC1934T(I2C4) / TPS62868(I2C1/2/4) / pwr_ctrl(PC6/PC7/PG11 上电时序)
-2. 拿到驱动真实数据后 → **修订 TLV type 语义**（枚举 vs 结构化，见下）
-3. B1 板到货后：USART1 从 CH340 切到 RS0102→RK3588 真机联调
-4. 高波特率（460800/921600）DMA+IDLE（等真机 RS0102，CH340 有 USB 间隙误触发拆帧风险）
+**下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B2真板验证）
+> **两阶段策略**：阶段一 = 阿波罗 V2 开发（所有驱动代码 + 模块级验证, 当前）；阶段二 = B2 真板（B2 到货后：引脚重映射 + 实测标定 + RK 联调）
+1. **pwr_ctrl**（PC6/PC7/PG11 上电时序, 默认 OFF 已确认）— 阻塞所有电源类驱动
+2. **TPS62868**（I2C1/2/4, 地址 0x42-0x44 按 BOM 料号; 与 pwr_on 联动）
+3. **PAC1934T**（I2C4, 0x2C）+ **AD7124**（SPI4 PE11-14, 三轨回读已确认）
+4. **加热控制**（PH8/9/10 → Si7129DN → 加热片×3, 20260811 新增, 代码 V2 可做）
+5. **Boot 模式控制**（MCP4725 DAC, I2C2, 0x60 → BOOT_SARADC_IN0, 20260811 新增, 代码 V2 可做）
+6. 拿到驱动真实数据后 → **修订 TLV type 语义**（枚举 vs 结构化）
+7. B1 板到货后：UART4/USART2 从 CH340 切到 RS0102→RK3588 真机联调（**注意不是 USART1**）
+8. 高波特率（460800/921600）DMA+IDLE（等真机 RS0102）
+
+### B2 板原理图（MB360）已解析结论（2026-08，几何法从 PDF 提取）
+
+> 分析工具：`tools/sch_netlist.py`（PDF 矢量线段重建网络表，无视觉模型可用）。
+> 原理图源：`docs/MYZR-RK3588-ZUOYI_SCH_20260807-.pdf`（P1-16 RK 核心板 CB314，**P17-23 底板 MB360 = B2**，P24 DIMM314 连接器）。
+
+**⚠️ 重要修正**：真机 RK3588 通信**不是 USART1**！是 **UART4 (PA11=RX/PA12=TX) + USART2 (PD5=TX/PD6=RX) 各经一路 RS0102 电平转换**（U4008: UART0_M0↔UART4；U4013: UART2_M0_DEBUG↔USART2）。USART1(PA9/PA10) 只是板上本地串口。硬件上电时 RK 的 UART0_M0 是 BMC console，联调应改用 UART4/USART2（待真机验证）。
+
+| 外设 | 引脚 | 目标 | 备注 |
+|------|------|------|------|
+| AD7124 (U4028) | SPI4: PE11=NSS PE12=SCK PE13=MISO PE14=MOSI | AIN0 ← VCC_1V8_S3_LPDDR4X / AIN2 ← VDD2_DDR_S3 / AIN4 ← VDDQ_DDR（导线追踪已确认, 各经 100R+10K+0.1uF 滤波）; AIN1/3/5=AGND, AIN6/7=NC | REFIN1+ ← VCC_2V5 (U4029 RY6211B-25C LDO) |
+| PAC1934T (U204) | I2C4 (PH4=SCL/PH5=SDA) | 地址 **0x2C/0x2D**（ADDRSEL=5.23K→GND） | SENSE1-3: VCC_1V8_S3/VDD2_DDR_S3/VDDQ_DDR 各 0.01Ω; SENSE4 未用 |
+| TPS62868 ×3 | U4025=I2C1, U4026=I2C2, U4027=I2C4 | 输出 VCC_1V8_S3_LPDDR4X(VDD1) / VDD2_DDR_S3(VDD2) / VDDQ_DDR(VDDQ) | EN 全接 **PG11**（各带 R4074/R4080/R4085 10K 下拉 → 默认 OFF）; VIN=VCC4V0_SYS; pin9=PG → **C 版, I2C 地址出厂固定 0x42/0x43/0x44（x0C/x1C/x2C, 见 BOM 料号后缀）**; VOS=输出电压采样 |
+| pwr_ctrl | **PC6**→MP8759 EN (VCC4V0_SYS 4.0V), **PC7**→RT8070 EN (VCC3V3_SYS 3.3V), **PG11**→3×TPS62868 EN | EN 均默认 OFF（无上拉）→ 上电序: 12V→5V→(MCU)→3.3V(PC7)→4.0V(PC6)→VDD 轨(PG11)，顺序/延时待实测 | **3V3_MCU 来源原理图无法定位**（全板无独立 3.3V 稳压器、无 VCC3V3_SYS↔3V3_MCU 0R；且 EN 默认 OFF 与自举矛盾 → 必有独立路径, 须实测/等 B2 板） |
+| LED | PG0-6 → 2N7002 → LED1-7 | 3V3_MCU 域 | |
+| SWD/调试 | PA13=JTMS PA14=JTCK, NRST→MCU_RESET_L, BOOT0 | | |
+| ETH RMII | PA1 REF_CLK / PA2 MDIO / PA7 CRS_DV / PB11 TX_EN / PC1 MDC / PC4 PC5 RXD0/1 / PG13 PG14 TXD0/1 | 经 SN74LVC1G3157×8 可选 B1(核心板)/B2(背板) | YT8512H (P23) |
+| SPI2 (PB12-15, MCU_SPI_*) | → DIMM314 → RK 核心板 | 用途待定（非 AD7124） | |
+
+> **风扇/加热与 MCU 无关**：风扇 PWM12_M1_FAN = RK3588 自控（P14, Q3/Q2→J15）；P24 "VCC_24V 软开关输出"（疑老化加热电源）由 RK PWRON_L 控制。MCU 只管 PC6/PC7/PG11。原理图源文件 `docs/MYZR-RK3588-ZUOYI_SCH_20260807-.pdf`（原文件名为 ...20260803-(2)，内容即最新版）。
+
+### 原理图 20260811 版新增（docs/MYZR-RK3588-ZUOYI_SCH_20260811.pdf, 当前最新）
+
+> ⚠️ 修正：**加热是 MCU 控制的**（上一条"加热与 MCU 无关"仅指 P14 风扇与 P24 的 24V 软开关；P18 的加热电路归 MCU）。**优先用本版分析**，与 20260807 版差异如下：
+
+| 新增电路 | 内容 | MCU 影响 |
+|----------|------|----------|
+| **加热控制 (P18)** | MCU **PH8/PH9/PH10** → Q19/Q21/Q23 (2N7002) → R7277-7284 (470K) → Q18/Q20/Q22 (Si7129DN N-MOS) → **G88MP04102KEU 加热片×3**（VCC12V_DCIN 供电, J32/J33/J34 接口, 47uF 滤波） | **PH8/9/10 = 3 路加热开关**（老化加热, 待确认 PWM 或开关量）。跨页标注 p<24> 为抄错（FX18 无此信号）, 实际 P21↔P18 |
+| **引导模式控制 (P24)** | **U4030 MCP4725A0 DAC** (SOT23-6): VDD=3V3_MCU, A0→GND(**地址 0x60**), SCL/SDA ← R7286/R7287(0R) ← **I2C2**（与 TPS62868 U4026 同总线）; VOUT → R7288(0R) → **BOOT_SARADC_IN0** → RK3588 (p<6>) | **MCU 写 DAC 电压 → 选 RK3588 引导模式**: 0V=USB / 0.3V=SD / 0.6V=EMMC / 0.9V=FSPI M0 / 1.2V=FSPI M1 / 1.5V=FSPI M2 / 1.8V=EMMC-SD（TABLE 1, 100K 上拉域）。另有 SARADC_VIN1_KEY/RECOVERY 电阻阶梯 (LEVEL1-7) + MASKROM_Key (J36/J37) |
+| 连接器 | 40x2 头子 → **FX18-60P-08SV10 (30x2=60pin)** ×2；新增 J35 (CXC01L3Z) | |
+| P22 | PAC1934T 采样路径新增 R7268-7271 (4×0402, 值未提取) | |
+| P21 | VDD 去耦 C4094-4104 + FB0603×4 + R7272；AD7124 封装注记 LFCSP-32（疑 AD7124-8?）；CHS-01TB 按键 | |
+| P14/P15/P23 | TYPEC-16P 焊座替换 P1 插头；WAFER-GH125 线束座 | |
 
 ---
 

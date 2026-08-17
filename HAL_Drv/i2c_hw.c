@@ -45,3 +45,11 @@ i2c_if_t i2c3_if = {               /* PH7=SCL, PH8=SDA */
   .read_bytes = _rdm,
   .is_ready   = _rdy,
 };
+
+i2c_if_t i2c4_if = {               /* PF14=SCL, PF15=SDA (V2 引出排针) */
+  .handle     = &hi2c4,            /* B2 板: I2C4 切到 PH4/5, 本实例不变 */
+  .read_reg   = _rd,
+  .write_reg  = _wr,
+  .read_bytes = _rdm,
+  .is_ready   = _rdy,
+};
