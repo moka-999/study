@@ -180,22 +180,27 @@ int ad7124_config_setup(ad7124_t *d, uint8_t setup,
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * 初始化: 复位 → 读 ID → 配置 3 通道 (B1 原理图仅 CH0-2 有接线)
- *   CH0: AIN0 vs AVSS → VDD1  (1.8V)
- *   CH1: AIN1 vs AVSS → VDD2  (1.05V)
- *   CH2: AIN2 vs AVSS → VDDQ  (0.6V)
- *   CH3: 原理图空置, 不使能
+ * 初始化: 复位 → 读 ID → 配置 3 通道 (B2 原理图 20260811, AIN0/2/4)
+ *   CH0: AIN0 ↔ AVSS → VCC_1V8_S3_LPDDR4X (VDD1, 1.8V, TPS62868 U4025)
+ *   CH1: AIN2 ↔ AVSS → VDD2_DDR_S3       (VDD2, 1.1V, TPS62868 U4026)
+ *   CH2: AIN4 ↔ AVSS → VDDQ_DDR          (VDDQ, 0.6V, TPS62868 U4027)
+ *   AIN1/3/5 = AGND, AIN6/7 = NC (原理图)
  *
- *   默认: 外部基准, SINC4, 50Hz ODR, 增益=1, 双极性
- *   使能 DATA_STATUS: 读 DATA 时自动附带通道信息
+ *   默认: 外部基准 REFIN1 (2.5V), SINC4, 50Hz ODR, 增益=1, 双极性
+ *   使能 DATA_STATUS: 读 DATA 时状态字节附加在数据后 (第4字节)
  * ═══════════════════════════════════════════════════════════════════ */
 
 int ad7124_init(ad7124_t *d)
 {
+    /* B2 原理图: CH0→AIN0, CH1→AIN2, CH2→AIN4 (AIN1/3/5=AGND) */
+    static const uint8_t b2_ainp[3] = {
+        AD7124_AIN_AIN0, AD7124_AIN_AIN2, AD7124_AIN_AIN4
+    };
+
     if (ad7124_reset(d) != IF_OK) return -1;
     ad7124_read_id(d);  /* 无芯片时 id=0x00, 继续配置以便逻辑分析仪抓波形 */
 
-    /* ADC_CTRL: 内部时钟, 内部参考, 连续模式, 全功率, DATA_STATUS */
+    /* ADC_CTRL: 内部时钟, 外部基准 REFIN1 (见 CFGx REF_SEL), 连续模式, 全功率, DATA_STATUS */
     _wr16(d, AD7124_REG_ADC_CTRL,
           AD7124_ADC_CLK_SEL(AD7124_CLK_INT) |
           AD7124_ADC_POWER_MODE(AD7124_PWR_FULL) |
@@ -204,15 +209,15 @@ int ad7124_init(ad7124_t *d)
           AD7124_ADC_MODE(AD7124_MODE_CONT));
     d->adc_mode = AD7124_MODE_CONT;
 
-    d->num_ch = 3;  /* B1: 3 路电压采集, CH3 原理图空置 */
+    d->num_ch = 3;  /* B2: 3 路 DDR 电压回读 */
 
     for (int ch = 0; ch < d->num_ch; ch++) {
-        /* CHx_MAP: enable, AIN(ch) ↔ AVSS, setup=ch */
+        /* CHx_MAP: enable, AIN(b2_ainp) ↔ AVSS, setup=ch */
         _wr16(d, AD7124_REG_CH0 + ch,
-              AD7124_CH_ENABLE | AD7124_CH_AINP(ch) | AD7124_CH_AINM(AD7124_AIN_AVSS)
+              AD7124_CH_ENABLE | AD7124_CH_AINP(b2_ainp[ch]) | AD7124_CH_AINM(AD7124_AIN_AVSS)
               | AD7124_CH_SETUP(ch));
 
-        /* CFGx: bipolar, gain=1, 外部基准, 缓冲器使能 */
+        /* CFGx: bipolar, gain=1, 外部基准 REFIN1, 缓冲器使能 */
         _wr16(d, AD7124_REG_CFG0 + ch,
               AD7124_CFG_BIPOLAR | AD7124_CFG_PGA(0) |
               AD7124_CFG_REF_SEL(AD7124_REF_EXT1) |
@@ -223,8 +228,13 @@ int ad7124_init(ad7124_t *d)
         _wr24(d, AD7124_REG_FILTER0 + ch, AD7124_FILT_SINC4 | AD7124_FILT_FS(384));
     }
 
-    /* ── 禁用 CH3 (原理图空置, 浮空引脚不采样) ── */
+    /* ── 禁用未用通道 (AIN1/3/5=AGND, 6/7=NC, 原理图) ── */
+    _wr16(d, AD7124_REG_CH0 + 1, 0);
     _wr16(d, AD7124_REG_CH0 + 3, 0);
+    _wr16(d, AD7124_REG_CH0 + 4, 0);
+    _wr16(d, AD7124_REG_CH0 + 5, 0);
+    _wr16(d, AD7124_REG_CH0 + 6, 0);
+    _wr16(d, AD7124_REG_CH0 + 7, 0);
 
     return 0;
 }
@@ -283,7 +293,7 @@ int ad7124_calibrate(ad7124_t *d, uint8_t ch)
 
 int ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw)
 {
-    uint8_t rx[4];  /* STATUS + DATA[23:0] */
+    uint8_t rx[4];  /* DATA[23:0] + STATUS (DATA_STATUS 使能时状态字节在后!) */
     int     max_wait = (d->adc_mode == AD7124_MODE_CONT) ? 8 : 1;
     int32_t val;
 
@@ -301,15 +311,15 @@ int ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw)
             return IF_TIMEOUT;
         }
 
-        /* 读 DATA (4 字节: STATUS + 24-bit 数据) */
+        /* 读 DATA (4 字节: DATA[23:16][15:8][7:0] + STATUS, MSB 先) */
         if (ad7124_read_reg(d, AD7124_REG_DATA, rx, 4) != IF_OK)
             return IF_ERR;
 
-        /* 检查通道匹配 */
-        uint8_t active_ch = rx[0] & 0x0F;
+        /* 检查通道匹配: STATUS 在最后一个字节 (AD7124 手册 DATA_STATUS) */
+        uint8_t active_ch = rx[3] & 0x0F;
         if (active_ch == ch || d->adc_mode != AD7124_MODE_CONT) {
             /* 24-bit 符号扩展 */
-            val = ((int32_t)rx[1] << 16) | ((int32_t)rx[2] << 8) | rx[3];
+            val = ((int32_t)rx[0] << 16) | ((int32_t)rx[1] << 8) | rx[2];
             if (val & 0x800000) val |= 0xFF000000;   /* 负值扩展 */
             *raw = val;
             return IF_OK;
@@ -354,17 +364,17 @@ int ad7124_read_all(ad7124_t *d, int32_t *raw, uint8_t max_ch, uint8_t *got)
         }
         if (to >= 500) goto out;
 
-        /* 读 DATA (4 字节: STATUS + 24-bit) */
+        /* 读 DATA (4 字节: DATA[23:16][15:8][7:0] + STATUS) */
         if (ad7124_read_reg(d, AD7124_REG_DATA, rx, 4) != IF_OK) goto out;
 
-        uint8_t active_ch = rx[0] & 0x0F;
+        uint8_t active_ch = rx[3] & 0x0F;   /* STATUS 在最后 (DATA_STATUS) */
 
         /* 忽略溢出/错误状态 */
         if (active_ch >= d->num_ch || active_ch >= max_ch) continue;
         if (ch_mask & (1 << active_ch)) continue;  /* 已有 */
 
         /* 24-bit 符号扩展 */
-        int32_t val = ((int32_t)rx[1] << 16) | ((int32_t)rx[2] << 8) | rx[3];
+        int32_t val = ((int32_t)rx[0] << 16) | ((int32_t)rx[1] << 8) | rx[2];
         if (val & 0x800000) val |= 0xFF000000;
 
         raw[active_ch] = val;
