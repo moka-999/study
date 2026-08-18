@@ -1,7 +1,7 @@
 # B2 板驱动开发任务清单 + 开发流程
 
 > 唯一任务来源（AGENTS.md「下一步」引用本文件）。
-> 原理图依据：`docs/MYZR-RK3588-ZUOYI_SCH_20260811.pdf`（当前最新，含加热/引导模式新增电路）。
+> 原理图依据：`docs/MYZR-RK3588-ZUOYI_SCH_20260811.pdf`（当前最新，含引导模式新增电路）。
 > 引脚依据：本文件 §9 引脚总表（几何法从原理图提取 + H743 AF 校验）。
 
 ---
@@ -20,7 +20,6 @@ V2 可验证的：
   · TLV 命令接入 + python 测试脚本（协议层全部可测）
 V2 不可验证、留给 B2 的：
   · 电源真时序标定（t1/t2/t3、3V3_MCU 来源、EN 默认态）
-  · 加热片真功率/电流
   · Boot 模式与 RK reboot 集成
 ```
 
@@ -31,7 +30,7 @@ V2 不可验证、留给 B2 的：
 ```
 1. CubeMX 重配引脚（SPI4 PE11-14 / I2C1 PB7-8 / I2C2 PF0-1 / I2C4 PH4-5 / UART4 PA11-12 / USART2 PD5-6）
 2. 新增 i2c_if/spi_if 工厂实例（B2 引脚），驱动零改动（hal_if.h 设计保证）
-3. 万用表/示波器标定：电源时序、DAC 电压-模式映射、加热电流
+3. 万用表/示波器标定：电源时序、DAC 电压-模式映射
 4. 真机联调：UART4/USART2 → RS0102 → RK3588
 ```
 
@@ -101,22 +100,9 @@ V2 不可验证、留给 B2 的：
 | 5.3 | 电压换算 + 分压系数 | API | 同上 | 同上 |
 | 5.4 | TLV：电压采样上报 | dispatch | python | 真机 |
 
-## 6. 加热控制（PH8/9/10）— 代码 V2 完成, 真机 B2
+## 6. ~~加热控制（PH8/9/10）~~ — **已取消 (20260817)**
 
-**原理图**（P18, 20260811 新增）：
-```
-MCU PH8/9/10 → Q19/21/23 (2N7002) → R7277-7284 (470K) → Q18/20/22 (Si7129DN N-MOS)
-             → G88MP04102KEU 加热片×3（VCC12V_DCIN, J32/33/34, 47uF 滤波）
-```
-
-| # | 任务 | 输出 | V2 验证 | B2 验证 |
-|---|------|------|---------|---------|
-| 6.1 | GPIO 配置（输出, 初始 OFF）+ `heater_set(ch,on)` | heater.c/h | 翻转 | 加热电流实测 |
-| 6.2 | PWM 支持（PH8-10 TIM/AF 待查, 470K 下拉限频率 → 可能仅开关量） | `heater_set_pwm()` | V2 示波器 | 真机 |
-| 6.3 | 安全保护：pwr_on 完成才允许 + PAC1934T 电流联动 | 保护逻辑 | 逻辑测试 | 真机 |
-| 6.4 | TLV：HEATER_CTRL | dispatch | python | 真机 |
-
-**⚠️ 待确认**：跨页标 p<24> 抄错（FX18 无 PH8-10）；G88MP04102KEU 额定功率；PWM 可行性。
+> **B1 MCU 不负责加热**：加热由 PC 操控**独立加热模块**，原理图 P18 的 PH8/9/10 加热电路（Q19/21/23 → Si7129DN → G88MP04102KEU）**不采用**，MCU 侧无加热驱动/命令。
 
 ## 7. Boot 模式控制（MCP4725 DAC, I2C2, 0x60）— 代码 V2 完成, 真机 B2
 
@@ -149,9 +135,10 @@ MCU I2C2 (PF0/PF1) → R7286/87 (0R) → U4030 MCP4725A0T-E/CH (12-bit DAC)
 | 0x0025 | PWR_ON | 上电时序 |
 | 0x0026 | PWR_OFF | 下电时序 |
 | 0x0027 | PWR_STATUS | 电源状态查询 |
-| 0x0028 | HEATER_CTRL | 加热: [ch][on/pwm][duty] |
 | 0x003A | BOOT_MODE_SET | 引导模式: [mode] |
 | 0x003B | BOOT_MODE_QUERY | DAC 输出查询 |
+
+> 加热命令已移除（0x0028 HEATER_CTRL）：加热由 PC 独立模块控制，不经过 MCU。
 
 （0x0029-0x003D 原为 RK 结果帧, 与本地命令错开, 提交前复核 dispatch.h）
 
@@ -179,7 +166,6 @@ MCU I2C2 (PF0/PF1) → R7286/87 (0R) → U4030 MCP4725A0T-E/CH (12-bit DAC)
 | SPI2 | PB12-15 MCU_SPI_* | DIMM/FX18→RK | 待定 |
 | ETH RMII | PA1/PA2/PA7/PB11/PC1/PC4/PC5/PG13/PG14 | YT8512H | 现用 |
 | pwr_ctrl | PC6=4.0V EN, PC7=3.3V EN, PG11=DDR EN | 上电时序 | V2 GPIO 模拟 |
-| 加热 | PH8/9/10 | 3 路加热片 | V2 GPIO 模拟 |
 | LED | PG0-6 | LED1-7 | 现用 |
 | SWD | PA13=JTMS PA14=JTCK | | |
 

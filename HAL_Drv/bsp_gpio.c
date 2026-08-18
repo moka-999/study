@@ -21,9 +21,6 @@ static const gpio_pin_t _pins[GPIO_FUNC_COUNT] = {
     [GPIO_FUNC_PWR_4V0_EN] = { GPIOC, GPIO_PIN_6  },  /* MP8759 EN */
     [GPIO_FUNC_PWR_3V3_EN] = { GPIOC, GPIO_PIN_7  },  /* RT8070 EN */
     [GPIO_FUNC_PWR_DDR_EN] = { GPIOG, GPIO_PIN_11 },  /* TPS62868×3 EN */
-    [GPIO_FUNC_HEAT_0]     = { GPIOH, GPIO_PIN_8  },
-    [GPIO_FUNC_HEAT_1]     = { GPIOH, GPIO_PIN_9  },
-    [GPIO_FUNC_HEAT_2]     = { GPIOH, GPIO_PIN_10 },
 };
 #else
 /* ── V2 测试引脚表 (.ioc 已配或空闲) ── */
@@ -31,9 +28,6 @@ static const gpio_pin_t _pins[GPIO_FUNC_COUNT] = {
     [GPIO_FUNC_PWR_4V0_EN] = { GPIOF, GPIO_PIN_2  },
     [GPIO_FUNC_PWR_3V3_EN] = { GPIOC, GPIO_PIN_7  },
     [GPIO_FUNC_PWR_DDR_EN] = { GPIOG, GPIO_PIN_1  },
-    [GPIO_FUNC_HEAT_0]     = { GPIOH, GPIO_PIN_9  },
-    [GPIO_FUNC_HEAT_1]     = { GPIOH, GPIO_PIN_10 },
-    [GPIO_FUNC_HEAT_2]     = { GPIOH, GPIO_PIN_11 },
 };
 #endif
 

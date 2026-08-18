@@ -131,7 +131,7 @@ python tests/full_chain_stress.py
 1. **pwr_ctrl**（PC6/PC7/PG11 上电时序, 默认 OFF 已确认）— 阻塞所有电源类驱动
 2. **TPS62868**（I2C1/2/4, 地址 0x42-0x44 按 BOM 料号; 与 pwr_on 联动）
 3. **PAC1934T**（I2C4, 0x2C）+ **AD7124**（SPI4 PE11-14, 三轨回读已确认）
-4. **加热控制**（PH8/9/10 → Si7129DN → 加热片×3, 20260811 新增, 代码 V2 可做）
+4. ~~加热控制~~（**已取消** 20260817: B1 MCU 不负责加热, 由 PC 操控独立加热模块, 原理图 P18 电路不采用）
 5. **Boot 模式控制**（MCP4725 DAC, I2C2, 0x60 → BOOT_SARADC_IN0, 20260811 新增, 代码 V2 可做）
 6. 拿到驱动真实数据后 → **修订 TLV type 语义**（枚举 vs 结构化）
 7. B1 板到货后：UART4/USART2 从 CH340 切到 RS0102→RK3588 真机联调（**注意不是 USART1**）
@@ -159,11 +159,11 @@ python tests/full_chain_stress.py
 
 ### 原理图 20260811 版新增（docs/MYZR-RK3588-ZUOYI_SCH_20260811.pdf, 当前最新）
 
-> ⚠️ 修正：**加热是 MCU 控制的**（上一条"加热与 MCU 无关"仅指 P14 风扇与 P24 的 24V 软开关；P18 的加热电路归 MCU）。**优先用本版分析**，与 20260807 版差异如下：
+> ⚠️ 修正(20260817)：~~加热是 MCU 控制的~~ → **加热已确认不由 MCU 负责**（由 PC 独立加热模块控制, P18 电路不采用）。**优先用本版分析**，与 20260807 版差异如下：
 
 | 新增电路 | 内容 | MCU 影响 |
 |----------|------|----------|
-| **加热控制 (P18)** | MCU **PH8/PH9/PH10** → Q19/Q21/Q23 (2N7002) → R7277-7284 (470K) → Q18/Q20/Q22 (Si7129DN N-MOS) → **G88MP04102KEU 加热片×3**（VCC12V_DCIN 供电, J32/J33/J34 接口, 47uF 滤波） | **PH8/9/10 = 3 路加热开关**（老化加热, 待确认 PWM 或开关量）。跨页标注 p<24> 为抄错（FX18 无此信号）, 实际 P21↔P18 |
+| ~~加热控制 (P18)~~ | MCU **PH8/PH9/PH10** → Q19/Q21/Q23 (2N7002) → R7277-7284 (470K) → Q18/Q20/Q22 (Si7129DN N-MOS) → **G88MP04102KEU 加热片×3**（VCC12V_DCIN 供电, J32/J33/J34 接口, 47uF 滤波） | **不采用 (20260817)**：B1 MCU 不负责加热, 由 PC 独立加热模块控制 |
 | **引导模式控制 (P24)** | **U4030 MCP4725A0 DAC** (SOT23-6): VDD=3V3_MCU, A0→GND(**地址 0x60**), SCL/SDA ← R7286/R7287(0R) ← **I2C2**（与 TPS62868 U4026 同总线）; VOUT → R7288(0R) → **BOOT_SARADC_IN0** → RK3588 (p<6>) | **MCU 写 DAC 电压 → 选 RK3588 引导模式**: 0V=USB / 0.3V=SD / 0.6V=EMMC / 0.9V=FSPI M0 / 1.2V=FSPI M1 / 1.5V=FSPI M2 / 1.8V=EMMC-SD（TABLE 1, 100K 上拉域）。另有 SARADC_VIN1_KEY/RECOVERY 电阻阶梯 (LEVEL1-7) + MASKROM_Key (J36/J37) |
 | 连接器 | 40x2 头子 → **FX18-60P-08SV10 (30x2=60pin)** ×2；新增 J35 (CXC01L3Z) | |
 | P22 | PAC1934T 采样路径新增 R7268-7271 (4×0402, 值未提取) | |
@@ -190,6 +190,10 @@ python tests/full_chain_stress.py
 2. `heap_4.c` 的 `.heap` section → 重加；长期用 `configAPPLICATION_ALLOCATED_HEAP=1`
 3. `stm32h7xx_it.c` 的 `HardFault_Handler_C` → USER CODE 区恢复
 4. USART TX drain → 已用 HAL `TxISR` 钩子根治，it.c 无自定义代码
+5. **`system_stm32h7xx.c`**：`USER_VECT_TAB_ADDRESS` 解除注释 + `VECT_TAB_OFFSET=0x020000`（CubeMX 无对应 UI，重生成后必复位 → 手动恢复，见"App 偏移启动坑"）
+6. **`STM32H743xx_FLASH.ld`**：`FLASH ORIGIN=0x08020000, LENGTH=1920K`（CubeMX 无对应 UI，重生成后复位 0x08000000/2048K → 手动恢复）
+
+> ✅ 已入 .ioc 自动保留：`SPI2.ClockPhase=2EDGE`（AD7124 模式1）；`freertos.c` StartTestTask 自检在 USER CODE 区；boot/ 与顶层 CMakeLists 不受 CubeMX 影响。
 
 ### 测试脚本坑
 - 清串口缓冲必须先 settle（等 pending+重传排空）再 `reset_input_buffer()`，否则抓到旧帧
