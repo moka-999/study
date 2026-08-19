@@ -3,7 +3,7 @@
  * AD7124-4 驱动 — spi_if_t 抽象层, 不绑死物理 SPI
  * ===================================================================
  *
- * 通信序列 (CPOL=0, CPHA=1, MSB first):
+ * 通信序列 (SPI Mode 3: CPOL=1, CPHA=1, MSB first, SCLK idle high):
  *   写寄存器: CS↓ → [cmd_wr] [data_MSB..LSB] → CS↑
  *   读寄存器: CS↓ → [cmd_rd] [dummy] → (收) [echo] [reg_data_MSB..LSB] → CS↑
  *   复位:     CS↓ → 64 SCLK w/ DIN=HIGH (8×0xFF) → CS↑ → Delay 1ms
@@ -203,7 +203,9 @@ int ad7124_config_setup(ad7124_t *d, uint8_t setup,
  *   CH2: AIN4 ↔ AVSS → VDDQ_DDR          (VDDQ, 0.6V, TPS62868 U4027)
  *   AIN1/3/5 = AGND, AIN6/7 = NC (原理图)
  *
- *   默认: 外部基准 REFIN1 (2.5V), SINC4, 50Hz ODR, 增益=1, 双极性
+ *   默认: 外部基准 REFIN1 (2.5V), SINC4, 50Hz ODR, 增益=1, 单极性 (unipolar)
+ *   单极性理由: DDR 电压全正 (0.6~1.8V), unipolar 满量程 0~2.5V 分辨率翻倍
+ *              (24-bit 全用 vs bipolar 有效 23-bit), 更符合老化拉偏精度需求
  *   使能 DATA_STATUS: 读 DATA 时状态字节附加在数据后 (第4字节)
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -234,9 +236,10 @@ int ad7124_init(ad7124_t *d)
               AD7124_CH_ENABLE | AD7124_CH_AINP(b2_ainp[ch]) | AD7124_CH_AINM(AD7124_AIN_AVSS)
               | AD7124_CH_SETUP(ch));
 
-        /* CFGx: bipolar, gain=1, 外部基准 REFIN1, 缓冲器使能 */
+        /* CFGx: 单极性, gain=1, 外部基准 REFIN1, 缓冲器使能
+         * (单极性: AIN 范围 0~VREF/gain, DDR 电压全正用满 24-bit 分辨率) */
         _wr16(d, AD7124_REG_CFG0 + ch,
-              AD7124_CFG_BIPOLAR | AD7124_CFG_PGA(0) |
+              AD7124_CFG_PGA(0) |
               AD7124_CFG_REF_SEL(AD7124_REF_EXT1) |
               AD7124_CFG_REF_BUFP | AD7124_CFG_REF_BUFM |
               AD7124_CFG_AIN_BUFP | AD7124_CFG_AIN_BUFM);
@@ -519,7 +522,7 @@ int ad7124_read_all_mv(ad7124_t *d, int32_t *mv, uint8_t max_ch, uint8_t *got,
     if (r != IF_OK) return r;
     for (uint8_t i = 0; i < *got; i++) {
         uint8_t p = pga     ? pga[i]    : 0;
-        uint8_t b = bipolar ? bipolar[i] : 1;
+        uint8_t b = bipolar ? bipolar[i] : 0;   /* 默认 unipolar (B2 全正电压轨) */
         mv[i] = ad7124_raw_to_mv(raw[i], vref, p, b);
     }
     return IF_OK;
