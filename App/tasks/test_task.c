@@ -11,6 +11,7 @@
 #include "task.h"
 #include "usart.h"
 #include "ad7124.h"
+#include "tps62868.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -166,6 +167,35 @@ static void _test_ad7124(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+ * TPS62868 驱动验证 (I2C1, 扫描 0x40-0x4F)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static void _test_tps62868(void)
+{
+    extern i2c_if_t i2c1_if;
+
+    _uart_puts("--- TPS62868 Test (I2C1, scan 0x40-0x4F) ---\r\n");
+    uint8_t addrs[16];
+    int n = tps62868_scan(&i2c1_if, addrs, 16);
+    _uart_print("scan: %d device(s):", n);
+    for (int i = 0; i < n; i++) _uart_print(" 0x%02X", addrs[i]);
+    _uart_puts("\r\n");
+
+    if (n > 0) {
+        tps62868_t tp = { .bus = &i2c1_if, .addr = TPS62868_ADDR,
+                          .factor_x10 = TPS62868_FACTOR_2X0 };
+        uint8_t st;
+        _uart_puts("set_vout1(1800mV, factor=2)... ");
+        _uart_print("%s\r\n",
+                    tps62868_set_vout1(&tp, 1800) == IF_OK ? "OK" : "FAIL");
+        _uart_puts("read_status... ");
+        _uart_print("%s (0x%02X)\r\n",
+                    tps62868_read_status(&tp, &st) == IF_OK ? "OK" : "FAIL", st);
+    }
+    _uart_puts("--- TPS62868 TEST DONE ---\r\n\r\n");
+}
+
+/* ═══════════════════════════════════════════════════════════════════
  * 入口
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -186,6 +216,7 @@ void StartTestTask(void *argument)
     _i2c_scan("I2C3 (PH7/PH8)", &hi2c3);
 
     _test_ad7124();
+    _test_tps62868();
 
     _uart_puts("========================================\r\n");
     _uart_puts("  Self Test Complete\r\n");

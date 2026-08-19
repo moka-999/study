@@ -70,14 +70,16 @@ V2 不可验证、留给 B2 的：
 
 ## 3. TPS62868 DDR 电源（I2C1/2/4）
 
-**手册**：TI SLVSFS3B（已下载）。寄存器 VOUT1=0x01/VOUT2=0x02/CONTROL=0x03/STATUS=0x05。C 版地址出厂固定：x0C=0x42 / x1C=0x43 / x2C=0x44（按 BOM 料号后缀）。
+**手册**：TI SLVSFS3B（下载于 `C:\Users\Administrator\AppData\Local\Temp\opencode\tps62868.pdf`）。寄存器 VOUT1=0x01/VOUT2=0x02/CONTROL=0x03/STATUS=0x05。**C 版地址全部出厂固定 0x42**（Table 8-3，x0C/x1C/x2C 仅电压因子不同：0.5/1/2；三颗各在独立 I2C 总线 I2C1/2/4 → 地址相同不冲突）。VOUT 换算：`code=(VOUT/因子-400mV)/5mV`，code 0x00-0xFF 对应 400-1675mV×因子。
+
+> ⚠️ 20260819 修正：此前记录"0x42/0x43/0x44"有误（据 TI 手册 Table 8-3 实测为全 0x42）。VDD1=1.8V 需因子 2（x2C）；VDDQ=0.6V 需因子≤1（x0C/x1C）——以 BOM 料号为准。
 
 | # | 任务 | 输出 | V2 验证 | B2 验证 |
 |---|------|------|---------|---------|
-| 3.1 | I2C 寄存器读写 + 地址扫描（0x42-0x44） | tps62868.c/h | 模块挂 I2C1 | 三颗总线扫描 |
-| 3.2 | 初始化：VOUT 设置（因子换算）、ramp speed、discharge | API | 回读 VOUT | 真机电压实测 |
-| 3.3 | STATUS 读（热预警/HICCUP） | API | 回读 | 真机 |
-| 3.4 | TLV：DDR_VOLTAGE_SET（老化调压） | dispatch | python | 真机 |
+| 3.1 | I2C 寄存器读写 + 地址扫描（0x40-0x4F） | ✅ tps62868.c/h + scan | 模块挂 I2C1 | 三颗总线扫描 |
+| 3.2 | 初始化：VOUT 设置（因子换算）、ramp speed、discharge | ✅ API（ctl 软件镜像） | 回读 VOUT | 真机电压实测 |
+| 3.3 | STATUS 读（热预警/HICCUP/UVLO） | ✅ API | 回读 | 真机 |
+| 3.4 | TLV：DDR_VOLTAGE_SET（老化调压） | 待办 | dispatch | 真机 |
 
 ## 4. PAC1934T 电流采样（I2C4, 0x2C）
 

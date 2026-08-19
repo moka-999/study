@@ -148,7 +148,7 @@ python tests/full_chain_stress.py
 |------|------|------|------|
 | AD7124 (U4028) | SPI4: PE11=NSS PE12=SCK PE13=MISO PE14=MOSI | AIN0 ← VCC_1V8_S3_LPDDR4X / AIN2 ← VDD2_DDR_S3 / AIN4 ← VDDQ_DDR（导线追踪已确认, 各经 100R+10K+0.1uF 滤波）; AIN1/3/5=AGND, AIN6/7=NC | REFIN1+ ← VCC_2V5 (U4029 RY6211B-25C LDO) |
 | PAC1934T (U204) | I2C4 (PH4=SCL/PH5=SDA) | 地址 **0x2C/0x2D**（ADDRSEL=5.23K→GND） | SENSE1-3: VCC_1V8_S3/VDD2_DDR_S3/VDDQ_DDR 各 0.01Ω; SENSE4 未用 |
-| TPS62868 ×3 | U4025=I2C1, U4026=I2C2, U4027=I2C4 | 输出 VCC_1V8_S3_LPDDR4X(VDD1) / VDD2_DDR_S3(VDD2) / VDDQ_DDR(VDDQ) | EN 全接 **PG11**（各带 R4074/R4080/R4085 10K 下拉 → 默认 OFF）; VIN=VCC4V0_SYS; pin9=PG → **C 版, I2C 地址出厂固定 0x42/0x43/0x44（x0C/x1C/x2C, 见 BOM 料号后缀）**; VOS=输出电压采样 |
+| TPS62868 ×3 | U4025=I2C1, U4026=I2C2, U4027=I2C4 | 输出 VCC_1V8_S3_LPDDR4X(VDD1) / VDD2_DDR_S3(VDD2) / VDDQ_DDR(VDDQ) | EN 全接 **PG11**（各带 R4074/R4080/R4085 10K 下拉 → 默认 OFF）; VIN=VCC4V0_SYS; pin9=PG → **C 版, I2C 地址全部 0x42**（TI Table 8-3; 三颗各在独立 I2C 总线不冲突; x0C/x1C/x2C 仅电压因子 0.5/1/2, 以 BOM 料号为准）; VOS=输出电压采样 |
 | pwr_ctrl | **PC6**→MP8759 EN (VCC4V0_SYS 4.0V), **PC7**→RT8070 EN (VCC3V3_SYS 3.3V), **PG11**→3×TPS62868 EN | EN 均默认 OFF（无上拉）→ 上电序: 12V→5V→(MCU)→3.3V(PC7)→4.0V(PC6)→VDD 轨(PG11)，顺序/延时待实测 | **3V3_MCU 来源原理图无法定位**（全板无独立 3.3V 稳压器、无 VCC3V3_SYS↔3V3_MCU 0R；且 EN 默认 OFF 与自举矛盾 → 必有独立路径, 须实测/等 B2 板） |
 | LED | PG0-6 → 2N7002 → LED1-7 | 3V3_MCU 域 | |
 | SWD/调试 | PA13=JTMS PA14=JTCK, NRST→MCU_RESET_L, BOOT0 | | |
