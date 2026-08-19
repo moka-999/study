@@ -56,6 +56,16 @@ int ad7124_write_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len)
 static inline int _rd8(ad7124_t *d, uint8_t reg, uint8_t *v)
 { return ad7124_read_reg(d, reg, v, 1); }
 
+/* ── 辅助: 读 16-bit (MSB first) ── */
+static int _rd16(ad7124_t *d, uint8_t reg, uint16_t *v)
+{
+    uint8_t b[2];
+    int r = ad7124_read_reg(d, reg, b, 2);
+    if (r != IF_OK) return r;
+    *v = ((uint16_t)b[0] << 8) | b[1];
+    return IF_OK;
+}
+
 /* ── 辅助: 写 16-bit (MSB first) ── */
 static int _wr16(ad7124_t *d, uint8_t reg, uint16_t v)
 {
@@ -228,45 +238,50 @@ int ad7124_init(ad7124_t *d)
         _wr24(d, AD7124_REG_FILTER0 + ch, AD7124_FILT_SINC4 | AD7124_FILT_FS(384));
     }
 
-    /* ── 禁用未用通道 (AIN1/3/5=AGND, 6/7=NC, 原理图) ── */
-    _wr16(d, AD7124_REG_CH0 + 1, 0);
-    _wr16(d, AD7124_REG_CH0 + 3, 0);
-    _wr16(d, AD7124_REG_CH0 + 4, 0);
-    _wr16(d, AD7124_REG_CH0 + 5, 0);
-    _wr16(d, AD7124_REG_CH0 + 6, 0);
-    _wr16(d, AD7124_REG_CH0 + 7, 0);
+    /* ── 禁用未用通道 (仅保留 CH0-2; AIN1/3/5=AGND, 6/7=NC 原理图) ── */
+    for (int ch = d->num_ch; ch < 8; ch++)
+        _wr16(d, AD7124_REG_CH0 + ch, 0);
 
     return 0;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * 校准 (内部零位 + 内部满量程)
+ * 校准 (内部满量程 + 内部零位)
+ *
+ * 手册要求 (Rev E, CALIBRATION 章节):
+ *   1. 校准期间只能激活 1 个通道 (only one channel can be active)
+ *   2. 内部校准时必须先做满量程, 再做零位
+ *      (internal full-scale calibration must be performed before
+ *       the internal zero-scale calibration)
+ *   3. 校准从 standby/idle 开始, 完成后切换回 continuous
  * ═══════════════════════════════════════════════════════════════════ */
 
 int ad7124_calibrate(ad7124_t *d, uint8_t ch)
 {
-    uint8_t st;
-    (void)ch;
+    uint8_t  st;
+    uint16_t saved[8];   /* 各通道寄存器原值 (含使能状态) */
+    if (ch > 7) return IF_ERR;
 
-    /* 构建 ADC_CTRL 基底 (不含 MODE), 各校准步骤按需 OR 模式 */
+    /* 构建 ADC_CTRL 基底 (不含 MODE) */
     uint16_t base = AD7124_ADC_CLK_SEL(AD7124_CLK_INT) |
                     AD7124_ADC_POWER_MODE(AD7124_PWR_FULL) |
                     AD7124_ADC_REF_EN |
                     AD7124_ADC_DATA_STATUS;
-    /* MODE=0 (CONT) — 之后按需覆盖 */
 
-    /* 切换到待机 (校准必须先从待机/空闲开始) */
-    _wr16(d, AD7124_REG_ADC_CTRL, base | AD7124_ADC_MODE(AD7124_MODE_STANDBY));
-
-    /* 内部零位校准 */
-    _wr16(d, AD7124_REG_ADC_CTRL, base | AD7124_ADC_MODE(AD7124_MODE_CAL_INT_Z));
-    for (int to = 0; to < 1000; to++) {
-        _rd8(d, AD7124_REG_STATUS, &st);
-        if (!(st & AD7124_STATUS_RDY)) break;
-        HAL_Delay(1);
+    /* 1. 保存所有通道状态, 仅保留目标通道使能 (手册: 校准单通道) */
+    for (int i = 0; i < 8; i++)
+        _rd16(d, AD7124_REG_CH0 + i, &saved[i]);
+    for (int i = 0; i < 8; i++) {
+        uint16_t v = saved[i];
+        if (i == ch) v |= AD7124_CH_ENABLE;
+        else         v &= (uint16_t)~AD7124_CH_ENABLE;
+        _wr16(d, AD7124_REG_CH0 + i, v);
     }
 
-    /* 内部满量程校准 */
+    /* 2. 切 standby (校准必须从 standby/idle 开始) */
+    _wr16(d, AD7124_REG_ADC_CTRL, base | AD7124_ADC_MODE(AD7124_MODE_STANDBY));
+
+    /* 3. 内部满量程校准 (必须先于零位) */
     _wr16(d, AD7124_REG_ADC_CTRL, base | AD7124_ADC_MODE(AD7124_MODE_CAL_INT_F));
     for (int to = 0; to < 1000; to++) {
         _rd8(d, AD7124_REG_STATUS, &st);
@@ -274,7 +289,19 @@ int ad7124_calibrate(ad7124_t *d, uint8_t ch)
         HAL_Delay(1);
     }
 
-    /* 恢复连续模式 */
+    /* 4. 内部零位校准 */
+    _wr16(d, AD7124_REG_ADC_CTRL, base | AD7124_ADC_MODE(AD7124_MODE_CAL_INT_Z));
+    for (int to = 0; to < 1000; to++) {
+        _rd8(d, AD7124_REG_STATUS, &st);
+        if (!(st & AD7124_STATUS_RDY)) break;
+        HAL_Delay(1);
+    }
+
+    /* 5. 恢复所有通道原状态 */
+    for (int i = 0; i < 8; i++)
+        _wr16(d, AD7124_REG_CH0 + i, saved[i]);
+
+    /* 6. 恢复连续模式 */
     _wr16(d, AD7124_REG_ADC_CTRL, base | AD7124_ADC_MODE(AD7124_MODE_CONT));
     d->adc_mode = AD7124_MODE_CONT;
     return IF_OK;
@@ -284,8 +311,8 @@ int ad7124_calibrate(ad7124_t *d, uint8_t ch)
  * 读单通道转换结果 (24-bit)
  *
  * 启用 DATA_STATUS 时 (ADC_CTRL bit10=1):
- *   读 DATA 返回 4 字节: [STATUS] [DATA23:16] [DATA15:8] [DATA7:0]
- *   CH_ACTIVE 字段指示当前通道.
+ *   读 DATA 返回 4 字节: [DATA23:16] [DATA15:8] [DATA7:0] [STATUS]
+ *   (STATUS 附加在数据之后, CH_ACTIVE 字段指示当前通道)
  *
  * 连续模式: 自动轮询使能的通道, 最多等 4 次 RDY 找到目标通道.
  * 单次模式: 目标通道已选中, 直接读.

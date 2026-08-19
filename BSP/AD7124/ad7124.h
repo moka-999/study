@@ -49,7 +49,7 @@
 #define AD7124_COMM_RA(x)       ((x) & 0x3F)
 
 /* ═══════════════════════════════════════════════════════════════════
- * ID 寄存器 (R, 8-bit, Reset=0x07)
+ * ID 寄存器 (R, 8-bit, Reset=0x02, 官方 no-OS 默认)
  *   [7:4] DEVICE_ID        = 0x0 → AD7124-4, 0x1 → AD7124-8
  *   [3:0] SILICON_REVISION
  * ═══════════════════════════════════════════════════════════════════ */
@@ -179,7 +179,7 @@
 
 /* REF_SEL 值 */
 #define AD7124_REF_EXT1             0   /* REFIN1± (外部基准 1) */
-#define AD7124_REF_EXT2             1   /* REFIN2± (仅 AD7124-8, -4 无效) */
+#define AD7124_REF_EXT2             1   /* REFIN2± (外部基准 2) */
 #define AD7124_REF_INT              2   /* 内部 2.5V 基准       */
 #define AD7124_REF_AVDD             3   /* AVDD-AVSS 作基准     */
 
