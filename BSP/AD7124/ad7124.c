@@ -17,6 +17,13 @@
 #include "ad7124.h"
 #include <string.h>
 
+/* ── 延时 (RTOS 环境可注入 osDelay 让出 CPU, NULL 回退 HAL_Delay 忙等) ── */
+static void _wait_ms(ad7124_t *d, uint32_t ms)
+{
+    if (d->wait_ms) d->wait_ms(ms);
+    else            HAL_Delay(ms);
+}
+
 /* ── CS 控制 ── */
 static void _cs_low(ad7124_t *d)
 { HAL_GPIO_WritePin(d->cs_port, d->cs_pin, GPIO_PIN_RESET); }
@@ -92,7 +99,7 @@ int ad7124_reset(ad7124_t *d)
     _cs_low(d);
     int r = d->spi->send(d->spi, tx, 8);
     _cs_high(d);
-    HAL_Delay(1);
+    _wait_ms(d, 1);
 
     /* 验证复位: 读 STATUS, 检查 POR_FLAG */
     uint8_t st;
@@ -286,7 +293,7 @@ int ad7124_calibrate(ad7124_t *d, uint8_t ch)
     for (int to = 0; to < 1000; to++) {
         _rd8(d, AD7124_REG_STATUS, &st);
         if (!(st & AD7124_STATUS_RDY)) break;
-        HAL_Delay(1);
+        _wait_ms(d, 1);
     }
 
     /* 4. 内部零位校准 */
@@ -294,7 +301,7 @@ int ad7124_calibrate(ad7124_t *d, uint8_t ch)
     for (int to = 0; to < 1000; to++) {
         _rd8(d, AD7124_REG_STATUS, &st);
         if (!(st & AD7124_STATUS_RDY)) break;
-        HAL_Delay(1);
+        _wait_ms(d, 1);
     }
 
     /* 5. 恢复所有通道原状态 */
@@ -322,7 +329,6 @@ int ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw)
 {
     uint8_t rx[4];  /* DATA[23:0] + STATUS (DATA_STATUS 使能时状态字节在后!) */
     int     max_wait = (d->adc_mode == AD7124_MODE_CONT) ? 8 : 1;
-    int32_t val;
 
     for (int attempt = 0; attempt < max_wait; attempt++) {
         /* 等待 RDY (bit7=0 = ready) */
@@ -331,7 +337,7 @@ int ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw)
         for (to = 0; to < 500; to++) {
             if (_rd8(d, AD7124_REG_STATUS, &st) != IF_OK) return IF_ERR;
             if (!(st & AD7124_STATUS_RDY)) break;
-            HAL_Delay(1);
+            _wait_ms(d, 1);
         }
         if (to >= 500) {
             *raw = 0;
@@ -345,10 +351,11 @@ int ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw)
         /* 检查通道匹配: STATUS 在最后一个字节 (AD7124 手册 DATA_STATUS) */
         uint8_t active_ch = rx[3] & 0x0F;
         if (active_ch == ch || d->adc_mode != AD7124_MODE_CONT) {
-            /* 24-bit 符号扩展 */
-            val = ((int32_t)rx[0] << 16) | ((int32_t)rx[1] << 8) | rx[2];
-            if (val & 0x800000) val |= 0xFF000000;   /* 负值扩展 */
-            *raw = val;
+            /* 返回原始 24-bit 码 (0..0xFFFFFF):
+             *   双极性 = offset-binary (0x800000=0V), 单极性 = straight-binary
+             *   电压换算统一由 ad7124_raw_to_voltage/mv() 处理, 此处不做符号扩展 */
+            *raw = ((int32_t)((uint32_t)rx[0] << 16) |
+                    ((uint32_t)rx[1] << 8) | rx[2]);
             return IF_OK;
         }
         /* CH_ACTIVE 不匹配: 连续模式下等待下一次转换 */
@@ -387,7 +394,7 @@ int ad7124_read_all(ad7124_t *d, int32_t *raw, uint8_t max_ch, uint8_t *got)
         for (to = 0; to < 500; to++) {
             if (_rd8(d, AD7124_REG_STATUS, &st) != IF_OK) goto out;
             if (!(st & AD7124_STATUS_RDY)) break;
-            HAL_Delay(1);
+            _wait_ms(d, 1);
         }
         if (to >= 500) goto out;
 
@@ -400,11 +407,9 @@ int ad7124_read_all(ad7124_t *d, int32_t *raw, uint8_t max_ch, uint8_t *got)
         if (active_ch >= d->num_ch || active_ch >= max_ch) continue;
         if (ch_mask & (1 << active_ch)) continue;  /* 已有 */
 
-        /* 24-bit 符号扩展 */
-        int32_t val = ((int32_t)rx[0] << 16) | ((int32_t)rx[1] << 8) | rx[2];
-        if (val & 0x800000) val |= 0xFF000000;
-
-        raw[active_ch] = val;
+        /* 返回原始 24-bit 码 (0..0xFFFFFF), 不做符号扩展 (见 read_ch 注释) */
+        raw[active_ch] = ((int32_t)((uint32_t)rx[0] << 16) |
+                          ((uint32_t)rx[1] << 8) | rx[2]);
         ch_mask |= (1 << active_ch);
         collected++;
     }
@@ -431,10 +436,11 @@ int ad7124_read_error(ad7124_t *d, uint32_t *err_flags)
 /* ═══════════════════════════════════════════════════════════════════
  * 原始值 → 电压 (float)
  *
- * 双极性 (offset binary):
+ * 输入 raw 为 ad7124_read_ch/read_all 返回的原始 24-bit 码 (0..0xFFFFFF):
+ *   双极性 (offset binary): 0x000000=-FS, 0x800000=0V, 0xFFFFFF=+FS
  *   VIN = (code - 2^23) / 2^23 * VREF / GAIN
- * 单极性:
- *   VIN = code / 2^24 * VREF / GAIN
+ * 单极性 (straight binary):
+ *   VIN = code / (2^24-1) * VREF / GAIN
  *
  * vref:    基准电压 (V), 外部=2.5, 内部=2.5
  * pga:     PGA 设置 (0-7, 对应增益 1/2/4/8/16/32/64/128)

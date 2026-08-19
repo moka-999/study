@@ -251,6 +251,7 @@ typedef struct {
     uint8_t       id;            /* ID 寄存器值 (上电后读取)         */
     uint8_t       adc_mode;      /* 当前转换模式 (MODE 字段)         */
     uint8_t       num_ch;        /* 实际使能的通道数 (init 写入)     */
+    void        (*wait_ms)(uint32_t ms);  /* 延时回调, NULL=HAL_Delay 忙等 */
 } ad7124_t;
 
 /* ═══════════════════════════════════════════════════════════════════

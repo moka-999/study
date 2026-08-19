@@ -17,6 +17,10 @@
 
 extern UART_HandleTypeDef huart1;
 
+/* AD7124 轮询等待回调: 注入 vTaskDelay 让出 CPU (HAL_Delay 是 TIM 忙等) */
+static void _adc_wait_ms(uint32_t ms)
+{ vTaskDelay(pdMS_TO_TICKS(ms)); }
+
 static void _uart_puts(const char *s)
 {
     HAL_UART_Transmit(&huart1, (uint8_t *)s, strlen(s), 100);
@@ -123,7 +127,8 @@ static void _test_ad7124(void)
     hspi2.Instance->CFG1 = cfg1_new;
 
     extern spi_if_t spi2_if;
-    ad7124_t adc = { .spi = &spi2_if, .cs_port = GPIOB, .cs_pin = GPIO_PIN_12, .id = 0 };
+    ad7124_t adc = { .spi = &spi2_if, .cs_port = GPIOB, .cs_pin = GPIO_PIN_12,
+                     .id = 0, .wait_ms = _adc_wait_ms };
 
     _uart_puts("[1] Reset (64 SCLK)... ");
     int ret = ad7124_reset(&adc);
