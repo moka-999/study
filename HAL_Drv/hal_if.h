@@ -38,6 +38,7 @@ typedef struct i2c_if {
     int   (*write_reg)(struct i2c_if *bus, uint8_t dev, uint8_t reg, uint8_t  val);
     int   (*read_bytes)(struct i2c_if *bus, uint8_t dev, uint8_t reg,
                         uint8_t *buf, uint16_t len);
+    int   (*write_cmd)(struct i2c_if *bus, uint8_t dev, uint8_t cmd);
     int   (*is_ready)  (struct i2c_if *bus, uint8_t dev);
 } i2c_if_t;
 

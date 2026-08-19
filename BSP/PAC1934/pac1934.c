@@ -21,6 +21,13 @@ static int _write(pac1934_t *d, uint8_t reg, uint8_t val)
     return d->bus->write_reg(d->bus, d->addr, reg, val);
 }
 
+/* ── Send Byte 命令 (REFRESH 系列: 只发命令字节, 无数据, 不触发指针递增写) ── */
+static int _cmd(pac1934_t *d, uint8_t cmd)
+{
+    if (!d || !d->bus || !d->bus->write_cmd) return IF_ERR;
+    return d->bus->write_cmd(d->bus, d->addr, cmd);
+}
+
 /* ── 初始化 ── */
 int pac1934_init(pac1934_t *d, uint8_t ch_mask, uint8_t sample_rate)
 {
@@ -44,8 +51,8 @@ int pac1934_init(pac1934_t *d, uint8_t ch_mask, uint8_t sample_rate)
     if (_write(d, PAC1934_REG_CTRL, ctrl) != IF_OK)
         return IF_ERR;
 
-    /* 启动转换 (00h REFRESH: 复位累加器并开始连续采样) */
-    if (_write(d, PAC1934_REG_REFRESH, 0x00) != IF_OK)
+    /* 启动转换 (00h REFRESH 命令, Send Byte: 复位累加器并开始连续采样) */
+    if (_cmd(d, PAC1934_REG_REFRESH) != IF_OK)
         return IF_ERR;
 
     return IF_OK;
@@ -89,8 +96,8 @@ int pac1934_read_all(pac1934_t *d, pac1934_chan_t *ch)
 
     if (!d || !ch) return IF_ERR;
 
-    /* 刷新 (不复位累加器): 把最新转换结果锁存到结果寄存器 */
-    if (_write(d, PAC1934_REG_REFRESH_V, 0x00) != IF_OK)
+    /* 刷新 (1Fh REFRESH_V 命令, Send Byte: 锁存最新转换结果, 不复位累加器) */
+    if (_cmd(d, PAC1934_REG_REFRESH_V) != IF_OK)
         return IF_ERR;
 
     /* VBUS 1-4 (07h-0Ah, 连续块读 8 字节) */

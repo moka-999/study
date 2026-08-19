@@ -21,6 +21,10 @@ static int _wr(i2c_if_t *b, uint8_t d, uint8_t r, uint8_t v)
 static int _rdm(i2c_if_t *b, uint8_t d, uint8_t r, uint8_t *buf, uint16_t l)
 { if (!b->handle) return IF_ERR; return HAL_I2C_Mem_Read(b->handle,d<<1,r,I2C_MEMADD_SIZE_8BIT,buf,l,100)==HAL_OK?IF_OK:IF_ERR; }
 
+/* ── 命令字节 (Send Byte 协议: START→addr+W→cmd→STOP, 无数据) ── */
+static int _cmd(i2c_if_t *b, uint8_t d, uint8_t c)
+{ if (!b->handle) return IF_ERR; return HAL_I2C_Master_Transmit(b->handle,d<<1,&c,1,100)==HAL_OK?IF_OK:IF_ERR; }
+
 /* ── 设备在线检测 ── */
 static int _rdy(i2c_if_t *b, uint8_t d)
 { if (!b->handle) return IF_ERR; return HAL_I2C_IsDeviceReady(b->handle,d<<1,3,10)==HAL_OK?IF_OK:IF_ERR; }
@@ -35,6 +39,7 @@ i2c_if_t i2c1_if = {
   .read_reg   = _rd,
   .write_reg  = _wr,
   .read_bytes = _rdm,
+  .write_cmd  = _cmd,
   .is_ready   = _rdy,
 };
 
@@ -43,6 +48,7 @@ i2c_if_t i2c2_if = {               /* B2: I2C2 (PF0/1); V2 未配置, handle=NUL
   .read_reg   = _rd,
   .write_reg  = _wr,
   .read_bytes = _rdm,
+  .write_cmd  = _cmd,
   .is_ready   = _rdy,
 };
 
@@ -51,6 +57,7 @@ i2c_if_t i2c3_if = {               /* PH7=SCL, PH8=SDA */
   .read_reg   = _rd,
   .write_reg  = _wr,
   .read_bytes = _rdm,
+  .write_cmd  = _cmd,
   .is_ready   = _rdy,
 };
 
@@ -59,5 +66,6 @@ i2c_if_t i2c4_if = {               /* PF14=SCL, PF15=SDA (V2 引出排针) */
   .read_reg   = _rd,
   .write_reg  = _wr,
   .read_bytes = _rdm,
+  .write_cmd  = _cmd,
   .is_ready   = _rdy,
 };
