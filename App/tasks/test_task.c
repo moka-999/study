@@ -12,6 +12,7 @@
 #include "usart.h"
 #include "ad7124.h"
 #include "tps62868.h"
+#include "ddr_power.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -196,6 +197,28 @@ static void _test_tps62868(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+ * DDR 电源三路验证 (V2: VDD1/i2c1 + VDDQ/i2c4 可测, VDD2/i2c2 未配)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static void _test_ddr_power(void)
+{
+    _uart_puts("--- DDR Power Test (3 rails) ---\r\n");
+    int r = ddr_power_init();
+    _uart_print("init: %s\r\n", r == IF_OK ? "OK" : "PARTIAL");
+    uint16_t mv[3] = { DDR_VDD1_DEFAULT_MV, DDR_VDD2_DEFAULT_MV, DDR_VDDQ_DEFAULT_MV };
+    r = ddr_power_set(DDR_RAIL_MASK_ALL, mv);
+    _uart_print("set all rails: %s\r\n", r == IF_OK ? "OK" : "PARTIAL");
+    for (int i = 0; i < 3; i++) {
+        uint8_t st;
+        if (ddr_power_read_status((uint8_t)i, &st) == IF_OK)
+            _uart_print("rail%d: status=0x%02X\r\n", i, st);
+        else
+            _uart_print("rail%d: NA (bus unavailable)\r\n", i);
+    }
+    _uart_puts("--- DDR POWER TEST DONE ---\r\n\r\n");
+}
+
+/* ═══════════════════════════════════════════════════════════════════
  * 入口
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -217,6 +240,7 @@ void StartTestTask(void *argument)
 
     _test_ad7124();
     _test_tps62868();
+    _test_ddr_power();
 
     _uart_puts("========================================\r\n");
     _uart_puts("  Self Test Complete\r\n");

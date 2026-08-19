@@ -49,6 +49,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/uart_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/i2c_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/bsp_gpio.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/ddr_power.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/pwm_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/qspi_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/spi_hw.c
