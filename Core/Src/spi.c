@@ -41,8 +41,8 @@ void MX_SPI2_Init(void)
   hspi2.Init.Mode = SPI_MODE_MASTER;
   hspi2.Init.Direction = SPI_DIRECTION_2LINES;
   hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi2.Init.CLKPhase = SPI_PHASE_2EDGE;  /* AD7124: SPI mode 1 (CPOL=0, CPHA=1) */
+  hspi2.Init.CLKPolarity = SPI_POLARITY_HIGH;  /* AD7124: SPI mode 3 (CPOL=1, CPHA=1) */
+  hspi2.Init.CLKPhase = SPI_PHASE_2EDGE;       /* 手册: SCLK idle high, 下降沿驱动, 上升沿采样 */
   hspi2.Init.NSS = SPI_NSS_SOFT;
   hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;

@@ -136,8 +136,9 @@ static void _test_ad7124(void)
 
     _uart_puts("[2] Read ID... ");
     ret = ad7124_read_id(&adc);
-    _uart_print("%s (id=0x%02X, exp=0x%02X)\r\n",
-               ret == 0 ? "OK" : "FAIL", adc.id, AD7124_ID_SILICON);
+    _uart_print("%s (id=0x%02X, dev=%d, rev=%d)\r\n",
+               ret == 0 ? "OK" : "FAIL", adc.id,
+               (adc.id >> 4) & 0xF, adc.id & 0x0F);
 
     _uart_puts("[3] Init (config CH0-2, CH3 disabled)... ");
     ret = ad7124_init(&adc);

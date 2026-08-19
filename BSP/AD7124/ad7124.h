@@ -49,15 +49,17 @@
 #define AD7124_COMM_RA(x)       ((x) & 0x3F)
 
 /* ═══════════════════════════════════════════════════════════════════
- * ID 寄存器 (R, 8-bit, Reset=0x02, 官方 no-OS 默认)
+ * ID 寄存器 (R, 8-bit)
  *   [7:4] DEVICE_ID        = 0x0 → AD7124-4, 0x1 → AD7124-8
  *   [3:0] SILICON_REVISION
+ * 注意: Reset 值随硅版本 (手册 Rev.E 表 0x07, 官方 no-OS 默认 0x02),
+ *       只校验 DEVICE_ID, 不校验 revision (以实物芯片为准)
  * ═══════════════════════════════════════════════════════════════════ */
 #define AD7124_ID_DEVICE_MASK   0xF0
 #define AD7124_ID_REV_MASK      0x0F
 #define AD7124_ID_DEVICE_AD7124_4   0x00    /* DEVICE_ID = 0  */
 #define AD7124_ID_DEVICE_AD7124_8   0x10    /* DEVICE_ID = 1  */
-/* 兼容旧代码: 芯片到货后根据实际 revision 调整 */
+/* revision 随硅版本 (手册 0x07 / 官方 0x02), 不校验, 仅参考 */
 #define AD7124_ID_SILICON           0x04
 
 /* ═══════════════════════════════════════════════════════════════════
