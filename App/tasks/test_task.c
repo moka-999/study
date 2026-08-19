@@ -158,6 +158,14 @@ static void _test_ad7124(void)
     _uart_print("%s (got=%d: CH0=%ld CH1=%ld CH2=%ld)\r\n",
                ret == 0 ? "OK" : "FAIL", got, raw_all[0], raw_all[1], raw_all[2]);
 
+    _uart_puts("[6] Voltage with B2 divider (×1.01, REF 2.5V)... ");
+    for (int i = 0; i < got; i++) {
+        int32_t mv = ad7124_raw_to_mv_div(raw_all[i], 2.5f, 0 /*PGA1*/, 0 /*unipolar*/,
+                                          AD7124_DIV_100R_10K);
+        _uart_print("CH%d=%ldmV ", i, mv);
+    }
+    _uart_puts("\r\n");
+
     _uart_puts("--- AD7124 TEST DONE ---\r\n\r\n");
     _uart_puts("  逻辑分析仪验证点:\r\n");
     _uart_puts("  - Reset: CS↓ 8×0xFF CS↑ (64 SCLK)\r\n");

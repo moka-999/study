@@ -470,10 +470,31 @@ float ad7124_raw_to_voltage(int32_t raw, float vref, uint8_t pga, uint8_t bipola
  *            例如 1.8V rail 经 1/2 分压 → vref = 2.5 * 2 = 5.0
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* ═══════════════════════════════════════════════════════════════════
+ * 原始值 → mV (int32_t, 整数, 协议上报用)
+ *
+ * vref 传基准电压 (REFIN1 = 2.5V); 若前端有分压, 用 _div 系列传 divider:
+ *   B2: AIN 输入经 100R+10K 分压 → V_src = V_ADC × (100+10000)/10000
+ *       = V_ADC × 1.01  → divider = AD7124_DIV_100R_10K
+ * ═══════════════════════════════════════════════════════════════════ */
+
 int32_t ad7124_raw_to_mv(int32_t raw, float vref, uint8_t pga, uint8_t bipolar)
 {
     float v = ad7124_raw_to_voltage(raw, vref, pga, bipolar);
     return (int32_t)(v * 1000.0f);
+}
+
+float ad7124_raw_to_voltage_div(int32_t raw, float vref, uint8_t pga,
+                                uint8_t bipolar, float divider)
+{
+    float v = ad7124_raw_to_voltage(raw, vref, pga, bipolar);
+    return v * divider;
+}
+
+int32_t ad7124_raw_to_mv_div(int32_t raw, float vref, uint8_t pga,
+                             uint8_t bipolar, float divider)
+{
+    return (int32_t)(ad7124_raw_to_voltage_div(raw, vref, pga, bipolar, divider) * 1000.0f);
 }
 
 /* ── 读单通道, 直接返回 mV ── */

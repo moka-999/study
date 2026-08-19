@@ -5,7 +5,7 @@
  *
  * 硬件:
  *   阿波罗 V2: SPI2 (PB13=SCK, PB14=MISO, PB15=MOSI, PB12=NCS)
- *   B1:         SPI4 (PE10-14)
+ *   B2 (MB360): SPI4 (PE11=NSS, PE12=SCK, PE13=MISO, PE14=MOSI)
  * 移植: 换 spi_if + cs_port/cs_pin 即可
  *
  * 参考: AD7124-4 datasheet (Rev. D), ADI no-OS ad7124 driver
@@ -296,5 +296,16 @@ int  ad7124_read_error(ad7124_t *d, uint32_t *err_flags);
 /* ── 转换 (芯片到货后根据实际分压比调整 vref/系数) ── */
 float  ad7124_raw_to_voltage(int32_t raw, float vref, uint8_t pga, uint8_t bipolar);
 int32_t ad7124_raw_to_mv(int32_t raw, float vref, uint8_t pga, uint8_t bipolar);
+
+/* ── 带前端分压换算 (B2: AIN 输入经 100R+10K 分压, divider=1.01) ──
+ *   V_src = V_ADC × divider,  divider = (100+10000)/10000 = 1.01
+ *   1.0 = 无分压 (与 raw_to_voltage/mv 等价) */
+float  ad7124_raw_to_voltage_div(int32_t raw, float vref, uint8_t pga,
+                                 uint8_t bipolar, float divider);
+int32_t ad7124_raw_to_mv_div(int32_t raw, float vref, uint8_t pga,
+                             uint8_t bipolar, float divider);
+
+/* B2 三轨前端分压 (VDD1/VDD2/VDDQ 均 100R+10K) */
+#define AD7124_DIV_100R_10K   1.01f
 
 #endif
