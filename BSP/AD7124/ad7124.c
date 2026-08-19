@@ -373,7 +373,7 @@ int ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw)
 
 int ad7124_read_all(ad7124_t *d, int32_t *raw, uint8_t max_ch, uint8_t *got)
 {
-    uint8_t rx[4];     /* STATUS + DATA[23:0] */
+    uint8_t rx[4];     /* DATA[23:0] + STATUS (状态字节在最后) */
     uint8_t collected = 0;
     int     max_wait  = d->num_ch * 4;  /* 最坏每个通道等 4 次转换 */
     uint8_t ch_mask   = 0;             /* bitmask: 已收到哪些通道  */
