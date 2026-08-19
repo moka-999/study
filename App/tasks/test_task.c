@@ -13,6 +13,7 @@
 #include "ad7124.h"
 #include "tps62868.h"
 #include "ddr_power.h"
+#include "pac1934.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -219,6 +220,46 @@ static void _test_ddr_power(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+ * PAC1934T 电流/功率采样验证 (I2C4, 0x2C)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+extern i2c_if_t i2c4_if;
+
+static void _test_pac1934(void)
+{
+    _uart_puts("--- PAC1934T Test (I2C4 0x2C) ---\r\n");
+
+    static pac1934_t pac;
+    pac.bus = &i2c4_if;
+    pac.addr = 0x2C;
+    pac.rsense_uohm = 10000;   /* 0.01Ω */
+
+    /* 初始化: 使能 ch1-3, 禁 ch4, 1024 SPS */
+    int r = pac1934_init(&pac, 0x07, 0);
+    _uart_print("init: %s\r\n", r == IF_OK ? "OK" : "FAIL (ID?)");
+
+    if (r == IF_OK) {
+        /* 等 8 个转换周期后再读 (滚动平均稳定) */
+        vTaskDelay(pdMS_TO_TICKS(50));
+        pac1934_chan_t ch[4];
+        if (pac1934_read_all(&pac, ch) == IF_OK) {
+            for (int i = 0; i < 4; i++) {
+                if (i == 3) { _uart_puts("ch4: disabled\r\n"); continue; }
+                uint32_t mv  = pac1934_vbus_mv(ch[i].vbus);
+                uint32_t ma  = pac1934_current_ma(ch[i].vsense, pac.rsense_uohm);
+                uint32_t mw  = pac1934_power_mw(ch[i].vpower, pac.rsense_uohm);
+                _uart_print("ch%d: %lumV %lumA %lumW (vbus=%u vsense=%u vpow=%lu)\r\n",
+                            i + 1, mv, ma, mw,
+                            ch[i].vbus, ch[i].vsense, (unsigned long)ch[i].vpower);
+            }
+        } else {
+            _uart_puts("read_all: FAIL\r\n");
+        }
+    }
+    _uart_puts("--- PAC1934 TEST DONE ---\r\n\r\n");
+}
+
+/* ═══════════════════════════════════════════════════════════════════
  * 入口
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -241,6 +282,7 @@ void StartTestTask(void *argument)
     _test_ad7124();
     _test_tps62868();
     _test_ddr_power();
+    _test_pac1934();
 
     _uart_puts("========================================\r\n");
     _uart_puts("  Self Test Complete\r\n");
