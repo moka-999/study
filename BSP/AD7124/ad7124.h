@@ -95,16 +95,16 @@
 #define AD7124_ADC_CS_EN            (1 << 9)
 #define AD7124_ADC_DOUT_RDY_DEL     (1 << 12)
 
-/* 工作模式 */
+/* 工作模式 (ADC_CTRL Mode[3:0], bit[5:2]; 与 ADI 官方 no-OS enum ad7124_mode 一致) */
 #define AD7124_MODE_CONT            0   /* 连续转换          */
 #define AD7124_MODE_SINGLE          1   /* 单次转换          */
 #define AD7124_MODE_STANDBY         2   /* 待机              */
 #define AD7124_MODE_POWERDOWN       3   /* 掉电              */
 #define AD7124_MODE_IDLE            4   /* 空闲 (默认)       */
-#define AD7124_MODE_CAL_INT_Z       8   /* 内部零位校准       */
-#define AD7124_MODE_CAL_INT_F       12  /* 内部满量程校准     */
-#define AD7124_MODE_CAL_SYS_Z       16  /* 系统零位校准       */
-#define AD7124_MODE_CAL_SYS_F       20  /* 系统满量程校准     */
+#define AD7124_MODE_CAL_INT_Z       5   /* 内部零位校准       */
+#define AD7124_MODE_CAL_INT_F       6   /* 内部满量程校准     */
+#define AD7124_MODE_CAL_SYS_Z       7   /* 系统零位校准       */
+#define AD7124_MODE_CAL_SYS_F       8   /* 系统满量程校准     */
 
 /* 功耗模式 */
 #define AD7124_PWR_LOW              0
