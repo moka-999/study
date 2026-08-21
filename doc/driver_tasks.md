@@ -48,8 +48,8 @@ V2 不可验证、留给 B2 的：
 > 目标：引脚重映射 + 实测标定 + 与 RK3588 真机联调。
 
 ```
-1. CubeMX 重配引脚（SPI4 PE11-14 / I2C1 PB7-8 / I2C2 PF0-1 / I2C4 PH4-5 / UART4 PA11-12 / USART2 PD5-6）
-2. 新增 i2c_if/spi_if 工厂实例（B1引脚），驱动零改动（hal_if.h设计保证）
+1. ✅ 已建立`b1_pincheck.elf`最终引脚目标（含SPI4 PE11-14 / I2C1 PB7-8 / I2C2 PF0-1 / I2C4 PH4-5 / UART4 PA11-12 / USART2 PD5-6）
+2. B1真板先运行pincheck做波形验收；随后新增i2c_if/spi_if工厂实例并迁入V2已验证模块
 3. 万用表/示波器标定：电源时序、DAC 电压-模式映射
 4. 真机联调：UART4/USART2 → RS0102 → RK3588
 ```
@@ -253,7 +253,7 @@ P24 Table 1已确定0～1.8V的Boot模式目标。3.3V供电下的DAC码可由�
 
 ## 11. 引脚总表（几何法提取 + H743 AF 校验, 20260811 版）
 
-| 功能 | B2 引脚 | 总线/目标 | V2 阶段验证用 |
+| 功能 | B1引脚 | 总线/目标 | V2阶段验证用 |
 |------|---------|-----------|---------------|
 | UART4 (RK UART0_M0) | PA11=RX PA12=TX | RS0102 U4008 | B2 阶段 |
 | USART2 (RK UART2 debug) | PD5=TX PD6=RX | RS0102 U4013 | B2 阶段 |
@@ -264,10 +264,11 @@ P24 Table 1已确定0～1.8V的Boot模式目标。3.3V供电下的DAC码可由�
 | SPI4 | PE11=NSS PE12=SCK PE13=MISO PE14=MOSI | AD7124 U4028 | V2 SPI2 模块 |
 | SPI2 | PB12=NCS PB13=CLK PB14=MISO PB15=MOSI (`MCU_SPI_*`) | B1主↔B2从；B2有8路独立点对点SPI；模式/速率/轮询待双方定义 | V2 Mock+波形 |
 | ETH RMII | PA1/PA2/PA7/PB11/PC1/PC4/PC5/PG13/PG14 | YT8512H | 现用 |
+| ETH PHY复位 | PG12=`ETH_nRST` | 经ETH switch到B1/B2 PHY；PA0是WK-UP | B1 pincheck |
 | pwr_ctrl | PC6=4.0V EN, PC7=3.3V EN, PG11=DDR EN | 上电时序 | V2 GPIO 模拟 |
 | LED | PG0-6 | 三颗双色结果灯（2×LPDDR4/4X + 1×eMCP）+ 单色LED4；另有`CPU_GPIO_PWR`单色LED5 | V2 替代GPIO波形 |
 | SWD | PA13=JTMS PA14=JTCK | | |
 
-> RK复位采用`pwr_ctrl`硬电源循环：PC6控制`VCC4V0_SYS`并为RK806 PMIC断电/上电。当前固件PG12 reboot只能视为Apollo V2历史实现；最终时序待真板验证。
+> RK复位采用`pwr_ctrl`硬电源循环：PC6控制`VCC4V0_SYS`并为RK806 PMIC断电/上电。PG12在B1上是PHY `ETH_nRST`；当前固件PG12 reboot只能视为Apollo V2历史实现，绝不能移植到B1。
 >
 > ⚠️ `doc/b1_mcu_pinout.md` 已过时（USART1 标注为 RK 主通道、I2C2=PH4/5、I2C4=PF14/15 均错），以本表为准。

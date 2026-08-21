@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('build', 'rebuild', 'protocol-test')]
+    [ValidateSet('build', 'rebuild', 'protocol-test', 'b1-check')]
     [string]$Task = 'build'
 )
 
@@ -27,6 +27,12 @@ function Find-Python {
 if ($Task -eq 'protocol-test') {
     $python = Find-Python
     & $python -B -X utf8 (Join-Path $repo 'tests\verify_protocol_v2.py')
+    exit $LASTEXITCODE
+}
+
+if ($Task -eq 'b1-check') {
+    $python = Find-Python
+    & $python -B -X utf8 (Join-Path $repo 'tests\verify_b1_project.py')
     exit $LASTEXITCODE
 }
 

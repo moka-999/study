@@ -29,6 +29,7 @@
 /* USER CODE BEGIN Include for User BSP */
 #include "eth_custom_phy_interface.h"
 #include "led.h"
+#include "board_identity.h"
 
 /* LED 调试：无需串口线，直接看板子上的灯
  * PB0 (LED0): 500ms 闪烁 → 系统正常运行
@@ -286,7 +287,7 @@ static void low_level_init(struct netif *netif)
   heth.Init.RxBuffLen = 1536;
 
   /* USER CODE BEGIN MACADDRESS */
-
+  memcpy(MACAddr, board_mac_address(), sizeof(MACAddr));
   /* USER CODE END MACADDRESS */
 
   hal_eth_init_status = HAL_ETH_Init(&heth);

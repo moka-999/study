@@ -22,7 +22,8 @@
 #include <string.h>
 
 /* ── RK3588 复位 GPIO ──
- * Apollo V2 历史实现。最终板PG12无网络，RK硬复位应通过pwr_ctrl切换PC6，
+ * Apollo V2 历史实现。B1的PG12实际连接PHY ETH_nRST，绝不能用于RK复位；
+ * RK硬复位应通过pwr_ctrl切换PC6，
  * 对VCC4V0_SYS/RK806 PMIC做安全电源循环；迁移完成前不得启用本实现。
  */
 #ifndef RK_RST_PORT

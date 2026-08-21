@@ -17,7 +17,7 @@
 | PB11 | ETH_TX_EN | 发送使能 |
 | PG13 | ETH_TXD0 | 发送数据 |
 | PG14 | ETH_TXD1 | 发送数据 |
-| PA0 | ETH_nRST | PHY 复位 (GPIO) |
+| PG12 | ETH_nRST | PHY复位；PA0是WK-UP，不能用于PHY复位 |
 
 ## UART ↔ RK3588
 | UART | STM32 引脚 | 说明 |

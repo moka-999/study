@@ -134,6 +134,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ⚠️ TPS62868、PAC1934、AD7124 当前是“代码可编译 + 自检入口”；手头没有外接模块，V2 只做 Mock 与逻辑分析仪波形验证
 - ❌ `pwr_ctrl`、MCP4725/Boot 模式、真实 monitor 上报及对应 TLV 命令尚未实现
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
+- ✅ 新增`b1_pincheck.elf`最终引脚适配目标：46/46静态合同通过，PG12已按PHY `ETH_nRST`纠正，V2/B1 MAC策略分离
 - 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`doc/glossary.md`
 
 **下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B1/B2真板验证）
@@ -165,6 +166,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 | pwr_ctrl | **PC6**→MP8759 EN (VCC4V0_SYS 4.0V), **PC7**→RT8070 EN (VCC3V3_SYS 3.3V), **PG11**→3×TPS62868 EN | PC6/PC7顺序按RK3588/RK806和最终原理图要求；PG11使能TPS后通过I2C配置LPDDR三轨 | 延时和掉电顺序待真板测量，旧10/10/50ms不是批准值 |
 | 整机开机 | ATX→B2 standby/LAN Switch后启动site | 两种并列入口：面板PWR键手动开机；上位机经B2 standby远程开机 | 当前24页图没有B1 MCU GPIO到site PWR；远程控制属于B2 standby/未提供图纸，接口待定 |
 | RK硬复位 | PC6→MP8759→VCC4V0_SYS→RK806 PMIC | 通过`pwr_ctrl`做安全掉电/上电；不使用PG12 | P24 `PWRON_L`仅见人工按键，是否需配合触发待真板验证 |
+| PHY复位 | **PG12**→`ETH_nRST`→ETH switch→B1/B2 PHY | B1 pincheck先拉低10ms再释放 | PA0是WK-UP，旧引脚表已修正 |
 | LED | PG0-6 → 2N7002 | 三颗红绿双色结果灯（2×LPDDR4/4X+1×eMCP）+ 单色LED4；另有`CPU_GPIO_PWR`单色LED5 | 红常亮FAIL、绿常亮PASS、橙闪常温测试中、红闪高温测试中；闪烁亮500ms/灭500ms；两颗单色语义待定 |
 | SWD/调试 | PA13=JTMS PA14=JTCK, NRST→MCU_RESET_L, BOOT0 | | |
 | ETH RMII | PA1 REF_CLK / PA2 MDIO / PA7 CRS_DV / PB11 TX_EN / PC1 MDC / PC4 PC5 RXD0/1 / PG13 PG14 TXD0/1 | 经 SN74LVC1G3157×8 可选 B1(核心板)/B2(背板) | YT8512H (P23) |
