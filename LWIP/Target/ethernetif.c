@@ -44,14 +44,10 @@
 /* Within 'USER CODE' section, code will be kept by default at each generation */
 /* USER CODE BEGIN 0 */
 
-/*
- * YT8512C PHY 驱动 (裕泰微电子 百兆以太网PHY)
- * 阿波罗V2开发板通过RMII接口连接STM32H743
+/* YT8512 family RMII PHY: Apollo V2 uses YT8512C, B1 uses YT8512H.
+ * This driver only uses standard Clause 22 registers shared by both parts.
+ * Board-specific reset routing stays in each board BSP.
  */
-
-/* YT8512 扩展寄存器访问：通过 0x1E(页选) + 0x1F(数据) 访问非标准寄存器 */
-#define YT8512_EXT_PAGE_REG    0x1E  /* 扩展页选择寄存器 */
-#define YT8512_EXT_DATA_REG    0x1F  /* 扩展数据寄存器      */
 
 /*
  * ── PHY IO 操作函数：把 HAL 的 MDIO 读写包装成 USER_PHY 框架需要的接口 ──
@@ -59,18 +55,18 @@
 extern ETH_HandleTypeDef heth;
 
 /* PHY 硬件初始化（GPIO/时钟由 HAL_ETH_MspInit 处理，此处无需额外操作） */
-static int32_t YT8512_IO_Init(void)
+static int32_t PHY_IO_Init(void)
 {
   return 0;
 }
 
-static int32_t YT8512_IO_DeInit(void)
+static int32_t PHY_IO_DeInit(void)
 {
   return 0;
 }
 
 /* 通过 MDIO 读取 PHY 寄存器 */
-static int32_t YT8512_IO_ReadReg(uint32_t devAddr, uint32_t regAddr, uint32_t *pVal)
+static int32_t PHY_IO_ReadReg(uint32_t devAddr, uint32_t regAddr, uint32_t *pVal)
 {
   if (HAL_ETH_ReadPHYRegister(&heth, devAddr, regAddr, pVal) != HAL_OK)
     return -1;
@@ -78,7 +74,7 @@ static int32_t YT8512_IO_ReadReg(uint32_t devAddr, uint32_t regAddr, uint32_t *p
 }
 
 /* 通过 MDIO 写入 PHY 寄存器 */
-static int32_t YT8512_IO_WriteReg(uint32_t devAddr, uint32_t regAddr, uint32_t val)
+static int32_t PHY_IO_WriteReg(uint32_t devAddr, uint32_t regAddr, uint32_t val)
 {
   if (HAL_ETH_WritePHYRegister(&heth, devAddr, regAddr, val) != HAL_OK)
     return -1;
@@ -86,7 +82,7 @@ static int32_t YT8512_IO_WriteReg(uint32_t devAddr, uint32_t regAddr, uint32_t v
 }
 
 /* 获取系统 tick (ms)，用于超时判断 */
-static int32_t YT8512_IO_GetTick(void)
+static int32_t PHY_IO_GetTick(void)
 {
   return (int32_t)HAL_GetTick();
 }
@@ -94,11 +90,11 @@ static int32_t YT8512_IO_GetTick(void)
 /* PHY 对象和 IO 接口注册 */
 user_phy_Object_t   UserPhyObj;
 static user_phy_IOCtx_t    UserPhyIOCtx = {
-  .Init     = YT8512_IO_Init,
-  .DeInit   = YT8512_IO_DeInit,
-  .ReadReg  = YT8512_IO_ReadReg,
-  .WriteReg = YT8512_IO_WriteReg,
-  .GetTick  = YT8512_IO_GetTick,
+  .Init     = PHY_IO_Init,
+  .DeInit   = PHY_IO_DeInit,
+  .ReadReg  = PHY_IO_ReadReg,
+  .WriteReg = PHY_IO_WriteReg,
+  .GetTick  = PHY_IO_GetTick,
 };
 
 /* USER CODE END 0 */
@@ -337,7 +333,7 @@ static void low_level_init(struct netif *netif)
 
 /* USER CODE BEGIN low_level_init Code 1 for User BSP */
 
-  /* ── 步骤1: 注册 PHY IO 驱动，初始化 YT8512C ── */
+  /* Register the common Clause 22 PHY interface (YT8512C/YT8512H). */
   USER_PHY_RegisterBusIO(&UserPhyObj, &UserPhyIOCtx);
   if (USER_PHY_Init(&UserPhyObj) != USER_PHY_STATUS_OK)
   {

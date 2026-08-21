@@ -18,7 +18,7 @@ B1 MCU ×8 ──各自独立SPI2(PB12-PB15), 暂定B1主/B2从──► B2 MCU 
 
 B2 MCU由其他同事开发并提供8路独立SPI分别连接8块B1；B1–B2 MCU的模式、速率、轮询和业务协议后续与PC/B1 MCU/RK协议一起冻结。
 
-**软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (YT8512C, RMII) + TLV 协议。
+**软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (Apollo V2=YT8512C，B1=YT8512H，RMII) + TLV 协议。
 
 ---
 
@@ -134,7 +134,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ⚠️ TPS62868、PAC1934、AD7124 当前是“代码可编译 + 自检入口”；手头没有外接模块，V2 只做 Mock 与逻辑分析仪波形验证
 - ❌ `pwr_ctrl`、MCP4725/Boot 模式、真实 monitor 上报及对应 TLV 命令尚未实现
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
-- ✅ 新增`b1_pincheck.elf`最终引脚适配目标：46/46静态合同通过，PG12已按PHY `ETH_nRST`纠正，V2/B1 MAC策略分离
+- ✅ 新增`b1_pincheck.elf`最终引脚适配目标：46/46静态合同通过，PG12已按PHY `ETH_nRST`纠正，V2/B1 MAC及PHY型号策略分离
 - 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`doc/glossary.md`
 
 **下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B1/B2真板验证）

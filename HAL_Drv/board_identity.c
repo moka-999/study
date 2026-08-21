@@ -35,3 +35,12 @@ const uint8_t *board_mac_address(void)
     return mac;
 #endif
 }
+
+board_phy_model_t board_phy_model(void)
+{
+#if BOARD_PROFILE == BOARD_PROFILE_B1
+    return BOARD_PHY_YT8512H;
+#else
+    return BOARD_PHY_YT8512C;
+#endif
+}

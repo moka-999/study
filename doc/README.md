@@ -59,6 +59,7 @@ python -X utf8 tests\full_chain_stress.py
 - TPS料号已确认为U4025=TPS628692A、U4026/U4027=TPS628681A；因子2/1/1，地址0x49/0x41/0x4F。U4026的86.8kΩ按TI标称86.6kΩ档处理。
 - Apollo V2临时用SPI2开发AD7124，而最终SPI2属于B1–B2 MCU链路；必须通过板型构建配置互斥，最终AD7124改用SPI4。
 - Apollo V2保留MAC `00:80:E1:00:00:00`；B1使用STM32 UID生成稳定的本地管理单播MAC，量产MAC/FRU规则冻结后再替换策略。
+- Apollo V2 PHY为YT8512C，B1 PHY为YT8512H；当前两者共用标准Clause 22链路驱动，V2通过PCF8574 P7复位，B1通过PG12 `ETH_nRST`复位。
 - 驱动自检已默认关闭；开发镜像可显式定义`ENABLE_DRIVER_SELF_TEST=1`启用。
 - 新驱动目前只有“编译通过”，不能写成“V2 或 B1/B2 已验证”。
 

@@ -58,11 +58,13 @@ def main() -> int:
     require("0x00, 0x80, 0xE1, 0x00, 0x00, 0x00" in identity, "Apollo V2 MAC changed")
     require("mac[0] = 0x02" in identity and "HAL_GetUIDw0()" in identity,
             "B1 must use a UID-derived locally administered MAC")
+    require("return BOARD_PHY_YT8512H" in identity and "return BOARD_PHY_YT8512C" in identity,
+            "board profiles must select B1 YT8512H and Apollo V2 YT8512C")
 
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     require("add_executable(b1_pincheck" in cmake, "b1_pincheck target missing")
     print(f"B1 pin contract: {len(actual)}/{len(EXPECTED)} signals PASS")
-    print("B1 safe defaults, SPI4 mode 3, and board-specific MAC policy PASS")
+    print("B1 safe defaults, SPI4 mode 3, MAC, and YT8512H board profile PASS")
     return 0
 
 

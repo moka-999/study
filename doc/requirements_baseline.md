@@ -19,6 +19,7 @@
 - CPU 温度、CPU 电压和风扇状态由 RK 采集，再经 MCU–RK 业务协议提供给 MCU/PC。
 - 初版验证目标是 V2 模拟验证，不宣称最终外设或 B1/B2 真板验证。
 - Apollo V2与B1使用不同MAC：V2保持历史固定MAC；B1当前按STM32 UID生成稳定的本地管理单播MAC，量产分配规则可在FRU定义后替换。
+- 以太网PHY型号不同：Apollo V2官方IO表确认为YT8512C，B1最新原理图P23为YT8512H；两者共用当前Clause 22链路驱动，但PHY复位路径必须分板型实现。
 
 ## 2. 初版 MCU 功能范围
 
@@ -65,6 +66,7 @@
 | RK复位 | P18: PC6使能MP8759生成`VCC4V0_SYS`；P12: 该电源给RK806 PMIC供电。P17: PC7控制系统3.3V；P22: PG11控制DDR三轨 | 通过`pwr_ctrl`关闭/开启RK供电实现硬复位；PC7/PC6/PG11顺序和延时待真板验证 |
 | RK PWRON_L | P24仅画出`PWRON_L`经R303接按键SW9到GND，未见MCU GPIO驱动 | 当前不能当作MCU可控信号；是否需要按键模拟待真板联调 |
 | PHY复位 | P21的PG12连接`ETH_nRST`，经ETH切换器到B1/B2 PHY | B1必须用PG12复位PHY；PA0是WK-UP，不能沿用旧引脚表 |
+| PHY型号 | B1 P23标注YT8512H；Apollo V2 IO分配表标注YT8512C | 不是LAN8720/YT8512的区别；两板都是YT8512系列，但型号和复位布线不同 |
 | CPU温度/风扇 | 未发现MCU直连温度或风扇测速信号；风扇由RK PWM控制 | 确认由RK采集，并通过MCU–RK协议上报 |
 | FRU信息 | 无独立FRU EEPROM，W25Q256由B1 MCU管理 | FRU确定存入W25Q256；数据结构和更新策略待定义 |
 | B1–B2 MCU SPI | STM32 SPI2的PB12–PB15以`MCU_SPI_NCS/CLK/MISO/MOSI`引出；B2侧有8路，分别连接8块B1 | 暂定B1主、B2从；模式、速率、轮询周期和业务帧待双方定义 |

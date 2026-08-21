@@ -8,6 +8,8 @@
 - 25 MHz HSE starts the MCU at 400 MHz; oscillator failure stops in `Error_Handler`.
 - Safe GPIO defaults: PC6/PC7/PG11 stay low; SPI chip selects stay high.
 - PHY reset is PG12 (`ETH_nRST`), not PA0.
+- Ethernet PHY is YT8512H. Apollo V2 uses YT8512C; both share the current
+  Clause 22 link driver, but their reset wiring remains board-specific.
 - PG0-PG6 walk one LED every 500 ms for logic-analyzer/visual validation.
 - USART1 sends `B1 final-pin check ready` at 115200 8N1.
 - B1 MAC is stable per MCU UID and uses a locally administered unicast address. Apollo V2 keeps `00:80:E1:00:00:00`.
