@@ -1,0 +1,6 @@
+/build_debug/
+/build/
+*.map
+*.su
+*.o
+*.elf
