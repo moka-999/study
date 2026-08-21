@@ -6,12 +6,11 @@ from tests.verify_protocol_v2 import pack_heartbeat, pack_cmd, crc16_modbus, crc
 
 def cmd_name(cmd):
     m={0x0001:'gtest_start',0x0010:'gtest_end',0x0012:'marchx',0x0013:'marchc-',
-       0x0014:'marchc+',0x0015:'idd_start',0x0024:'idd_end',0x0029:'result_start',
-       0x003D:'result_end',0x003E:'reboot',0x003F:'frame_error'}
+       0x0014:'marchc+',0x0015:'idd_start',0x0024:'idd_end',
+       0x003E:'reboot',0x003F:'frame_error'}
     if cmd in m: return m[cmd]
     if 0x0001<=cmd<=0x0010: return 'gtest_%02d' % (cmd-0x0001)
     if 0x0015<=cmd<=0x0024: return 'idd_%02d' % (cmd-0x0015)
-    if 0x0029<=cmd<=0x003D: return 'result_%02d' % (cmd-0x0029)
     return '0x%04X' % cmd
 
 def ok(v): return "OK" if v else "FAIL"
@@ -74,8 +73,8 @@ def show(name, data, notes=None):
         elif c == 0x003E and len(p) >= 1:
             rst_s = '长复位6s' if p[0] == 1 else '短复位500ms'
             print('        -> %s' % rst_s)
-        elif 0x0029 <= c <= 0x003D and len(p) >= 4:
-            st_s = 'PASS' if p[3] == 1 else ('FAIL (err=0x%02X)' % p[0])
+        elif len(p) == 1 and p[0] in (1, 2, 3, 4):
+            st_s = {1:'PASS', 2:'FAIL', 3:'ACK', 4:'BUSY'}[p[0]]
             print('        -> status=%s' % st_s)
     elif t_type == 0x0000:
         print('    Value   = (空, 心跳无需 Value)')
@@ -123,17 +122,17 @@ if __name__ == '__main__':
           '执行完成后 MCU 直接回 ACK 给 PC',
           'params[0]=0x01 长复位(6s), 0x00=短复位(500ms)'])
 
-    show('例6: 结果帧 -- 测试 PASS (RK -> MCU -> PC)',
-         pack_cmd(0x0029, bytes([0x00,0x00,0x00,0x01]), 100),
+    show('例6: 结果帧 -- 测试 PASS (RK -> MCU -> PC, 响应同 CmdID)',
+         pack_cmd(0x0001, bytes([0x01]), 100),
          ['RK -> USART1 -> MCU: 状态机解析 frame.seq=100',
           'MCU _pending_take(seq=100) -> 取回 pc_seq=100',
           'MCU -> TCP -> PC: 用 pc_seq=100 打包, PC 匹配原始请求',
-          'params[3]=0x01 -> 测试通过'])
+           'params[0]=0x01 -> 测试通过'])
 
-    show('例7: 结果帧 -- 测试 FAIL',
-         pack_cmd(0x0029, bytes([0x01,0x00,0x00,0x00]), 200),
-         ['params[3]=0x00 -> FAIL, params[0]=0x01 -> 错误码',
-          '错误码具体含义由 RK3588 测试程序定义'])
+    show('例7: 结果帧 -- 测试 FAIL (响应同 CmdID)',
+         pack_cmd(0x0001, bytes([0x02]), 200),
+         ['params[0]=0x02 -> FAIL',
+           '更详细错误参数格式待三方协议冻结'])
 
     show('例8: 满载帧 -- 最大参数 1018B (Len=1024)',
          pack_cmd(0x0024, bytes([i & 0xFF for i in range(1018)]), 255),

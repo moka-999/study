@@ -17,7 +17,6 @@
 #include "uart_router.h"
 #include "frame.h"
 #include "hb_task.h"
-#include <string.h>
 
 /* ═══════════════════════════════════════════════════════════════════
  * 全局序列号 (与 rk_task 共享, taskENTER_CRITICAL 保护读写)
@@ -25,12 +24,6 @@
 volatile uint64_t g_rk_seq_counter = 0;
 
 #define HB_INTERVAL_MS  1000
-
-/* ── 简易调试输出 ── */
-static void _dbg(const char *s)
-{
-    uart_send(0, (uint8_t *)s, (uint16_t)strlen(s));
-}
 
 /* ═══════════════════════════════════════════════════════════════════
  * 心跳任务

@@ -31,7 +31,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *h, uint16_t sz)
   /* TLV 协议: 不过滤单字节, 交给上层状态机处理同步/噪声 */
   uart_msg_t m;
   m.len = sz; memcpy(m.data, slots[id].rx, sz);
-  BaseType_t xh;
+  BaseType_t xh = pdFALSE;
   xQueueSendFromISR(slots[id].q, &m, &xh);
   portYIELD_FROM_ISR(xh);
   slots[id].iface->start_rx(slots[id].iface, slots[id].rx, sizeof(slots[id].rx));

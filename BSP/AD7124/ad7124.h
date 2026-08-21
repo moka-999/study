@@ -5,7 +5,7 @@
  *
  * 硬件:
  *   阿波罗 V2: SPI2 (PB13=SCK, PB14=MISO, PB15=MOSI, PB12=NCS)
- *   B2 (MB360): SPI4 (PE11=NSS, PE12=SCK, PE13=MISO, PE14=MOSI)
+ *   B1正式板: SPI4 (PE11=NSS, PE12=SCK, PE13=MISO, PE14=MOSI)
  * 移植: 换 spi_if + cs_port/cs_pin 即可
  *
  * 参考: AD7124-4 datasheet (Rev. D), ADI no-OS ad7124 driver

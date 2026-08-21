@@ -11,8 +11,12 @@ STM32H743 **阿波罗 V2** 板，作为 **TCP server + TLV 协议中继**，把 
 
 **拓扑**：
 ```
-PC ──TCP:8888──► MCU(STM32H743) ──USART1──► RK3588
+PC ──TCP:8888──► MCU(STM32H743) ──逻辑 RK 串口──► RK3588
+                                       └─ 阿波罗 V2: USART1 / B1: UART4 或 USART2（待真机定）
+B1 MCU ×8 ──各自独立SPI2(PB12-PB15), 暂定B1主/B2从──► B2 MCU ──► 全部加热及其他底板级控制
 ```
+
+B2 MCU由其他同事开发并提供8路独立SPI分别连接8块B1；B1–B2 MCU的模式、速率、轮询和业务协议后续与PC/B1 MCU/RK协议一起冻结。
 
 **软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (YT8512C, RMII) + TLV 协议。
 
@@ -51,7 +55,8 @@ PC ──TCP:8888──► MCU(STM32H743) ──USART1──► RK3588
 
 ### 编译
 ```bash
-cd build_debug && ninja
+powershell -ExecutionPolicy Bypass -File tools/dev.ps1 build
+# 全量重建：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 rebuild
 ```
 
 ### 烧录（SWD）— 两步: 先 Bootloader 后 App
@@ -83,8 +88,9 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 
 ### 运行测试
 ```bash
-python tests/stability_test.py
-python tests/full_chain_stress.py
+powershell -ExecutionPolicy Bypass -File tools/dev.ps1 protocol-test  # 离线帧/CRC/状态机模型
+python -X utf8 tests/stability_test.py                                # 需板卡/网络/COM3
+python -X utf8 tests/full_chain_stress.py                             # 需板卡/网络/COM3
 ```
 
 ### 工具依赖分层（换 AI 必读）
@@ -114,28 +120,35 @@ python tests/full_chain_stress.py
 6. **D-Cache 已关** → 无 cache 一致性顾虑，**勿再加 `SCB_InvalidateDCache_by_Addr`**（否则 UsageFault 升级 HardFault）。
 7. **DMA 够不到 DTCMRAM**（DMA 在 D2 域），DMA 缓冲放 AXI SRAM (RAM, 0x24000000)。
 8. **FreeRTOS 堆(128KB)手动挪到 AXI SRAM**（`heap_4.c` 的 `.heap` section + linker），不是 CubeMX 默认位置。
+9. **SPI2按板型互斥**：Apollo V2临时给AD7124开发；最终B1给B2 MCU通信，AD7124改SPI4。两个任务不得同时占用SPI2。
 
 ---
 
 ## 六、当前进度
 
-**阶段：阿波罗 V2 固件调试完成，全链路稳定。**
+**阶段：网关基线历史稳定；B1 电源/采样/Boot 驱动尚未闭环。**
 
-- ✅ 全链路压测 12 场景 **33/33 PASS**，数据零损坏，准确率 100%，吞吐 27~35 帧/s
-- ✅ 稳定性测试 11/11 PASS
-- ✅ 已修复 3 个固件 bug（重传热循环 / 转发丢命令 / ACK回环）+ 多个测试脚本 bug
-- ✅ git 已初始化，推送到 Gitea `LILIHONG/stm32h743`（私有）
+- ✅ 2026-08-14 历史里程碑：阿波罗 V2 全链路压测 33/33、稳定性 11/11（本轮未连接硬件复测）
+- ✅ 2026-08-21：从干净构建目录全量编译成功，生成 `boot.elf` / `test.elf`；离线协议模型 65/65 PASS
+- ✅ 已修复 3 个网关固件 bug（重传热循环 / 转发丢命令 / ACK回环）
+- ⚠️ TPS62868、PAC1934、AD7124 当前是“代码可编译 + 自检入口”；手头没有外接模块，V2 只做 Mock 与逻辑分析仪波形验证
+- ❌ `pwr_ctrl`、MCP4725/Boot 模式、真实 monitor 上报及对应 TLV 命令尚未实现
+- ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
+- 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`doc/glossary.md`
 
-**下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B2真板验证）
-> **两阶段策略**：阶段一 = 阿波罗 V2 开发（所有驱动代码 + 模块级验证, 当前）；阶段二 = B2 真板（B2 到货后：引脚重映射 + 实测标定 + RK 联调）
-1. **pwr_ctrl**（PC6/PC7/PG11 上电时序, 默认 OFF 已确认）— 阻塞所有电源类驱动
-2. **TPS62868**（I2C1/2/4, 地址 0x42-0x44 按 BOM 料号; 与 pwr_on 联动）
-3. **PAC1934T**（I2C4, 0x2C）+ **AD7124**（SPI4 PE11-14, 三轨回读已确认）
-4. ~~加热控制~~（**已取消** 20260817: B1 MCU 不负责加热, 由 PC 操控独立加热模块, 原理图 P18 电路不采用）
-5. **Boot 模式控制**（MCP4725 DAC, I2C2, 0x60 → BOOT_SARADC_IN0, 20260811 新增, 代码 V2 可做）
-6. 拿到驱动真实数据后 → **修订 TLV type 语义**（枚举 vs 结构化）
-7. B1 板到货后：UART4/USART2 从 CH340 切到 RS0102→RK3588 真机联调（**注意不是 USART1**）
-8. 高波特率（460800/921600）DMA+IDLE（等真机 RS0102）
+**下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B1/B2真板验证）
+> **两阶段策略**：阶段一 = 阿波罗 V2 开发（驱动代码 + Mock + 逻辑分析仪波形验证，当前无外接模块）；阶段二 = B1/B2 真板（到货后：引脚重映射 + 实测标定 + RK/B2 MCU 联调）
+1. 冻结 PC/MCU/RK 黄金协议样例（当前实现“响应同 CmdID”，旧协议文档仍有互斥设计）
+2. LED状态语义已冻结：三颗双色灯对应2组LPDDR4/4X和1组eMCP；确认物理灯号顺序及两颗单色状态灯语义
+3. **pwr_ctrl**（PC6/PC7/PG11 上电时序, 默认 OFF 已确认）— 阻塞所有电源类驱动
+4. **TPS62868/69**（A版VSET配置：VDD1/VDD2/VDDQ地址0x49/0x41/0x4F；与pwr_on联动）
+5. **PAC1934T**（I2C4, 0x2C）+ **AD7124**（SPI4 PE11-14，完成Mock/波形验证后待真板标定）
+6. **B1–B2 MCU SPI**（8路点对点，暂定B1主/B2从；B2 MCU负责全部加热和其他底板级控制；其余协议待冻结）
+7. **Boot 模式控制**（MCP4725 DAC, I2C2, 0x60 → BOOT_SARADC_IN0）
+8. **LED结果显示**（3颗双色灯分别显示2组LPDDR4/4X和1组eMCP；另2颗单色灯显示上电/板卡状态，语义待定）
+9. **W25Q256/版本信息**（基础存储和PC查询；初版不实现OTA）
+10. B1 板到货后：UART4/USART2 从 CH340 切到 RS0102→RK3588 真机联调（**注意不是 USART1**）
+11. 高波特率（460800/921600）DMA+IDLE（等真机 RS0102）
 
 ### B2 板原理图（MB360）已解析结论（2026-08，几何法从 PDF 提取）
 
@@ -148,22 +161,24 @@ python tests/full_chain_stress.py
 |------|------|------|------|
 | AD7124 (U4028) | SPI4: PE11=NSS PE12=SCK PE13=MISO PE14=MOSI | AIN0 ← VCC_1V8_S3_LPDDR4X / AIN2 ← VDD2_DDR_S3 / AIN4 ← VDDQ_DDR（导线追踪已确认, 各经 100R+10K+0.1uF 滤波）; AIN1/3/5=AGND, AIN6/7=NC | REFIN1+ ← VCC_2V5 (U4029 RY6211B-25C LDO) |
 | PAC1934T (U204) | I2C4 (PH4=SCL/PH5=SDA) | 地址 **0x2C/0x2D**（ADDRSEL=5.23K→GND） | SENSE1-3: VCC_1V8_S3/VDD2_DDR_S3/VDDQ_DDR 各 0.01Ω; SENSE4 未用 |
-| TPS62868 ×3 | U4025=I2C1, U4026=I2C2, U4027=I2C4 | 输出 VCC_1V8_S3_LPDDR4X(VDD1) / VDD2_DDR_S3(VDD2) / VDDQ_DDR(VDDQ) | EN 全接 **PG11**（各带 R4074/R4080/R4085 10K 下拉 → 默认 OFF）; VIN=VCC4V0_SYS; pin9=PG → **C 版, I2C 地址全部 0x42**（TI Table 8-3; 三颗各在独立 I2C 总线不冲突; x0C/x1C/x2C 仅电压因子 0.5/1/2, 以 BOM 料号为准）; VOS=输出电压采样 |
-| pwr_ctrl | **PC6**→MP8759 EN (VCC4V0_SYS 4.0V), **PC7**→RT8070 EN (VCC3V3_SYS 3.3V), **PG11**→3×TPS62868 EN | EN 均默认 OFF（无上拉）→ 上电序: 12V→5V→(MCU)→3.3V(PC7)→4.0V(PC6)→VDD 轨(PG11)，顺序/延时待实测 | **3V3_MCU 来源原理图无法定位**（全板无独立 3.3V 稳压器、无 VCC3V3_SYS↔3V3_MCU 0R；且 EN 默认 OFF 与自举矛盾 → 必有独立路径, 须实测/等 B2 板） |
-| LED | PG0-6 → 2N7002 → LED1-7 | 3V3_MCU 域 | |
+| TPS62868/69 ×3 | U4025=I2C1, U4026=I2C2, U4027=I2C4 | VDD1 / VDD2 / VDDQ | U4025 **TPS628692A**+56.2kΩ→因子2/启动1.60V/0x49；U4026 **TPS628681A**+86.8kΩ（TI 86.6kΩ档）→因子1/0.90V/0x41；U4027 **TPS628681A**+15.4kΩ→因子1/0.50V/0x4F |
+| pwr_ctrl | **PC6**→MP8759 EN (VCC4V0_SYS 4.0V), **PC7**→RT8070 EN (VCC3V3_SYS 3.3V), **PG11**→3×TPS62868 EN | PC6/PC7顺序按RK3588/RK806和最终原理图要求；PG11使能TPS后通过I2C配置LPDDR三轨 | 延时和掉电顺序待真板测量，旧10/10/50ms不是批准值 |
+| 整机开机 | ATX→B2 standby/LAN Switch后启动site | 两种并列入口：面板PWR键手动开机；上位机经B2 standby远程开机 | 当前24页图没有B1 MCU GPIO到site PWR；远程控制属于B2 standby/未提供图纸，接口待定 |
+| RK硬复位 | PC6→MP8759→VCC4V0_SYS→RK806 PMIC | 通过`pwr_ctrl`做安全掉电/上电；不使用PG12 | P24 `PWRON_L`仅见人工按键，是否需配合触发待真板验证 |
+| LED | PG0-6 → 2N7002 | 三颗红绿双色结果灯（2×LPDDR4/4X+1×eMCP）+ 单色LED4；另有`CPU_GPIO_PWR`单色LED5 | 红常亮FAIL、绿常亮PASS、橙闪常温测试中、红闪高温测试中；闪烁亮500ms/灭500ms；两颗单色语义待定 |
 | SWD/调试 | PA13=JTMS PA14=JTCK, NRST→MCU_RESET_L, BOOT0 | | |
 | ETH RMII | PA1 REF_CLK / PA2 MDIO / PA7 CRS_DV / PB11 TX_EN / PC1 MDC / PC4 PC5 RXD0/1 / PG13 PG14 TXD0/1 | 经 SN74LVC1G3157×8 可选 B1(核心板)/B2(背板) | YT8512H (P23) |
-| SPI2 (PB12-15, MCU_SPI_*) | → DIMM314 → RK 核心板 | 用途待定（非 AD7124） | |
+| SPI2 (PB12-15, MCU_SPI_*) | B1主 ↔ B2从（暂定） | B2有8路独立SPI分别连接8块B1；用于加热/底板控制，模式、速率、轮询和帧协议待定义 | |
 
-> **风扇/加热与 MCU 无关**：风扇 PWM12_M1_FAN = RK3588 自控（P14, Q3/Q2→J15）；P24 "VCC_24V 软开关输出"（疑老化加热电源）由 RK PWRON_L 控制。MCU 只管 PC6/PC7/PG11。原理图源文件 `docs/MYZR-RK3588-ZUOYI_SCH_20260807-.pdf`（原文件名为 ...20260803-(2)，内容即最新版）。
+> **职责边界**：风扇PWM由RK3588控制；全部加热和其他底板级控制由B2 MCU负责，B1 MCU只通过SPI交换命令/状态。P24的“VCC_24V软开关输出”与上方人工按键`PWRON_L`不是同一网络。B1 MCU主电源控制引脚是PC6/PC7/PG11。
 
 ### 原理图 20260811 版新增（docs/MYZR-RK3588-ZUOYI_SCH_20260811.pdf, 当前最新）
 
-> ⚠️ 修正(20260817)：~~加热是 MCU 控制的~~ → **加热已确认不由 MCU 负责**（由 PC 独立加热模块控制, P18 电路不采用）。**优先用本版分析**，与 20260807 版差异如下：
+> ⚠️ 职责修正：P18虽画出PH8/PH9/PH10候选加热电路，但B1 MCU固件不负责加热；全部加热归B2 MCU。**优先用本版分析**，与20260807版差异如下：
 
 | 新增电路 | 内容 | MCU 影响 |
 |----------|------|----------|
-| ~~加热控制 (P18)~~ | MCU **PH8/PH9/PH10** → Q19/Q21/Q23 (2N7002) → R7277-7284 (470K) → Q18/Q20/Q22 (Si7129DN N-MOS) → **G88MP04102KEU 加热片×3**（VCC12V_DCIN 供电, J32/J33/J34 接口, 47uF 滤波） | **不采用 (20260817)**：B1 MCU 不负责加热, 由 PC 独立加热模块控制 |
+| 加热候选电路 (P18) | **PH8/PH9/PH10** → Q19/Q21/Q23 → Q18/Q20/Q22 → 加热片×3 | 不作为B1 MCU固件需求；实际加热由B2 MCU统一控制 |
 | **引导模式控制 (P24)** | **U4030 MCP4725A0 DAC** (SOT23-6): VDD=3V3_MCU, A0→GND(**地址 0x60**), SCL/SDA ← R7286/R7287(0R) ← **I2C2**（与 TPS62868 U4026 同总线）; VOUT → R7288(0R) → **BOOT_SARADC_IN0** → RK3588 (p<6>) | **MCU 写 DAC 电压 → 选 RK3588 引导模式**: 0V=USB / 0.3V=SD / 0.6V=EMMC / 0.9V=FSPI M0 / 1.2V=FSPI M1 / 1.5V=FSPI M2 / 1.8V=EMMC-SD（TABLE 1, 100K 上拉域）。另有 SARADC_VIN1_KEY/RECOVERY 电阻阶梯 (LEVEL1-7) + MASKROM_Key (J36/J37) |
 | 连接器 | 40x2 头子 → **FX18-60P-08SV10 (30x2=60pin)** ×2；新增 J35 (CXC01L3Z) | |
 | P22 | PAC1934T 采样路径新增 R7268-7271 (4×0402, 值未提取) | |

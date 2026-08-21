@@ -21,7 +21,10 @@
 #include "timers.h"
 #include <string.h>
 
-/* ── RK3588 复位 GPIO ── */
+/* ── RK3588 复位 GPIO ──
+ * Apollo V2 历史实现。最终板PG12无网络，RK硬复位应通过pwr_ctrl切换PC6，
+ * 对VCC4V0_SYS/RK806 PMIC做安全电源循环；迁移完成前不得启用本实现。
+ */
 #ifndef RK_RST_PORT
 #define RK_RST_PORT  GPIOG
 #define RK_RST_PIN   GPIO_PIN_12

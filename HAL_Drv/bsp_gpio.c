@@ -1,10 +1,9 @@
 /*
  * ===================================================================
- * 板级 GPIO 映射实现 — 双引脚表 (阿波罗V2 测试 ↔ B2 正式)
+ * 板级 GPIO 映射实现 — 双引脚表 (阿波罗V2 测试 ↔ B1 正式)
  * ===================================================================
  *
- * 引脚表由 GPIO_USE_B2 宏切换, 两张表语义一一对应,
- * B2 板到货后只需把宏翻成 1 重新编译, 调用方零改动。
+ * 引脚表由 GPIO_USE_B1 宏切换, 两张表语义一一对应。
  * ===================================================================
  */
 #include "bsp_gpio.h"
@@ -15,8 +14,8 @@ typedef struct {
     uint16_t      pin;
 } gpio_pin_t;
 
-#if GPIO_USE_B2
-/* ── B2 正式引脚表 (原理图 20260811 版) ── */
+#if GPIO_USE_B1
+/* ── B1 正式引脚表 (原理图 20260811 版) ── */
 static const gpio_pin_t _pins[GPIO_FUNC_COUNT] = {
     [GPIO_FUNC_PWR_4V0_EN] = { GPIOC, GPIO_PIN_6  },  /* MP8759 EN */
     [GPIO_FUNC_PWR_3V3_EN] = { GPIOC, GPIO_PIN_7  },  /* RT8070 EN */
@@ -40,7 +39,7 @@ void bsp_gpio_init(void)
         g.Pin   = _pins[i].pin;
         g.Mode  = GPIO_MODE_OUTPUT_PP;
         g.Pull  = GPIO_NOPULL;
-        g.Speed = GPIO_SPEED_FREQ_LOW;   /* 电源/加热开关, 无需高速 */
+        g.Speed = GPIO_SPEED_FREQ_LOW;   /* 电源开关，无需高速 */
         HAL_GPIO_Init(_pins[i].port, &g);
         HAL_GPIO_WritePin(_pins[i].port, _pins[i].pin, GPIO_PIN_RESET);
     }

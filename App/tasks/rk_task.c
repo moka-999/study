@@ -1,6 +1,6 @@
 /*
  * ===================================================================
- * RK 通信任务 — MCU Master, USART1 ↔ RK3588 (TLV 协议)
+ * RK 通信任务 — MCU Master, 逻辑串口 ↔ RK3588 (TLV 协议)
  * ===================================================================
  *
  * 职责:
@@ -15,9 +15,9 @@
  *   g_rk_seq_counter — MCU→RK3588 统一序列号 (心跳 + 命令帧)
  *   pc_seq           — PC 帧的原始序列号, 响应时回传以匹配 PC 端
  *
- * USART1:
- *   阿波罗 V2: CH340→PC (用于协议对测)
- *   B1:        RS0102→RK3588 (真实通信)
+ * 当前 uart_router slot 0:
+ *   阿波罗 V2: USART1 + CH340→PC (用于协议对测)
+ *   B1:        需切换为 UART4 或 USART2 + RS0102→RK3588（待真机确认）
  * ===================================================================
  */
 #include "main.h"
@@ -85,13 +85,14 @@ static int _pending_has_slot(void)
     return 0;
 }
 
-static uint64_t _pending_take(uint64_t seq)
+static int _pending_take(uint64_t seq, uint64_t *pc_seq)
 {
+    if (!pc_seq) return 0;
     for (int i = 0; i < 4; i++) {
         if (_pending[i].active && _pending[i].seq == seq) {
-            uint64_t pc = _pending[i].pc_seq;
+            *pc_seq = _pending[i].pc_seq;
             _pending[i].active = 0;
-            return pc;
+            return 1;
         }
     }
     return 0;
@@ -152,9 +153,9 @@ void StartRkTask(void *argument)
 
                         } else if (unit->type == TLV_TYPE_CMD) {
                             /* RK 响应 (相同 CmdID): 匹配 pending, 取回 PC 原始 seq */
-                            uint64_t pc_seq = _pending_take(frame.sequence);
+                            uint64_t pc_seq;
 
-                            if (pc_seq != 0) {
+                            if (_pending_take(frame.sequence, &pc_seq)) {
                                 /* 匹配成功: RK3588 响应 → 回传 PC */
                                 if (rkToPc_Queue) {
                                     const uint8_t *d = tlv_unit_get_data(&frame, unit);

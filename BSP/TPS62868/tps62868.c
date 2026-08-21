@@ -21,7 +21,7 @@ int tps62868_write_reg(tps62868_t *d, uint8_t reg, uint8_t val)
     return d->bus->write_reg(d->bus, d->addr, reg, val);
 }
 
-/* ── 地址扫描 (C 版固定 0x42, 但保留通用扫描) ── */
+/* ── 地址扫描 (A 版 VSET/PG 可选地址范围 0x40..0x4F) ── */
 int tps62868_scan(i2c_if_t *bus, uint8_t *addrs, uint8_t max)
 {
     uint8_t found = 0;

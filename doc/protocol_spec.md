@@ -1,3 +1,5 @@
+> **状态警告（2026-08-21）**：本文是旧的STM32–RK UART协议提案，不是当前固件的权威协议。文中的 `Type=0x5002`、高 4 位类型 + 低 12 位 Tag、结果 CmdID 等内容与现有 C/Python 实现存在冲突，也不包含新增的B1 MCU–B2 MCU SPI链路。当前差异和冻结条件见 [`adr/0001-protocol-contract.md`](adr/0001-protocol-contract.md)。
+
 STM32 与 RK3588 UART通信协议规范
 
 1. 文档概述

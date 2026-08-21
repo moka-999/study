@@ -14,14 +14,19 @@ static int _init(flash_if_t *f) { (void)f; return qspi_init(); }
 
 /* ── 读取 ── */
 static int _read(flash_if_t *f, uint32_t a, uint8_t *b, uint32_t l)
-{ (void)f; return qspi_read_data(a, b, l); }
+{
+    (void)f;
+    if (!l) return IF_OK;
+    if (!b || a >= W25Q_CAPACITY || l > W25Q_CAPACITY - a) return IF_ERR;
+    return qspi_read_data(a, b, l);
+}
 
 /* ── 写入 (RMW) ── */
 static int _write(flash_if_t *f, uint32_t addr, const uint8_t *buf, uint32_t len)
 {
     (void)f;
-    if (!len) return 0;
-    if (addr >= W25Q_CAPACITY || addr + len > W25Q_CAPACITY) return IF_ERR;
+    if (!len) return IF_OK;
+    if (!buf || addr >= W25Q_CAPACITY || len > W25Q_CAPACITY - addr) return IF_ERR;
 
     uint32_t ss = addr & ~(W25Q_SECTOR_SIZE - 1);
     uint32_t se = (addr + len + W25Q_SECTOR_SIZE - 1) & ~(W25Q_SECTOR_SIZE - 1);
@@ -45,7 +50,8 @@ static int _write(flash_if_t *f, uint32_t addr, const uint8_t *buf, uint32_t len
 static int _erase(flash_if_t *f, uint32_t addr, uint32_t len)
 {
     (void)f;
-    if (!len) return 0;
+    if (!len) return IF_OK;
+    if (addr >= W25Q_CAPACITY || len > W25Q_CAPACITY - addr) return IF_ERR;
     uint32_t st = addr & ~(W25Q_SECTOR_SIZE - 1);
     uint32_t ed = (addr + len + W25Q_SECTOR_SIZE - 1) & ~(W25Q_SECTOR_SIZE - 1);
     if (ed > W25Q_CAPACITY) ed = W25Q_CAPACITY;

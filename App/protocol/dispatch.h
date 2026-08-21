@@ -9,15 +9,14 @@
  *            └─ 测试命令 (0x0001-0x0024) → pcToRk_Queue → rk_task → RK3588
  *                                          MCU 先回 ACK → PC
  *
- *   RK→MCU:  结果帧 (0x0029-0x003D) → rkToPc_Queue → TCP → PC
+ *   RK→MCU:  响应帧 (与请求相同 CmdID) → rkToPc_Queue → TCP → PC
  *
  * CmdID 空间 (2字节, Value[0:2]):
  *   0x0001-0x0010  测试命令 (gtest-*)
  *   0x0011         reserved
  *   0x0012-0x0014  March 测试
  *   0x0015-0x0024  IDD 测试
- *   0x0025-0x0028  reserved
- *   0x0029-0x003D  结果帧
+ *   0x0025-0x003D  reserved
  *   0x003E         重启 RK3588
  *   0x003F         帧错误通知
  *   0x0040-0xFFFF  后续拓展

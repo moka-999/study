@@ -24,8 +24,7 @@ def pkt(d, label, data, note=''):
         elif c==0x0012: detail+=' [marchx]'
         elif c==0x003E: detail+=' [reboot]'
         elif c==0x003F: detail+=' [frame_error]'
-        elif 0x0029<=c<=0x003D: detail+=' [result] %s' % ('PASS' if len(val)>5 and val[5]==1 else 'FAIL')
-        is_ack = (len(val)>2 and val[2]==0x03 and c not in (0x0029,0x002A,0x002B,0x002C,0x002D,0x002E,0x002F,0x0030,0x0031,0x0032,0x0033,0x0034,0x0035,0x0036,0x0037,0x0038,0x0039,0x003A,0x003B,0x003C,0x003D,0x003F))
+        is_ack = (len(val)>2 and val[2]==0x03 and c != 0x003F)
         if is_ack: detail+=' ACK=0x03'
     if note: detail+=(' | ' if detail else '') + note
     print('  %-7s %-25s | %s  seq=%-5d Len=%-4d' % (d, label, data.hex(), seq, plen))
@@ -46,32 +45,35 @@ pkt('RK→MCU','[心跳]', pack_heartbeat(rk_seq)); rk_seq+=1
 hr('Phase 2: PC发起 gtest_start (LPDDR4内存测试)')
 pkt('PC→MCU','[命令] gtest_start', pack_cmd(0x0001, b'\x01\x00\x00\x80', pc_seq))
 pkt('MCU→PC','[ACK]  gtest_start', pack_cmd(0x0001, b'\x03', pc_seq), 'echo pc_seq=0x%04X'%pc_seq)
-pkt('MCU→RK','[转发] gtest_start', pack_cmd(0x0001, b'\x01\x00\x00\x80', mcu_seq), 'rk_seq=%d, 加入pending'%mcu_seq); mcu_seq+=1
+gtest_rk_seq=mcu_seq
+pkt('MCU→RK','[转发] gtest_start', pack_cmd(0x0001, b'\x01\x00\x00\x80', gtest_rk_seq), 'rk_seq=%d, 加入pending'%gtest_rk_seq); mcu_seq+=1
 
 # ═══ Phase 3 ═══
 hr('Phase 3: RK测试完成, 返回结果')
-pkt('RK→MCU','[结果] gtest_result', pack_cmd(0x0029, b'\x00\x00\x00\x01', pc_seq))
-pkt('MCU→PC','[上报] gtest_result', pack_cmd(0x0029, b'\x00\x00\x00\x01', pc_seq), 'PC匹配 pc_seq=0x%04X'%pc_seq)
+pkt('RK→MCU','[结果] gtest_result', pack_cmd(0x0001, b'\x01', gtest_rk_seq), '响应同CmdID, echo rk_seq')
+pkt('MCU→PC','[上报] gtest_result', pack_cmd(0x0001, b'\x01', pc_seq), 'MCU换回 pc_seq=0x%04X'%pc_seq)
 pc_seq+=1
 
 # ═══ Phase 4 ═══
 hr('Phase 4: marchx 无参命令 (最短命令帧 22B)')
 pkt('PC→MCU','[命令] marchx', pack_cmd(0x0012, b'', pc_seq))
 pkt('MCU→PC','[ACK]  marchx', pack_cmd(0x0012, b'\x03', pc_seq))
-pkt('MCU→RK','[转发] marchx', pack_cmd(0x0012, b'', mcu_seq)); mcu_seq+=1
-pkt('RK→MCU','[结果] marchx_result', pack_cmd(0x002B, b'\x00\x00\x00\x01', pc_seq))
-pkt('MCU→PC','[上报] marchx_result', pack_cmd(0x002B, b'\x00\x00\x00\x01', pc_seq))
+march_rk_seq=mcu_seq
+pkt('MCU→RK','[转发] marchx', pack_cmd(0x0012, b'', march_rk_seq)); mcu_seq+=1
+pkt('RK→MCU','[结果] marchx_result', pack_cmd(0x0012, b'\x01', march_rk_seq))
+pkt('MCU→PC','[上报] marchx_result', pack_cmd(0x0012, b'\x01', pc_seq))
 pc_seq+=1
 
 # ═══ Phase 5 ═══
 hr('Phase 5: 超时重传 (500ms 无响应)')
 pkt('PC→MCU','[命令] gtest_03', pack_cmd(0x0003, b'\x01\x10\x00\x00', pc_seq))
 pkt('MCU→PC','[ACK]  gtest_03', pack_cmd(0x0003, b'\x03', pc_seq))
-pkt('MCU→RK','[转发] gtest_03', pack_cmd(0x0003, b'\x01\x10\x00\x00', mcu_seq)); mcu_seq+=1
+retry_rk_seq=mcu_seq
+pkt('MCU→RK','[转发] gtest_03', pack_cmd(0x0003, b'\x01\x10\x00\x00', retry_rk_seq)); mcu_seq+=1
 print('  %-7s %-25s | %s' % ('  ...', '500ms 超时, RK无响应...', '(重传)'))
-pkt('MCU→RK','[重传] gtest_03', pack_cmd(0x0003, b'\x01\x10\x00\x00', mcu_seq), '退避200ms, 重试1/3'); mcu_seq+=1
-pkt('RK→MCU','[结果] gtest_03_result', pack_cmd(0x002B, b'\x00\x00\x00\x01', pc_seq))
-pkt('MCU→PC','[上报] gtest_03_result', pack_cmd(0x002B, b'\x00\x00\x00\x01', pc_seq))
+pkt('MCU→RK','[重传] gtest_03', pack_cmd(0x0003, b'\x01\x10\x00\x00', retry_rk_seq), '同一rk_seq, 重试1/3')
+pkt('RK→MCU','[结果] gtest_03_result', pack_cmd(0x0003, b'\x01', retry_rk_seq))
+pkt('MCU→PC','[上报] gtest_03_result', pack_cmd(0x0003, b'\x01', pc_seq))
 pc_seq+=1
 
 # ═══ Phase 6 ═══

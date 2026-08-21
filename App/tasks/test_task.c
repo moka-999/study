@@ -183,16 +183,20 @@ static void _test_ad7124(void)
 static void _test_tps62868(void)
 {
     extern i2c_if_t i2c1_if;
+    int vdd1_found = 0;
 
     _uart_puts("--- TPS62868 Test (I2C1, scan 0x40-0x4F) ---\r\n");
     uint8_t addrs[16];
     int n = tps62868_scan(&i2c1_if, addrs, 16);
     _uart_print("scan: %d device(s):", n);
-    for (int i = 0; i < n; i++) _uart_print(" 0x%02X", addrs[i]);
+    for (int i = 0; i < n; i++) {
+        _uart_print(" 0x%02X", addrs[i]);
+        if (addrs[i] == TPS62868_ADDR_VDD1) vdd1_found = 1;
+    }
     _uart_puts("\r\n");
 
-    if (n > 0) {
-        tps62868_t tp = { .bus = &i2c1_if, .addr = TPS62868_ADDR,
+    if (vdd1_found) {
+        tps62868_t tp = { .bus = &i2c1_if, .addr = TPS62868_ADDR_VDD1,
                           .factor_x10 = TPS62868_FACTOR_2X0 };
         uint8_t st;
         _uart_puts("set_vout1(1800mV, factor=2)... ");
@@ -201,6 +205,8 @@ static void _test_tps62868(void)
         _uart_puts("read_status... ");
         _uart_print("%s (0x%02X)\r\n",
                     tps62868_read_status(&tp, &st) == IF_OK ? "OK" : "FAIL", st);
+    } else {
+        _uart_puts("VDD1 device 0x49 not found; skip register writes.\r\n");
     }
     _uart_puts("--- TPS62868 TEST DONE ---\r\n\r\n");
 }

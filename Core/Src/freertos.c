@@ -146,9 +146,11 @@ void MX_FREERTOS_Init(void) {
 
 
   
-  /* 驱动自检: 优先级 3 (低于 WDT 的 25, 确保喂狗能跑) */
+#if defined(ENABLE_DRIVER_SELF_TEST) && ENABLE_DRIVER_SELF_TEST
+  /* 驱动自检仅用于开发镜像，生产构建默认不创建。 */
   extern void StartTestTask(void *argument);
   xTaskCreate(StartTestTask, "drvTest", 1024, NULL, 3, NULL);
+#endif
   /* QSPI Flash 独立测试 */
   //extern void StartQspiTestTask(void *argument);
   //xTaskCreate(StartQspiTestTask, "qspiTest", 1024, NULL, 3, NULL);

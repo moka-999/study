@@ -10,8 +10,10 @@
  *   EN 全部接 PG11 (10K 下拉 → 默认 OFF, 需先 pwr_ctrl 上电)
  *   VIN = VCC4V0_SYS
  *
- * 器件版本 (料号后缀):  地址固定 0x42 (Table 8-3, C 版出厂固定)
- *   因子: x0C=0.5 / x1C=1 / x2C=2   (三颗都在独立 I2C 总线, 地址相同不冲突)
+ * 器件版本 (A 版, VSET/PG 电阻启动配置):
+ *   U4025: TPS628692A, 56.2k, factor=2, 启动1.60V, 地址0x49
+ *   U4026: TPS628681A, 86.8k(对应TI 86.6k档), factor=1, 启动0.90V, 地址0x41
+ *   U4027: TPS628681A, 15.4k, factor=1, 启动0.50V, 地址0x4F
  *
  * VOUT 换算 (Table 8-6/8-7):
  *   VOUT = (400 + 5*code) * factor mV,  code = (VOUT/factor - 400)/5
@@ -25,7 +27,7 @@
  *                    bit4=FPWM, bit3=output-discharge, bit2=HICCUP, bit1:0=ramp)
  *   0x05 STATUS   R  (bit4=thermal-warning>130C, bit3=HICCUP, bit0=UVLO; 读后清)
  *
- * V2 验证: 模块挂 I2C1 (i2c1_if, 0x42)
+ * V2 验证: 当前无外接模块，只做Mock与I2C波形；真实回读留到最终板
  * B2:      三颗分别挂 i2c1_if/i2c2_if/i2c4_if (需补 I2C2 外设配置 + i2c2_if)
  * ===================================================================
  */
@@ -40,10 +42,12 @@
 #define TPS62868_REG_CONTROL    0x03
 #define TPS62868_REG_STATUS     0x05
 
-/* C 版 I2C 地址 (出厂固定) */
-#define TPS62868_ADDR           0x42
+/* A 版地址由 VSET/PG 电阻决定，三路分别定义，禁止共用单一地址。 */
+#define TPS62868_ADDR_VDD1      0x49
+#define TPS62868_ADDR_VDD2      0x41
+#define TPS62868_ADDR_VDDQ      0x4F
 
-/* 电压因子 (x10 整数避免浮点): x0C=5, x1C=10, x2C=20 */
+/* 电压因子 (x10 整数避免浮点): x0=5, x1=10, x2=20 */
 #define TPS62868_FACTOR_0X5     5
 #define TPS62868_FACTOR_1X0     10
 #define TPS62868_FACTOR_2X0     20
@@ -68,7 +72,7 @@
 
 typedef struct {
     i2c_if_t *bus;       /* I2C 总线接口 (i2c1_if/i2c2_if/i2c4_if) */
-    uint8_t   addr;      /* I2C 地址, C 版固定 0x42                  */
+    uint8_t   addr;      /* I2C 7-bit 地址，由 VSET/PG 电阻决定       */
     uint8_t   factor_x10; /* 电压因子 x10 (5/10/20, 按 BOM 料号)     */
     uint8_t   ctl_cache; /* CONTROL 软件镜像 (write-only 寄存器, 默认 0x6F) */
 } tps62868_t;

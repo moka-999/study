@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-TLP v2.0 协议验证 — 纯 Python 复刻 C 实现
+TLV v2.0 协议验证 — 纯 Python 复刻 C 实现
 ===========================================
-逐行对应 frame.c / state_machine.c / crc.c 的逻辑。
+逐行复刻 frame.c / state_machine.c / crc.c 的逻辑，但不编译或链接 C 源码。
+它验证当前帧模型，不等于硬件全链路测试或三方协议已经冻结。
 
 用法:
     python verify_protocol_v2.py              # 全量自测
@@ -99,7 +100,6 @@ CMD_IDS = {
     0x0001: "gtest_start",  0x0010: "gtest_end",
     0x0012: "marchx",       0x0013: "marchc-",    0x0014: "marchc+",
     0x0015: "idd_start",    0x0024: "idd_end",
-    0x0029: "result_start", 0x003D: "result_end",
     0x003E: "reboot",       0x003F: "frame_error",
 }
 
@@ -114,8 +114,6 @@ def _cmd_name(cmd: int) -> str:
         return f"gtest_{cmd-0x0001:02d}"
     if 0x0015 <= cmd <= 0x0024:
         return f"idd_{cmd-0x0015:02d}"
-    if 0x0029 <= cmd <= 0x003D:
-        return f"result_{cmd-0x0029:02d}"
     return f"cmd_0x{cmd:04X}"
 
 
@@ -698,9 +696,9 @@ def test_roundtrip():
     mcu_hb2 = pack_heartbeat(mcu_seq); mcu_seq += 1
 
     # RK3588 解析后执行, 返回 result
-    rk_result = pack_cmd(0x0029, bytes([0x00]), seq=pc_seq)  # echo pc_seq
+    rk_result = pack_cmd(0x0001, bytes([0x01]), seq=pc_seq)  # 当前实现: 响应同 CmdID
     frame4 = unpack_frame(rk_result[5:], (rk_result[1]<<8)|rk_result[2])
-    check("场景2: RK 结果帧 cmd=0x0029", frame4 and frame4['units'][0]['cmd'] == 0x0029)
+    check("场景2: RK 响应帧 cmd=0x0001", frame4 and frame4['units'][0]['cmd'] == 0x0001)
 
     # ── 场景3: 多 TLV 帧 (未来拓展) ──
     # 手动构造: 心跳 + 命令 + 心跳
@@ -847,9 +845,9 @@ def test_serial_sim():
                 print(f"  │  RK: 收到 cmd=0x{u['cmd']:04X}, seq={f['sequence']}, params={f['payload'].hex()}")
 
     print("  │")
-    print("  ├─ RK 执行测试... → 返回 result (0x0029), echo pc_seq=100")
-    result_data = bytes([0x00, 0x00, 0x00, 0x01])  # pass
-    rk_resp = pack_cmd(0x0029, result_data, seq=100)
+    print("  ├─ RK 执行测试... → 返回相同 CmdID (0x0001), echo rk_seq=2")
+    result_data = bytes([0x01])  # TLV_ST_PASS
+    rk_resp = pack_cmd(0x0001, result_data, seq=2)
     print(f"  │  RK TX: {rk_resp.hex()}")
 
     for b in rk_resp:
@@ -861,8 +859,10 @@ def test_serial_sim():
                 print(f"  │  MCU: _pending_take(seq={f['sequence']}) → pc_seq=100")
 
     print("  │")
-    print("  ├─ MCU → TCP → PC: result seq=100, cmd=0x0029")
-    print(f"  │  PC 收到: cmd=0x0029, status=pass ✓")
+    pc_resp = pack_cmd(0x0001, result_data, seq=100)
+    print("  ├─ MCU → TCP → PC: result seq=100, cmd=0x0001")
+    print(f"  │  MCU TX: {pc_resp.hex()}")
+    print(f"  │  PC 收到: cmd=0x0001, status=pass ✓")
     print("  │")
     print("  └─ 通信正常 ✓")
 
@@ -906,14 +906,11 @@ class RkSimulator:
                 params = frame['payload'][d_off:d_off+d_len] if d_len else b""
 
                 if 0x0001 <= cmd <= 0x0024:
-                    # 测试命令: 延迟后返回 result
+                    # 测试命令: 延迟后以相同 CmdID 返回 result
                     # 模拟: 根据 params 判断
-                    result = bytes([0x00, 0x00, 0x00, 0x01])  # pass
-                    result_cmd = cmd + (0x0029 - 0x0001)  # gtest_N → result_N
-                    if cmd >= 0x0015:  # IDD range → result range
-                        result_cmd = cmd - 0x0015 + 0x0029 + 20
+                    result = bytes([0x01])  # TLV_ST_PASS
                     self.pending_response = pack_cmd(
-                        0x0029, result, seq=frame['sequence'])
+                        cmd, result, seq=frame['sequence'])
                 elif cmd == 0x003E:
                     # reboot: 模拟重启
                     self.pending_response = pack_cmd(
@@ -1002,7 +999,7 @@ def gen_test_frames():
 def main():
     global PASS, FAIL
 
-    parser = argparse.ArgumentParser(description="TLP v2.0 Protocol Verification")
+    parser = argparse.ArgumentParser(description="TLV v2.0 Protocol Model Verification")
     parser.add_argument("--serial", help="Serial port for RK3588 simulation (e.g. COM3)")
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default 115200)")
     parser.add_argument("--gen", action="store_true", help="Generate test frame hex dumps")
@@ -1018,7 +1015,7 @@ def main():
 
     # Default: full self-test
     print("=" * 60)
-    print("  TLV v2.0 协议自测 — Python ↔ C 逐行对等验证")
+    print("  TLV v2.0 协议模型自测 — Python 复刻当前 C 行为（未链接 C）")
     print("=" * 60)
 
     test_crc()
