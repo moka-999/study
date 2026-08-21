@@ -18,7 +18,7 @@
 | B1–B2 MCU SPI | 原理图引出SPI2；尚无通信任务/协议 | 暂定B1主、B2从；B2有8路独立SPI分别连接8块B1 | 未实现 |
 | LED结果显示 | 当前只有Apollo PB0/PB1心跳/连接灯 | 最终为3颗双色结果灯+2颗单色状态灯 | 未实现 |
 | FRU | 无数据结构/读写流程 | 已确认存放于W25Q256 | 未实现 |
-| B1最终引脚工程 | `b1_pincheck.elf`已建立 | 46/46引脚合同通过，双目标编译成功；待B1真板波形验证 | 代码完成，硬件待验 |
+| B1最终引脚工程 | 同级独立目录`../b1` | 46/46引脚合同与独立构建通过；待B1真板波形验证 | 代码完成，硬件待验 |
 
 `drvTest`现已由`ENABLE_DRIVER_SELF_TEST`编译宏隔离，默认不创建；仅开发镜像显式定义为1时访问AD7124、TPS62868、DDR power和PAC1934。
 
@@ -45,7 +45,7 @@ python -X utf8 tests\full_chain_stress.py
 2. 本页和 [`driver_tasks.md`](driver_tasks.md) 的状态表。
 3. [`../AGENTS.md`](../AGENTS.md) 的工程约束与操作手册。
 4. [`protocol_spec.md`](protocol_spec.md) 是旧协议提案，含 `0x5002` 等未采用设计，不能直接作为现行协议。
-5. [`b1_mcu_pinout.md`](b1_mcu_pinout.md) 与 `boards/b1/Core/Inc/main.h`记录最终B1映射；静态合同由`tests/verify_b1_project.py`检查。
+5. [`b1_mcu_pinout.md`](b1_mcu_pinout.md) 保留B1映射依据；可执行引脚合同与最终映射在独立`../b1`工程内维护。
 6. `schematic*.md` 与 AD7124 中文文档是提取/参考材料，不代表驱动已验证。
 
 ## 当前 P0 问题
@@ -59,7 +59,7 @@ python -X utf8 tests\full_chain_stress.py
 - TPS料号已确认为U4025=TPS628692A、U4026/U4027=TPS628681A；因子2/1/1，地址0x49/0x41/0x4F。U4026的86.8kΩ按TI标称86.6kΩ档处理。
 - Apollo V2临时用SPI2开发AD7124，而最终SPI2属于B1–B2 MCU链路；必须通过板型构建配置互斥，最终AD7124改用SPI4。
 - Apollo V2保留MAC `00:80:E1:00:00:00`；B1使用STM32 UID生成稳定的本地管理单播MAC，量产MAC/FRU规则冻结后再替换策略。
-- Apollo V2 PHY为YT8512C，B1 PHY为YT8512H；当前两者共用标准Clause 22链路驱动，V2通过PCF8574 P7复位，B1通过PG12 `ETH_nRST`复位。
+- Apollo V2 PHY为YT8512C，通过PCF8574 P7复位；B1 PHY为YT8512H，通过PG12 `ETH_nRST`复位，其固件在独立`../b1`工程维护。
 - 驱动自检已默认关闭；开发镜像可显式定义`ENABLE_DRIVER_SELF_TEST=1`启用。
 - 新驱动目前只有“编译通过”，不能写成“V2 或 B1/B2 已验证”。
 
@@ -72,4 +72,4 @@ python -X utf8 tests\full_chain_stress.py
 3. 完成`pwr_ctrl`状态机：PC6/PC7遵循RK3588/RK806要求，PG11后通过I2C配置TPS62868和LPDDR上电时序。
 4. 逐个完成TPS62868→PAC1934→AD7124的Mock、波形验证和协议接入；真实器件回读留到真板。
 5. 定义W25Q256内的版本信息和FRU格式；SPD功能不实现。
-6. B1/B2到板后先烧录`b1_pincheck.elf`做引脚/波形验收，再把V2已验证模块接入B1目标并完成标定、UART4/USART2、B1–B2 SPI和全链路回归。
+6. B1/B2到板后先烧录`../b1/build_debug/b1.elf`做引脚/波形验收，再把V2验收通过的模块逐个移植到独立B1工程，完成标定、UART4/USART2、B1–B2 SPI和全链路回归。

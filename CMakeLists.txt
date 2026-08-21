@@ -106,25 +106,6 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # Add user defined libraries
 )
 
-# B1 final-pin bring-up image. It shares HAL drivers but intentionally excludes
-# FreeRTOS/LwIP/business code so pin validation cannot fork the application.
-add_executable(b1_pincheck
-    ${CMAKE_CURRENT_SOURCE_DIR}/boards/b1/Core/Src/main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/boards/b1/Core/Src/stm32h7xx_it.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/syscalls.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sysmem.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/startup_stm32h743xx.s
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/board_identity.c
-)
-target_include_directories(b1_pincheck BEFORE PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/boards/b1/Core/Inc
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv
-)
-target_compile_definitions(b1_pincheck PRIVATE BOARD_PROFILE=1)
-target_link_libraries(b1_pincheck STM32_Drivers stm32cubemx m)
-target_link_options(b1_pincheck PRIVATE -Wl,-Map=b1_pincheck.map)
-set_target_properties(b1_pincheck PROPERTIES ADDITIONAL_CLEAN_FILES b1_pincheck.map)
-
 # ===================================================================
 # Bootloader — 最小跳转 (0x08000000, 128KB)
 # 烧录顺序: boot.elf 先, test.elf 后

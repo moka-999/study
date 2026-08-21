@@ -44,9 +44,9 @@
 /* Within 'USER CODE' section, code will be kept by default at each generation */
 /* USER CODE BEGIN 0 */
 
-/* YT8512 family RMII PHY: Apollo V2 uses YT8512C, B1 uses YT8512H.
- * This driver only uses standard Clause 22 registers shared by both parts.
- * Board-specific reset routing stays in each board BSP.
+/* Apollo V2 YT8512C RMII PHY.
+ * This driver uses the standard Clause 22 link registers; reset is routed
+ * through PCF8574 P7 by the V2 BSP.
  */
 
 /*
@@ -333,7 +333,7 @@ static void low_level_init(struct netif *netif)
 
 /* USER CODE BEGIN low_level_init Code 1 for User BSP */
 
-  /* Register the common Clause 22 PHY interface (YT8512C/YT8512H). */
+  /* Register the YT8512C Clause 22 PHY interface. */
   USER_PHY_RegisterBusIO(&UserPhyObj, &UserPhyIOCtx);
   if (USER_PHY_Init(&UserPhyObj) != USER_PHY_STATUS_OK)
   {

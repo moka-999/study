@@ -13,7 +13,7 @@ B2 底板 (母板, 8 槽)
 - **B1** = 完整单板：STM32H743 + RK3588 + DDR，自带电源监控（TPS62868×3 + PAC1934 + AD7124），自管本板 3 路 DDR 电压/电流
 - **B2** = 底板母板：8 个 B1 插槽 + 共享资源（ETH 切换 SN74LVC1G3157×8、供电、BMC console）
 - **B1–B2 SPI拓扑（暂定）**：每块B1作为SPI主机；B2 MCU作为从机并提供8路独立点对点SPI，每路只连接一块B1。没有独立告警线前由B1轮询B2状态。
-- 之前解析的 MB360 原理图引脚（AD7124 SPI4 PE11-14、TPS62868 I2C1/2/4、PAC I2C4 PH4/5）即**单块 B1 上的 STM32 外设**
+- 之前解析的 MB360 原理图引脚（AD7124 SPI4 PE11-14、TPS62868 I2C1/2/逻辑I2C4、PAC逻辑I2C4 PH4/5）即**单块 B1 上的 STM32 外设**；PH4/PH5按软件开漏GPIO实现，不是STM32 I2C4 AF引脚对
 - **网络拓扑（架构A）**：每块 B1 独立 IP（.201-.208），各自 TCP:8888；PC 按 IP 区分槽位，**连接即槽位 → TLV 命令无需 slot 字段**
 - 每块 B1 固件相同；IP 按槽位差异化配置（拨码/底板读取，待 B2 定）
 - 现有 ddr_power/PAC/AD7124 均按单板 3 路设计 → 无需改 24 路
@@ -48,7 +48,7 @@ V2 不可验证、留给 B2 的：
 > 目标：引脚重映射 + 实测标定 + 与 RK3588 真机联调。
 
 ```
-1. ✅ 已建立`b1_pincheck.elf`最终引脚目标（含SPI4 PE11-14 / I2C1 PB7-8 / I2C2 PF0-1 / I2C4 PH4-5 / UART4 PA11-12 / USART2 PD5-6）
+1. ✅ 已建立同级独立`../b1`工程（含SPI4 PE11-14 / I2C1 PB7-8 / I2C2 PF0-1 / 逻辑I2C4 PH4-5软件开漏GPIO / UART4 PA11-12 / USART2 PD5-6），不再与V2混合构建
 2. B1真板先运行pincheck做波形验收；随后新增i2c_if/spi_if工厂实例并迁入V2已验证模块
 3. 万用表/示波器标定：电源时序、DAC 电压-模式映射
 4. 真机联调：UART4/USART2 → RS0102 → RK3588
@@ -260,7 +260,7 @@ P24 Table 1已确定0～1.8V的Boot模式目标。3.3V供电下的DAC码可由�
 | USART1 | PA9=TX PA10=RX | 板载本地串口 | 现用（CH340） |
 | I2C1 | PB7=SDA PB8=SCL | TPS62868 U4025 | V2 I2C1/I2C3 模块 |
 | I2C2 | PF0=SDA PF1=SCL | TPS62868 U4026 + **MCP4725(0x60)** | V2 Mock+波形 |
-| I2C4 | PH4=SCL PH5=SDA | TPS62868 U4027 + PAC1934T(0x2C) | V2 Mock+波形 |
+| 逻辑I2C4 | PH4=SCL PH5=SDA（软件开漏GPIO） | TPS62868 U4027 + PAC1934T(0x2C) | V2 Mock+波形 |
 | SPI4 | PE11=NSS PE12=SCK PE13=MISO PE14=MOSI | AD7124 U4028 | V2 SPI2 模块 |
 | SPI2 | PB12=NCS PB13=CLK PB14=MISO PB15=MOSI (`MCU_SPI_*`) | B1主↔B2从；B2有8路独立点对点SPI；模式/速率/轮询待双方定义 | V2 Mock+波形 |
 | ETH RMII | PA1/PA2/PA7/PB11/PC1/PC4/PC5/PG13/PG14 | YT8512H | 现用 |

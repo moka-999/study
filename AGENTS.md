@@ -18,7 +18,7 @@ B1 MCU ×8 ──各自独立SPI2(PB12-PB15), 暂定B1主/B2从──► B2 MCU 
 
 B2 MCU由其他同事开发并提供8路独立SPI分别连接8块B1；B1–B2 MCU的模式、速率、轮询和业务协议后续与PC/B1 MCU/RK协议一起冻结。
 
-**软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (Apollo V2=YT8512C，B1=YT8512H，RMII) + TLV 协议。
+**软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (YT8512C, RMII) + TLV 协议。B1是同级独立工程 `../b1`，不在本V2源码树内混合构建。
 
 ---
 
@@ -134,7 +134,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ⚠️ TPS62868、PAC1934、AD7124 当前是“代码可编译 + 自检入口”；手头没有外接模块，V2 只做 Mock 与逻辑分析仪波形验证
 - ❌ `pwr_ctrl`、MCP4725/Boot 模式、真实 monitor 上报及对应 TLV 命令尚未实现
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
-- ✅ 新增`b1_pincheck.elf`最终引脚适配目标：46/46静态合同通过，PG12已按PHY `ETH_nRST`纠正，V2/B1 MAC及PHY型号策略分离
+- ✅ B1已拆分为同级独立工程`../b1`：46/46静态合同通过，V2验收通过的模块才逐个移植
 - 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`doc/glossary.md`
 
 **下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B1/B2真板验证）
@@ -161,7 +161,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 | 外设 | 引脚 | 目标 | 备注 |
 |------|------|------|------|
 | AD7124 (U4028) | SPI4: PE11=NSS PE12=SCK PE13=MISO PE14=MOSI | AIN0 ← VCC_1V8_S3_LPDDR4X / AIN2 ← VDD2_DDR_S3 / AIN4 ← VDDQ_DDR（导线追踪已确认, 各经 100R+10K+0.1uF 滤波）; AIN1/3/5=AGND, AIN6/7=NC | REFIN1+ ← VCC_2V5 (U4029 RY6211B-25C LDO) |
-| PAC1934T (U204) | I2C4 (PH4=SCL/PH5=SDA) | 地址 **0x2C/0x2D**（ADDRSEL=5.23K→GND） | SENSE1-3: VCC_1V8_S3/VDD2_DDR_S3/VDDQ_DDR 各 0.01Ω; SENSE4 未用 |
+| PAC1934T (U204) | 原理图逻辑I2C4 (PH4=SCL/PH5=SDA，软件开漏GPIO；不是STM32 I2C4 AF引脚对) | 地址 **0x2C/0x2D**（ADDRSEL=5.23K→GND） | SENSE1-3: VCC_1V8_S3/VDD2_DDR_S3/VDDQ_DDR 各 0.01Ω; SENSE4 未用 |
 | TPS62868/69 ×3 | U4025=I2C1, U4026=I2C2, U4027=I2C4 | VDD1 / VDD2 / VDDQ | U4025 **TPS628692A**+56.2kΩ→因子2/启动1.60V/0x49；U4026 **TPS628681A**+86.8kΩ（TI 86.6kΩ档）→因子1/0.90V/0x41；U4027 **TPS628681A**+15.4kΩ→因子1/0.50V/0x4F |
 | pwr_ctrl | **PC6**→MP8759 EN (VCC4V0_SYS 4.0V), **PC7**→RT8070 EN (VCC3V3_SYS 3.3V), **PG11**→3×TPS62868 EN | PC6/PC7顺序按RK3588/RK806和最终原理图要求；PG11使能TPS后通过I2C配置LPDDR三轨 | 延时和掉电顺序待真板测量，旧10/10/50ms不是批准值 |
 | 整机开机 | ATX→B2 standby/LAN Switch后启动site | 两种并列入口：面板PWR键手动开机；上位机经B2 standby远程开机 | 当前24页图没有B1 MCU GPIO到site PWR；远程控制属于B2 standby/未提供图纸，接口待定 |
