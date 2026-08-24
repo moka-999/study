@@ -20,6 +20,7 @@ list(TRANSFORM HAL_SOURCES PREPEND "${HAL_DIR}/Src/")
 add_executable(b1
     Core/Src/main.c
     Core/Src/board_identity.c
+    Core/Src/result_led.c
     Core/Src/stm32h7xx_it.c
     Core/Src/system_stm32h7xx.c
     Core/Src/syscalls.c

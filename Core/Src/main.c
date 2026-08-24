@@ -1,5 +1,6 @@
 #include "main.h"
 #include "board_identity.h"
+#include "result_led.h"
 #include <string.h>
 
 I2C_HandleTypeDef hi2c1;
@@ -20,6 +21,19 @@ static void MX_SPI_Init(void);
 static void MX_UART_Init(void);
 static void MX_QSPI_Init(void);
 
+/*
+ * 原理图只冻结了LED1/2、LED3/4、LED5/6为三组双色灯，尚未冻结每组
+ * 对应的测试对象和红绿顺序。当前验收镜像暂按奇数红、偶数绿以及
+ * LPDDR0、LPDDR1、eMCP的顺序映射；B1真板目视确认后只修改本表。
+ */
+static const result_led_board_map_t s_result_led_map = {
+    .pairs = {
+        [RESULT_LED_LPDDR0] = { GPIOG, B1_LED1_PIN, GPIOG, B1_LED2_PIN },
+        [RESULT_LED_LPDDR1] = { GPIOG, B1_LED3_PIN, GPIOG, B1_LED4_PIN },
+        [RESULT_LED_EMCP]   = { GPIOG, B1_LED5_PIN, GPIOG, B1_LED6_PIN },
+    },
+};
+
 static void require_ok(HAL_StatusTypeDef status)
 {
     if (status != HAL_OK) Error_Handler();
@@ -27,11 +41,7 @@ static void require_ok(HAL_StatusTypeDef status)
 
 int main(void)
 {
-    static const uint16_t led_pins[] = {
-        B1_LED1_PIN, B1_LED2_PIN, B1_LED3_PIN, B1_LED4_PIN,
-        B1_LED5_PIN, B1_LED6_PIN, B1_LED7_PIN
-    };
-    static const uint8_t banner[] = "B1 final-pin check ready\r\n";
+    static const uint8_t banner[] = "B1 result LED bring-up ready\r\n";
 
     HAL_Init();
     SystemClock_Config();
@@ -40,6 +50,7 @@ int main(void)
     MX_SPI_Init();
     MX_UART_Init();
     MX_QSPI_Init();
+    require_ok(result_led_init(&s_result_led_map));
 
     memcpy(g_b1_mac, board_mac_address(), sizeof(g_b1_mac));
     HAL_GPIO_WritePin(B1_ETH_NRST_PORT, B1_ETH_NRST_PIN, GPIO_PIN_RESET);
@@ -49,11 +60,35 @@ int main(void)
     require_ok(HAL_UART_Transmit(&huart1, (uint8_t *)banner, sizeof(banner) - 1, 100));
 
     for (;;) {
-        for (uint32_t i = 0; i < sizeof(led_pins) / sizeof(led_pins[0]); i++) {
-            HAL_GPIO_WritePin(GPIOG, led_pins[i], GPIO_PIN_SET);
-            HAL_Delay(500);
-            HAL_GPIO_WritePin(GPIOG, led_pins[i], GPIO_PIN_RESET);
+        /* 全灭1s，便于逻辑分析仪识别每轮波形起点。 */
+        result_led_all_off();
+        HAL_Delay(1000);
+
+        require_ok(result_led_set(RESULT_LED_LPDDR0, RESULT_LED_PASS));
+        HAL_Delay(2000);
+        result_led_all_off();
+
+        require_ok(result_led_set(RESULT_LED_LPDDR1, RESULT_LED_FAIL));
+        HAL_Delay(2000);
+        result_led_all_off();
+
+        /* 三颗灯同步橙闪4周期：六路GPIO均应出现500ms高/低电平。 */
+        for (uint32_t i = 0; i < RESULT_LED_TARGET_COUNT; ++i)
+            require_ok(result_led_set((result_led_target_t)i, RESULT_LED_TEST_NORMAL));
+        for (uint32_t i = 0; i < 8U; ++i) {
+            HAL_Delay(RESULT_LED_BLINK_MS);
+            result_led_process(HAL_GetTick());
         }
+        result_led_all_off();
+
+        /* 三颗灯同步红闪4周期：暂定LED1/3/5闪烁，LED2/4/6保持低。 */
+        for (uint32_t i = 0; i < RESULT_LED_TARGET_COUNT; ++i)
+            require_ok(result_led_set((result_led_target_t)i, RESULT_LED_TEST_HOT));
+        for (uint32_t i = 0; i < 8U; ++i) {
+            HAL_Delay(RESULT_LED_BLINK_MS);
+            result_led_process(HAL_GetTick());
+        }
+        result_led_all_off();
     }
 }
 

@@ -56,6 +56,27 @@ def main() -> int:
     require("GPIO_MODE_OUTPUT_OD" in source and "GPIO_AF4_I2C4" not in source,
             "PH4/PH5 logical I2C4 must use software open-drain GPIO")
 
+    led = (ROOT / "Core/Src/result_led.c").read_text(encoding="utf-8")
+    led_header = (ROOT / "Core/Inc/result_led.h").read_text(encoding="utf-8")
+    require("RESULT_LED_BLINK_MS   500U" in led_header,
+            "result LED half-period must remain 500ms")
+    require(all(name in led and name in led_header for name in (
+        "RESULT_LED_PASS", "RESULT_LED_FAIL", "RESULT_LED_TEST_NORMAL",
+        "RESULT_LED_TEST_HOT")), "result LED business states are incomplete")
+    require("levels.green_on = 1U" in led and "levels.red_on = 1U" in led and
+            "levels.green_on = levels.red_on" in led,
+            "PASS/FAIL/orange color conversion is incomplete")
+    require("levels.red_on ? GPIO_PIN_SET : GPIO_PIN_RESET" in led,
+            "B1 2N7002 result LED outputs must be active high")
+    require("result_led_process(HAL_GetTick())" in source and
+            "RESULT_LED_TEST_NORMAL" in source and "RESULT_LED_TEST_HOT" in source,
+            "B1 image must exercise the accepted business waveform")
+    require("B1_LED1_PIN, GPIOG, B1_LED2_PIN" in source and
+            "B1_LED5_PIN, GPIOG, B1_LED6_PIN" in source,
+            "three B1 bicolor LED pairs are not mapped")
+    require("B1_LED7_PIN" not in source.split("s_result_led_map", 1)[1].split("};", 1)[0],
+            "PG6 single-color status LED must not enter the result LED map")
+
     ioc = (ROOT / "b1.ioc").read_text(encoding="utf-8")
     require("SPI4.CLKPolarity=SPI_POLARITY_HIGH" in ioc and
             "SPI4.CLKPhase=SPI_PHASE_2EDGE" in ioc,
@@ -77,7 +98,8 @@ def main() -> int:
     require(not (ROOT / "LWIP").exists() and not (ROOT / "Middlewares").exists(),
             "V2 middleware was copied before migration")
     print(f"B1 independent project: {len(actual)}/{len(EXPECTED)} pins PASS")
-    print("Safe defaults, SPI2 slave mode 0, SPI4 mode 3, YT8512H and boundary PASS")
+    print("Safe defaults, SPI2 slave mode 0, SPI4 mode 3 and YT8512H PASS")
+    print("Result LED states, 500ms scheduler, active-high PG0-PG5 map and boundary PASS")
     return 0
 
 

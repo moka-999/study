@@ -18,5 +18,9 @@
 - `b1.ioc` is the CubeMX hardware baseline. After regeneration, restore the app
   linker origin `0x08020000`/length `1920K` and vector offset `0x020000`.
 - Do not copy an Apollo V2 module until its V2 acceptance check passes.
+- Result LED color semantics have passed Apollo V2 and are now ported to PG0-PG5.
+  The provisional board map is LED1/2, LED3/4, LED5/6 with odd=red/even=green
+  and LPDDR0/LPDDR1/eMCP order. Change only `s_result_led_map` after the first B1
+  visual check; keep PG6 off until the single-color status meaning is frozen.
 - Do not copy V2 pin mappings, PCF8574 PHY reset, fixed MAC or test scripts.
 - Build with `.\tools\dev.ps1 build`; run `.\tools\dev.ps1 check` before commit.
