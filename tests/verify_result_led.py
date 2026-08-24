@@ -77,7 +77,7 @@ def main() -> None:
     verify_semantics()
     verify_source_contract()
     print("result_led: 5 states, 500ms blink and isolated V2 waveform image PASS")
-    print("V2 waveform accepted; B1 PG0-PG5 port and real 2N7002 startup check remain")
+    print("V2 waveform accepted and B1 PG0-PG5 ported; real 2N7002 startup check remains")
 
 
 if __name__ == "__main__":
