@@ -45,7 +45,7 @@
 /* #define HAL_DAC_MODULE_ENABLED   */
 /* #define HAL_DCMI_MODULE_ENABLED   */
 /* #define HAL_DMA2D_MODULE_ENABLED   */
-/* Ethernet MAC/LwIP moves here only after the V2 network acceptance gate. */
+#define HAL_ETH_MODULE_ENABLED
 /* #define HAL_ETH_LEGACY_MODULE_ENABLED   */
 /* #define HAL_NAND_MODULE_ENABLED   */
 /* #define HAL_NOR_MODULE_ENABLED   */
@@ -74,6 +74,7 @@
 #define HAL_SPI_MODULE_ENABLED
 /* #define HAL_SWPMI_MODULE_ENABLED   */
 #define HAL_UART_MODULE_ENABLED
+#define HAL_TIM_MODULE_ENABLED
 /* #define HAL_USART_MODULE_ENABLED   */
 /* #define HAL_IRDA_MODULE_ENABLED   */
 /* #define HAL_SMARTCARD_MODULE_ENABLED   */

@@ -15,6 +15,12 @@ Startup initializes QSPI but deliberately does not write the production metadata
 sectors. Each build emits `b1.bin`, `b1.manifest.json` and the 96-byte
 `b1.version.bin` payload.
 
+FreeRTOS 10.6.2 and LwIP 2.2.1 are now migrated as the final gateway runtime
+baseline. The default task initializes static IPv4 `192.168.1.201/24`; ETH uses
+the B1 YT8512H, PG12 reset and UID-derived MAC. D-Cache stays disabled on both
+B1 and V2. The 128KiB RTOS heap is in AXI SRAM and all ETH DMA objects are in
+D2 SRAM, so no cache clean/invalidate calls are permitted.
+
 B1 has no temperature-control or forwarding role. PC controls the B2 MCU
 directly; B1 SPI2 is reserved only for B1-B2 keepalive.
 
@@ -39,18 +45,16 @@ keep pins, reset paths, PHY model, UART choice and peripheral handles local to
 B1. Add only the smallest B1 check that proves the migrated module.
 
 Not copied by design: V2 board glue, unaccepted `App`/`BSP` modules, board demos,
-stress tests, extracted schematics and temporary files. The next milestone
-explicitly migrates FreeRTOS and LwIP for the final TCP gateway, while keeping
-PHY reset, MAC and RK UART routing B1-local.
+stress tests, extracted schematics and temporary files. The next milestone is
+the TCP/TLV gateway task layer; PHY reset, MAC and RK UART routing remain B1-local.
 
-## Result LED bring-up image
+## Result LED board check
 
-The current bare-metal loop outputs the accepted sequence: all off 1s, LPDDR0
-PASS 2s, LPDDR1 FAIL 2s, all three bicolor LEDs orange-blink for four 500ms/500ms
-cycles, then red-blink for four cycles. The schematic only freezes LED1/2,
-LED3/4 and LED5/6 as physical pairs. Until the B1 board is visually checked,
-the board map provisionally treats odd LED signals as red, even signals as green,
-and assigns the three pairs to LPDDR0, LPDDR1 and eMCP in order.
+The RTOS task advances the accepted non-blocking 500ms LED state machine. The
+schematic only freezes LED1/2, LED3/4 and LED5/6 as physical pairs. Until the B1
+board is visually checked, the board map provisionally treats odd LED signals as
+red, even signals as green, and assigns the three pairs to LPDDR0, LPDDR1 and
+eMCP in order.
 
 On the first B1 board, verify PG0-PG5 with a short logic-analyzer power-on window
 and visually confirm both color order and test-object order. Only

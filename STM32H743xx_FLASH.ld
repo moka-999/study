@@ -243,6 +243,37 @@ SECTIONS
     . = ALIGN(8);
   } >DTCMRAM
 
+  /* FreeRTOS 128KiB 动态堆放 AXI SRAM，避免耗尽 DTCM 任务栈空间。 */
+  .heap (NOLOAD) :
+  {
+    . = ALIGN(8);
+    *(.heap)
+    *(.heap*)
+    . = ALIGN(8);
+  } >RAM
+
+  /* ETH DMA 无法访问 DTCM；描述符和零拷贝接收池必须位于 D2 SRAM。 */
+  .RxDescripSection (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.RxDescripSection)
+    . = ALIGN(32);
+  } >RAM_D2
+
+  .TxDescripSection (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.TxDescripSection)
+    . = ALIGN(32);
+  } >RAM_D2
+
+  .Rx_PoolSection (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.Rx_PoolSection)
+    . = ALIGN(32);
+  } >RAM_D2
+
 
 
   /* Remove information from the standard libraries */

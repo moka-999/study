@@ -70,9 +70,9 @@ def main() -> int:
             "PASS/FAIL/orange color conversion is incomplete")
     require("levels.red_on ? GPIO_PIN_SET : GPIO_PIN_RESET" in led,
             "B1 2N7002 result LED outputs must be active high")
-    require("result_led_process(HAL_GetTick())" in source and
-            "RESULT_LED_TEST_NORMAL" in source and "RESULT_LED_TEST_HOT" in source,
-            "B1 image must exercise the accepted business waveform")
+    rtos_source = (ROOT / "Core/Src/freertos.c").read_text(encoding="utf-8")
+    require("result_led_process(HAL_GetTick())" in rtos_source and "osDelay(1U)" in rtos_source,
+            "result LED state machine must run without blocking the gateway")
     require("B1_LED1_PIN, GPIOG, B1_LED2_PIN" in source and
             "B1_LED5_PIN, GPIOG, B1_LED6_PIN" in source,
             "three B1 bicolor LED pairs are not mapped")
@@ -97,8 +97,33 @@ def main() -> int:
     board = (ROOT / "Core/Src/board_identity.c").read_text(encoding="utf-8")
     require("BOARD_PHY_YT8512H" in board and "mac[0] = 0x02" in board,
             "B1 identity must select YT8512H and a local unicast MAC")
-    require(not (ROOT / "LWIP").exists() and not (ROOT / "Middlewares").exists(),
-            "V2 middleware was copied before migration")
+
+    # B1最终网关必须保留V2已验收的RTOS/LwIP内核，但板级PHY、MAC和复位不能照搬。
+    freertos_config = (ROOT / "Core/Inc/FreeRTOSConfig.h").read_text(encoding="utf-8")
+    lwip_options = (ROOT / "LWIP/Target/lwipopts.h").read_text(encoding="utf-8")
+    ethernet = (ROOT / "LWIP/Target/ethernetif.c").read_text(encoding="utf-8")
+    ethernet_board = (ROOT / "Core/Src/ethernet_board.c").read_text(encoding="utf-8")
+    interrupts = (ROOT / "Core/Src/stm32h7xx_it.c").read_text(encoding="utf-8")
+    require("configTOTAL_HEAP_SIZE                    ((size_t)131072)" in freertos_config,
+            "FreeRTOS heap must remain 128KiB")
+    require("#define WITH_RTOS 1" in lwip_options,
+            "LwIP must use its FreeRTOS sys_arch port")
+    require("osKernelInitialize()" in source and "osKernelStart()" in source and
+            "MX_LWIP_Init();" in rtos_source,
+            "LwIP must initialize from a running RTOS task")
+    require("board_mac_address()" in ethernet and "0x80" not in ethernet,
+            "B1 Ethernet must use UID-derived MAC instead of the V2 fixed MAC")
+    require("YT8512H" in ethernet and "YT8512C" not in ethernet and "PCF8574" not in ethernet,
+            "B1 Ethernet glue contains V2 PHY/reset residue")
+    require("CORTEX_M7.CPU_DCache=Disabled" in ioc and
+            "SCB_InvalidateDCache" not in ethernet and "SCB_CleanDCache" not in ethernet,
+            "B1 must keep D-Cache disabled without cache-maintenance calls")
+    require("B1_ETH_NRST_PIN, GPIO_PIN_RESET" in source and
+            source.index("B1_ETH_NRST_PIN, GPIO_PIN_SET") < source.index("osKernelInitialize()"),
+            "PG12 must reset YT8512H before starting the scheduler")
+    require("HAL_NVIC_SetPriority(ETH_IRQn, 5U, 0U)" in ethernet_board and
+            "HAL_ETH_IRQHandler(&heth)" in interrupts,
+            "ETH interrupt priority/handler is not FreeRTOS safe")
 
     # W25Q256模块必须保持V2已验收的四字节寻址、RMW和正式元数据地址。
     flash_header = (ROOT / "BSP/Flash/flash_layout.h").read_text(encoding="utf-8")
@@ -126,6 +151,13 @@ def main() -> int:
             "编译期固件身份可能被链接器回收")
     require("gen_firmware_manifest.py" in cmake and "b1.version.bin" in cmake,
             "B1版本载荷构建步骤缺失")
+    require(".heap (NOLOAD)" in linker and ">RAM" in linker and
+            all(section in linker for section in (
+                ".RxDescripSection", ".TxDescripSection", ".Rx_PoolSection", ">RAM_D2")),
+            "FreeRTOS heap or Ethernet DMA memory placement is missing")
+    require("Middlewares/Third_Party/FreeRTOS" in cmake and
+            "Middlewares/Third_Party/LwIP" in cmake,
+            "B1 build does not compile the migrated FreeRTOS/LwIP sources")
 
     manifest_path = ROOT / "build_debug/b1.manifest.json"
     image_path = ROOT / "build_debug/b1.bin"
@@ -141,6 +173,7 @@ def main() -> int:
     print("Safe defaults, SPI2 slave mode 0, SPI4 mode 3 and YT8512H PASS")
     print("Result LED states, 500ms scheduler, active-high PG0-PG5 map and boundary PASS")
     print("W25Q256 32MiB layout, 4-byte QSPI, version/FRU and manifest contract PASS")
+    print("FreeRTOS 128KiB heap, LwIP IPv4, YT8512H reset and UID MAC contract PASS")
     return 0
 
 

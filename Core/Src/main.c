@@ -1,7 +1,9 @@
 #include "main.h"
 #include "board_identity.h"
 #include "flash_bsp.h"
+#include "app_freertos.h"
 #include "result_led.h"
+#include "cmsis_os2.h"
 #include <string.h>
 
 I2C_HandleTypeDef hi2c1;
@@ -42,7 +44,7 @@ static void require_ok(HAL_StatusTypeDef status)
 
 int main(void)
 {
-    static const uint8_t banner[] = "B1 result LED and W25Q256 bring-up ready\r\n";
+    static const uint8_t banner[] = "B1 FreeRTOS/LwIP and W25Q256 bring-up ready\r\n";
 
     HAL_Init();
     SystemClock_Config();
@@ -62,37 +64,14 @@ int main(void)
     HAL_Delay(100);
     require_ok(HAL_UART_Transmit(&huart1, (uint8_t *)banner, sizeof(banner) - 1, 100));
 
-    for (;;) {
-        /* 全灭1s，便于逻辑分析仪识别每轮波形起点。 */
-        result_led_all_off();
-        HAL_Delay(1000);
+    /* CMSIS-RTOS2 包装层由 V2 同版本迁入，后续 TCP/TLV 任务从这里扩展。 */
+    osKernelInitialize();
+    MX_FREERTOS_Init();
+    osKernelStart();
 
-        require_ok(result_led_set(RESULT_LED_LPDDR0, RESULT_LED_PASS));
-        HAL_Delay(2000);
-        result_led_all_off();
-
-        require_ok(result_led_set(RESULT_LED_LPDDR1, RESULT_LED_FAIL));
-        HAL_Delay(2000);
-        result_led_all_off();
-
-        /* 三颗灯同步橙闪4周期：六路GPIO均应出现500ms高/低电平。 */
-        for (uint32_t i = 0; i < RESULT_LED_TARGET_COUNT; ++i)
-            require_ok(result_led_set((result_led_target_t)i, RESULT_LED_TEST_NORMAL));
-        for (uint32_t i = 0; i < 8U; ++i) {
-            HAL_Delay(RESULT_LED_BLINK_MS);
-            result_led_process(HAL_GetTick());
-        }
-        result_led_all_off();
-
-        /* 三颗灯同步红闪4周期：暂定LED1/3/5闪烁，LED2/4/6保持低。 */
-        for (uint32_t i = 0; i < RESULT_LED_TARGET_COUNT; ++i)
-            require_ok(result_led_set((result_led_target_t)i, RESULT_LED_TEST_HOT));
-        for (uint32_t i = 0; i < 8U; ++i) {
-            HAL_Delay(RESULT_LED_BLINK_MS);
-            result_led_process(HAL_GetTick());
-        }
-        result_led_all_off();
-    }
+    /* 调度器正常启动后不会返回。 */
+    Error_Handler();
+    return 0;
 }
 
 void HAL_MspInit(void)

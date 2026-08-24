@@ -46,14 +46,49 @@ set(HAL_SOURCES
     stm32h7xx_hal_i2c_ex.c stm32h7xx_hal_mdma.c stm32h7xx_hal_pwr.c stm32h7xx_hal_pwr_ex.c
     stm32h7xx_hal_qspi.c stm32h7xx_hal_rcc.c stm32h7xx_hal_rcc_ex.c
     stm32h7xx_hal_spi.c stm32h7xx_hal_spi_ex.c stm32h7xx_hal_uart.c
-    stm32h7xx_hal_uart_ex.c
+    stm32h7xx_hal_uart_ex.c stm32h7xx_hal_eth.c stm32h7xx_hal_eth_ex.c
+    stm32h7xx_hal_tim.c stm32h7xx_hal_tim_ex.c
 )
 list(TRANSFORM HAL_SOURCES PREPEND "${HAL_DIR}/Src/")
+
+set(FREERTOS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source)
+set(FREERTOS_SOURCES
+    ${FREERTOS_DIR}/portable/Common/mpu_wrappers_v2.c
+    ${FREERTOS_DIR}/croutine.c
+    ${FREERTOS_DIR}/event_groups.c
+    ${FREERTOS_DIR}/list.c
+    ${FREERTOS_DIR}/queue.c
+    ${FREERTOS_DIR}/stream_buffer.c
+    ${FREERTOS_DIR}/tasks.c
+    ${FREERTOS_DIR}/timers.c
+    ${FREERTOS_DIR}/CMSIS_RTOS_V2/cmsis_os2.c
+    ${FREERTOS_DIR}/portable/MemMang/heap_4.c
+    ${FREERTOS_DIR}/portable/GCC/ARM_CM4F/port.c
+)
+
+set(LWIP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/LwIP)
+# 只编译 B1 网关需要的 socket/TCP/IPv4 源；PPP、MQTT、IPv6 暂不进入固件。
+file(GLOB LWIP_API_SOURCES CONFIGURE_DEPENDS ${LWIP_DIR}/src/api/*.c)
+file(GLOB LWIP_CORE_SOURCES CONFIGURE_DEPENDS ${LWIP_DIR}/src/core/*.c)
+file(GLOB LWIP_IPV4_SOURCES CONFIGURE_DEPENDS ${LWIP_DIR}/src/core/ipv4/*.c)
+set(LWIP_SOURCES
+    ${LWIP_API_SOURCES}
+    ${LWIP_CORE_SOURCES}
+    ${LWIP_IPV4_SOURCES}
+    ${LWIP_DIR}/src/netif/ethernet.c
+    ${LWIP_DIR}/system/OS/sys_arch.c
+)
 
 add_executable(b1
     Core/Src/main.c
     Core/Src/board_identity.c
     Core/Src/result_led.c
+    Core/Src/freertos.c
+    Core/Src/ethernet_board.c
+    Core/Src/stm32h7xx_hal_timebase_tim.c
+    LWIP/App/lwip.c
+    LWIP/Target/ethernetif.c
+    LWIP/Target/eth_custom_phy_interface.c
     HAL_Drv/qspi_hw.c
     BSP/Flash/flash_bsp.c
     BSP/Flash/flash_layout.c
@@ -63,12 +98,23 @@ add_executable(b1
     Core/Src/sysmem.c
     startup_stm32h743xx.s
     ${HAL_SOURCES}
+    ${FREERTOS_SOURCES}
+    ${LWIP_SOURCES}
 )
 
 target_include_directories(b1 PRIVATE
     Core/Inc
     HAL_Drv
     BSP/Flash
+    LWIP/App
+    LWIP/Target
+    ${LWIP_DIR}/src/include
+    ${LWIP_DIR}/system
+    ${LWIP_DIR}/system/arch
+    ${FREERTOS_DIR}/include
+    ${FREERTOS_DIR}/CMSIS_RTOS_V2
+    ${FREERTOS_DIR}/portable/GCC/ARM_CM4F
+    Drivers/CMSIS/RTOS2/Include
     ${HAL_DIR}/Inc
     Drivers/CMSIS/Include
     Drivers/CMSIS/Device/ST/STM32H7xx/Include
