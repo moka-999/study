@@ -723,13 +723,7 @@ void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd, uint8_t *buff, uint16_t 
     p->tot_len += Length;
   }
 
-  /* Invalidate data cache because Rx DMA's writing to physical memory makes it stale.
-   * 仅当 D-Cache 真正使能时才做维护: D-Cache 关闭时写 SCB->DCIMVAC 是未定义行为,
-   * 在 Cortex-M7 上会触发 UsageFault(INVPC) 升级 HardFault. */
-  if (SCB->CCR & SCB_CCR_DC_Msk)
-  {
-    SCB_InvalidateDCache_by_Addr((uint32_t *)buff, Length);
-  }
+  /* V2 全局关闭 D-Cache，ETH DMA 缓冲已固定到 D2 SRAM，无需任何缓存维护。 */
 
 /* USER CODE END HAL ETH RxLinkCallback */
 }
