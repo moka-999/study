@@ -2,8 +2,10 @@
 """Small static contract for the independent B1 bring-up project."""
 
 from pathlib import Path
+import json
 import re
 import sys
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "Core/Inc/main.h"
@@ -97,9 +99,48 @@ def main() -> int:
             "B1 identity must select YT8512H and a local unicast MAC")
     require(not (ROOT / "LWIP").exists() and not (ROOT / "Middlewares").exists(),
             "V2 middleware was copied before migration")
+
+    # W25Q256模块必须保持V2已验收的四字节寻址、RMW和正式元数据地址。
+    flash_header = (ROOT / "BSP/Flash/flash_layout.h").read_text(encoding="utf-8")
+    flash_layout = (ROOT / "BSP/Flash/flash_layout.c").read_text(encoding="utf-8")
+    flash_bsp = (ROOT / "BSP/Flash/flash_bsp.c").read_text(encoding="utf-8")
+    qspi = (ROOT / "HAL_Drv/qspi_hw.c").read_text(encoding="utf-8")
+    require(all(value in flash_header for value in (
+        "0x00000000UL", "0x00001000UL", "0x00002000UL", "0x00003000UL",
+        "0x01FF0000UL", "0x02000000UL")), "W25Q256分区地址不完整")
+    require("ENABLE_FLASH_SELF_TEST" not in flash_header,
+            "B1正式布局不得包含Apollo自检地址重映射")
+    require("generation_is_newer" in flash_layout and "payload_crc32" in flash_layout,
+            "版本/FRU双副本CRC选择逻辑缺失")
+    require("memcmp(s_sector_buffer" in flash_bsp and "page_is_erased" in flash_bsp,
+            "Flash扇区RMW或磨损规避逻辑缺失")
+    require("QSPI_ADDRESS_32_BITS" in qspi and "W25Q_CAPACITY - addr" in qspi,
+            "W25Q256四字节寻址或容量边界检查缺失")
+    require("flash_if.init(&flash_if)" in source and
+            "firmware_version_save" not in source and "fru_info_save" not in source,
+            "B1启动应初始化Flash但不得自动写生产元数据")
+
+    linker = (ROOT / "STM32H743xx_FLASH.ld").read_text(encoding="utf-8")
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    require("KEEP(*(.firmware_version))" in linker,
+            "编译期固件身份可能被链接器回收")
+    require("gen_firmware_manifest.py" in cmake and "b1.version.bin" in cmake,
+            "B1版本载荷构建步骤缺失")
+
+    manifest_path = ROOT / "build_debug/b1.manifest.json"
+    image_path = ROOT / "build_debug/b1.bin"
+    payload_path = ROOT / "build_debug/b1.version.bin"
+    if manifest_path.exists() and image_path.exists() and payload_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        image = image_path.read_bytes()
+        require(manifest["image_length"] == len(image), "B1清单镜像长度错误")
+        require(manifest["image_crc32"] == f"0x{zlib.crc32(image) & 0xFFFFFFFF:08X}",
+                "B1清单镜像CRC32错误")
+        require(len(payload_path.read_bytes()) == 96, "B1版本载荷必须为96字节")
     print(f"B1 independent project: {len(actual)}/{len(EXPECTED)} pins PASS")
     print("Safe defaults, SPI2 slave mode 0, SPI4 mode 3 and YT8512H PASS")
     print("Result LED states, 500ms scheduler, active-high PG0-PG5 map and boundary PASS")
+    print("W25Q256 32MiB layout, 4-byte QSPI, version/FRU and manifest contract PASS")
     return 0
 
 

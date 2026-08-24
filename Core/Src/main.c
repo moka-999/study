@@ -1,5 +1,6 @@
 #include "main.h"
 #include "board_identity.h"
+#include "flash_bsp.h"
 #include "result_led.h"
 #include <string.h>
 
@@ -41,7 +42,7 @@ static void require_ok(HAL_StatusTypeDef status)
 
 int main(void)
 {
-    static const uint8_t banner[] = "B1 result LED bring-up ready\r\n";
+    static const uint8_t banner[] = "B1 result LED and W25Q256 bring-up ready\r\n";
 
     HAL_Init();
     SystemClock_Config();
@@ -50,6 +51,8 @@ int main(void)
     MX_SPI_Init();
     MX_UART_Init();
     MX_QSPI_Init();
+    /* 只初始化并确认QSPI通信，不在启动时自动擦写版本或FRU生产区域。 */
+    if (flash_if.init(&flash_if) != IF_OK) Error_Handler();
     require_ok(result_led_init(&s_result_led_map));
 
     memcpy(g_b1_mac, board_mac_address(), sizeof(g_b1_mac));

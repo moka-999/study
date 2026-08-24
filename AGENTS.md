@@ -18,6 +18,11 @@
 - `b1.ioc` is the CubeMX hardware baseline. After regeneration, restore the app
   linker origin `0x08020000`/length `1920K` and vector offset `0x020000`.
 - Do not copy an Apollo V2 module until its V2 acceptance check passes.
+- The accepted W25Q256 driver and version/FRU v1 layout are ported. B1 boot only
+  initializes QSPI; it must never auto-write the production metadata sectors.
+- The bare-metal image is a bring-up baseline, not the final architecture. The
+  final B1 gateway must migrate FreeRTOS and LwIP using B1's YT8512H, UID-derived
+  MAC, PG12 PHY reset and UART4/USART2 RK routes; never copy V2 board glue.
 - Result LED color semantics have passed Apollo V2 and are now ported to PG0-PG5.
   The provisional board map is LED1/2, LED3/4, LED5/6 with odd=red/even=green
   and LPDDR0/LPDDR1/eMCP order. Change only `s_result_led_map` after the first B1

@@ -5,6 +5,39 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+# B1版本身份由构建系统统一生成，保持与V2验收格式完全一致。
+set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
+set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
+set(FIRMWARE_VERSION_PATCH 0 CACHE STRING "Firmware semantic version patch")
+set(FIRMWARE_BUILD_NUMBER 0 CACHE STRING "CI or release build number")
+string(TIMESTAMP FIRMWARE_BUILD_TIME_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
+execute_process(
+    COMMAND git -c safe.directory=${CMAKE_CURRENT_SOURCE_DIR} rev-parse --short=12 HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE FIRMWARE_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE FIRMWARE_GIT_RESULT
+)
+if(NOT FIRMWARE_GIT_RESULT EQUAL 0 OR FIRMWARE_GIT_COMMIT STREQUAL "")
+    set(FIRMWARE_GIT_COMMIT "unknown")
+endif()
+execute_process(
+    COMMAND git -c safe.directory=${CMAKE_CURRENT_SOURCE_DIR} status --porcelain
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE FIRMWARE_GIT_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE FIRMWARE_STATUS_RESULT
+)
+if(FIRMWARE_STATUS_RESULT EQUAL 0 AND FIRMWARE_GIT_STATUS STREQUAL "")
+    set(FIRMWARE_GIT_DIRTY 0)
+else()
+    set(FIRMWARE_GIT_DIRTY 1)
+endif()
+
 set(HAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32H7xx_HAL_Driver)
 set(HAL_SOURCES
     stm32h7xx_hal.c stm32h7xx_hal_cortex.c stm32h7xx_hal_dma.c
@@ -21,6 +54,9 @@ add_executable(b1
     Core/Src/main.c
     Core/Src/board_identity.c
     Core/Src/result_led.c
+    HAL_Drv/qspi_hw.c
+    BSP/Flash/flash_bsp.c
+    BSP/Flash/flash_layout.c
     Core/Src/stm32h7xx_it.c
     Core/Src/system_stm32h7xx.c
     Core/Src/syscalls.c
@@ -31,14 +67,47 @@ add_executable(b1
 
 target_include_directories(b1 PRIVATE
     Core/Inc
+    HAL_Drv
+    BSP/Flash
     ${HAL_DIR}/Inc
     Drivers/CMSIS/Include
     Drivers/CMSIS/Device/ST/STM32H7xx/Include
 )
 target_compile_definitions(b1 PRIVATE USE_HAL_DRIVER STM32H743xx USE_PWR_LDO_SUPPLY)
+
+# 版本宏只作用于持久化布局实现，避免字符串定义散落到业务代码。
+set_property(SOURCE BSP/Flash/flash_layout.c APPEND PROPERTY COMPILE_DEFINITIONS
+    FIRMWARE_VERSION_MAJOR=${FIRMWARE_VERSION_MAJOR}
+    FIRMWARE_VERSION_MINOR=${FIRMWARE_VERSION_MINOR}
+    FIRMWARE_VERSION_PATCH=${FIRMWARE_VERSION_PATCH}
+    FIRMWARE_BUILD_NUMBER=${FIRMWARE_BUILD_NUMBER}
+    FIRMWARE_BUILD_TIME_UTC="${FIRMWARE_BUILD_TIME_UTC}"
+    FIRMWARE_GIT_COMMIT="${FIRMWARE_GIT_COMMIT}"
+    FIRMWARE_GIT_DIRTY=${FIRMWARE_GIT_DIRTY}
+    FIRMWARE_BUILD_ID="${CMAKE_BUILD_TYPE}"
+    FIRMWARE_TARGET="b1-h743"
+)
 target_link_libraries(b1 m)
 target_link_options(b1 PRIVATE -Wl,-Map=b1.map)
 set_target_properties(b1 PROPERTIES ADDITIONAL_CLEAN_FILES b1.map)
+
+# 产出PC/量产工具可直接写入W25Q256的96字节版本载荷及校验清单。
+add_custom_command(TARGET b1 POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:b1> ${CMAKE_BINARY_DIR}/b1.bin
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_firmware_manifest.py
+            --image ${CMAKE_BINARY_DIR}/b1.bin
+            --json ${CMAKE_BINARY_DIR}/b1.manifest.json
+            --version-payload ${CMAKE_BINARY_DIR}/b1.version.bin
+            --version "${FIRMWARE_VERSION_MAJOR}.${FIRMWARE_VERSION_MINOR}.${FIRMWARE_VERSION_PATCH}"
+            --build-number "${FIRMWARE_BUILD_NUMBER}"
+            --build-time "${FIRMWARE_BUILD_TIME_UTC}"
+            --git-commit "${FIRMWARE_GIT_COMMIT}"
+            --git-dirty "${FIRMWARE_GIT_DIRTY}"
+            --build-id "${CMAKE_BUILD_TYPE}"
+            --target "b1-h743"
+    COMMENT "Generating B1 firmware CRC32 manifest and W25Q256 version payload"
+    VERBATIM
+)
 
 set(BOOT_OBJ ${CMAKE_BINARY_DIR}/boot.s.o)
 set(BOOT_ELF ${CMAKE_BINARY_DIR}/boot.elf)

@@ -10,6 +10,10 @@ mode-3 master and USART1/2/UART4. The V2-accepted result LED state machine has
 been ported to PG0-PG5; PG6 remains off until its single-color status meaning is
 frozen.
 B1 uses a UID-derived locally administered MAC.
+The V2-accepted W25Q256 driver and version/FRU v1 records are also present.
+Startup initializes QSPI but deliberately does not write the production metadata
+sectors. Each build emits `b1.bin`, `b1.manifest.json` and the 96-byte
+`b1.version.bin` payload.
 
 B1 has no temperature-control or forwarding role. PC controls the B2 MCU
 directly; B1 SPI2 is reserved only for B1-B2 keepalive.
@@ -34,8 +38,10 @@ logic-analyzer or hardware acceptance pass. Port behavior and protocol code;
 keep pins, reset paths, PHY model, UART choice and peripheral handles local to
 B1. Add only the smallest B1 check that proves the migrated module.
 
-Not copied by design: V2 `App`, `BSP`, `LWIP`, `Middlewares`, board demos,
-stress tests, extracted schematics and temporary files.
+Not copied by design: V2 board glue, unaccepted `App`/`BSP` modules, board demos,
+stress tests, extracted schematics and temporary files. The next milestone
+explicitly migrates FreeRTOS and LwIP for the final TCP gateway, while keeping
+PHY reset, MAC and RK UART routing B1-local.
 
 ## Result LED bring-up image
 
