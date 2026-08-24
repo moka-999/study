@@ -7,8 +7,11 @@
   machine enables them.
 - SPI2 is the B1 slave on B2's shared master bus: mode 0, 8-bit MSB and hardware
   NSS low. B2 selects eight B1 slots with independent CS GPIOs and initially
-  clocks at 1 MHz. Mailbox, polling, retries, handshake and business protocol
+  clocks at 1 MHz. This link is keepalive-only: never add temperature-control
+  forwarding or other business commands. Keepalive payload, cadence and timeout
   remain deferred to the B2 joint review. SPI4 is the AD7124 mode-3 master.
+- B1 has no temperature-control role. PC communicates directly with the B2 MCU;
+  the B2 firmware owns heating and all other backplane-level control.
 - PH4/PH5 are the schematic's logical I2C4 bus and must remain open-drain GPIOs
   for software I2C; do not configure the invalid `GPIO_AF4_I2C4` mapping.
 - Final RK links are UART4 and USART2. USART1 is local console only.

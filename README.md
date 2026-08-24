@@ -9,6 +9,9 @@ I2C4 software bus on PH4/PH5, B1 SPI2 mode-0 hardware-NSS slave, AD7124 SPI4
 mode-3 master, USART1/2, UART4 and the PG0-PG6 LED walk.
 B1 uses a UID-derived locally administered MAC.
 
+B1 has no temperature-control or forwarding role. PC controls the B2 MCU
+directly; B1 SPI2 is reserved only for B1-B2 keepalive.
+
 `b1.ioc` is the CubeMX pin/clock baseline and was generated with
 `D:\stm32cubemx\STM32CubeMX.exe`. PH4/PH5 deliberately stay open-drain GPIOs:
 the schematic calls this bus I2C4, but those pins are not an STM32 I2C4 AF pair.
