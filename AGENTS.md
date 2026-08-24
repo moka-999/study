@@ -13,10 +13,11 @@ STM32H743 **阿波罗 V2** 板，作为 **TCP server + TLV 协议中继**，把 
 ```
 PC ──TCP:8888──► MCU(STM32H743) ──逻辑 RK 串口──► RK3588
                                        └─ 阿波罗 V2: USART1 / B1: UART4 或 USART2（待真机定）
-B1 MCU ×8 ──各自独立SPI2(PB12-PB15), 暂定B1主/B2从──► B2 MCU ──► 全部加热及其他底板级控制
+B2 MCU（共享SPI主机）──SCK/MOSI/MISO + CS0..7──► B1 MCU ×8（各自SPI2从机）
+                                                        └─ B2 MCU拥有全部加热及其他底板级控制权
 ```
 
-B2 MCU由其他同事开发并提供8路独立SPI分别连接8块B1；B1–B2 MCU的模式、速率、轮询和业务协议后续与PC/B1 MCU/RK协议一起冻结。
+B2 MCU由其他同事开发：一组SPI主机共享SCK/MOSI/MISO，并用8个独立CS选择8块B1。B1的SPI2暂按从机、Mode 0、8位MSB、硬件NSS低有效配置；B2初始时钟暂按1MHz。邮箱长度、精确轮询周期、重试/幂等、启动握手和业务命令留待B2双方评审冻结。
 
 **软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (YT8512C, RMII) + TLV 协议。B1是同级独立工程 `../b1`，不在本V2源码树内混合构建。
 
@@ -120,7 +121,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 6. **D-Cache 已关** → 无 cache 一致性顾虑，**勿再加 `SCB_InvalidateDCache_by_Addr`**（否则 UsageFault 升级 HardFault）。
 7. **DMA 够不到 DTCMRAM**（DMA 在 D2 域），DMA 缓冲放 AXI SRAM (RAM, 0x24000000)。
 8. **FreeRTOS 堆(128KB)手动挪到 AXI SRAM**（`heap_4.c` 的 `.heap` section + linker），不是 CubeMX 默认位置。
-9. **SPI2按板型互斥**：Apollo V2临时给AD7124开发；最终B1给B2 MCU通信，AD7124改SPI4。两个任务不得同时占用SPI2。
+9. **SPI2按板型互斥**：Apollo V2临时给AD7124开发（主机Mode 3）；最终B1以SPI2从机连接B2主机，AD7124改SPI4。两个任务不得同时占用SPI2。
 
 ---
 
@@ -135,7 +136,8 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ❌ `pwr_ctrl`、MCP4725/Boot 模式、真实 monitor 上报及对应 TLV 命令尚未实现
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
 - ✅ B1已拆分为同级独立工程`../b1`：46/46静态合同通过，V2验收通过的模块才逐个移植
-- 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`doc/glossary.md`
+- ✅ 2026-08-24：B1–B2职责与SPI主从已纠正；B1基线为从机Mode 0/硬件NSS，协议细节继续待B2联调
+- 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`CONTEXT.md`
 
 **下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B1/B2真板验证）
 > **两阶段策略**：阶段一 = 阿波罗 V2 开发（驱动代码 + Mock + 逻辑分析仪波形验证，当前无外接模块）；阶段二 = B1/B2 真板（到货后：引脚重映射 + 实测标定 + RK/B2 MCU 联调）
@@ -144,17 +146,17 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 3. **pwr_ctrl**（PC6/PC7/PG11 上电时序, 默认 OFF 已确认）— 阻塞所有电源类驱动
 4. **TPS62868/69**（A版VSET配置：VDD1/VDD2/VDDQ地址0x49/0x41/0x4F；与pwr_on联动）
 5. **PAC1934T**（I2C4, 0x2C）+ **AD7124**（SPI4 PE11-14，完成Mock/波形验证后待真板标定）
-6. **B1–B2 MCU SPI**（8路点对点，暂定B1主/B2从；B2 MCU负责全部加热和其他底板级控制；其余协议待冻结）
+6. **B1–B2 MCU SPI**（B2共享总线主机+8个独立CS，8块B1均为SPI2从机；Mode 0/8位MSB/初始1MHz；其余协议待冻结）
 7. **Boot 模式控制**（MCP4725 DAC, I2C2, 0x60 → BOOT_SARADC_IN0）
 8. **LED结果显示**（3颗双色灯分别显示2组LPDDR4/4X和1组eMCP；另2颗单色灯显示上电/板卡状态，语义待定）
 9. **W25Q256/版本信息**（基础存储和PC查询；初版不实现OTA）
 10. B1 板到货后：UART4/USART2 从 CH340 切到 RS0102→RK3588 真机联调（**注意不是 USART1**）
 11. 高波特率（460800/921600）DMA+IDLE（等真机 RS0102）
 
-### B2 板原理图（MB360）已解析结论（2026-08，几何法从 PDF 提取）
+### B1 测试单元原理图（MB360）已解析结论（2026-08，几何法从 PDF 提取）
 
 > 分析工具：`tools/sch_netlist.py`（PDF 矢量线段重建网络表，无视觉模型可用）。
-> 原理图源：`docs/MYZR-RK3588-ZUOYI_SCH_20260807-.pdf`（P1-16 RK 核心板 CB314，**P17-23 底板 MB360 = B2**，P24 DIMM314 连接器）。
+> 原理图源：`docs/MYZR-RK3588-ZUOYI_SCH_20260807-.pdf`（P1-16 RK 核心板 CB314，**P17-23 MB360 = 单个B1测试单元**，P24 DIMM314 连接器）。8槽B2底板是另一块板，不能与MB360混称。
 
 **⚠️ 重要修正**：真机 RK3588 通信**不是 USART1**！是 **UART4 (PA11=RX/PA12=TX) + USART2 (PD5=TX/PD6=RX) 各经一路 RS0102 电平转换**（U4008: UART0_M0↔UART4；U4013: UART2_M0_DEBUG↔USART2）。USART1(PA9/PA10) 只是板上本地串口。硬件上电时 RK 的 UART0_M0 是 BMC console，联调应改用 UART4/USART2（待真机验证）。
 
@@ -170,9 +172,9 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 | LED | PG0-6 → 2N7002 | 三颗红绿双色结果灯（2×LPDDR4/4X+1×eMCP）+ 单色LED4；另有`CPU_GPIO_PWR`单色LED5 | 红常亮FAIL、绿常亮PASS、橙闪常温测试中、红闪高温测试中；闪烁亮500ms/灭500ms；两颗单色语义待定 |
 | SWD/调试 | PA13=JTMS PA14=JTCK, NRST→MCU_RESET_L, BOOT0 | | |
 | ETH RMII | PA1 REF_CLK / PA2 MDIO / PA7 CRS_DV / PB11 TX_EN / PC1 MDC / PC4 PC5 RXD0/1 / PG13 PG14 TXD0/1 | 经 SN74LVC1G3157×8 可选 B1(核心板)/B2(背板) | YT8512H (P23) |
-| SPI2 (PB12-15, MCU_SPI_*) | B1主 ↔ B2从（暂定） | B2有8路独立SPI分别连接8块B1；用于加热/底板控制，模式、速率、轮询和帧协议待定义 | |
+| SPI2 (PB12-15, MCU_SPI_*) | B1从机 ↔ B2主机 | B2共享SCK/MOSI/MISO并以8个独立CS选槽；B1基线Mode 0、8位MSB、硬件NSS低有效，B2初始1MHz；协议待定义 | |
 
-> **职责边界**：风扇PWM由RK3588控制；全部加热和其他底板级控制由B2 MCU负责，B1 MCU只通过SPI交换命令/状态。P24的“VCC_24V软开关输出”与上方人工按键`PWRON_L`不是同一网络。B1 MCU主电源控制引脚是PC6/PC7/PG11。
+> **职责边界**：风扇PWM由RK3588控制；全部加热和其他底板级控制由B2 MCU负责，B1 MCU只通过SPI提出请求和读取状态，B2负责轮询与仲裁。B1正常RK上电/重启走PC6/PC7/PG11；B2的`/RESET_n`接RK3588/RK806 `RESET_L`（1.8V域），`/MCU_RESET_n`接B1 STM32 `NRST/MCU_RESET_L`（3.3V域），仅作异常恢复。P24的“VCC_24V软开关输出”与人工按键`PWRON_L`不是同一网络。
 
 ### 原理图 20260811 版新增（docs/MYZR-RK3588-ZUOYI_SCH_20260811.pdf, 当前最新）
 

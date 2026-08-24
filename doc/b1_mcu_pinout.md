@@ -46,7 +46,7 @@
 ## SPI
 | SPI | 引脚 | 连接 |
 |-----|------|------|
-| SPI2 | PB13(SCK)/PB14(MISO)/PB15(MOSI)/PB12(NCS) | B1主↔B2从（暂定）；B2有8路独立SPI |
+| SPI2 | PB13(SCK输入)/PB14(MISO输出)/PB15(MOSI输入)/PB12(NSS输入) | B1从机↔B2共享总线主机；B2以每槽独立CS选择8块B1，Mode 0、8位MSB、硬件NSS低有效 |
 | SPI4 | PE12(SCK)/PE13(MISO)/PE14(MOSI)/PE11(NSS) | AD7124 |
 
 ## 电源控制 GPIO
