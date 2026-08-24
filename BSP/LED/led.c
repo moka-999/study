@@ -30,3 +30,35 @@ void led_off(int led)
   if (led < 0 || led > 1) return;
   HAL_GPIO_WritePin(led_ports[led], led_pins[led], GPIO_PIN_SET);
 }
+
+led_result_levels_t led_result_render(led_result_state_t state,
+                                      uint8_t blink_on)
+{
+  led_result_levels_t levels = { 0U, 0U };
+
+  switch (state) {
+  case LED_RESULT_PASS:
+    levels.green_on = 1U;
+    break;
+
+  case LED_RESULT_FAIL:
+    levels.red_on = 1U;
+    break;
+
+  case LED_RESULT_TEST_NORMAL:
+    /* 红绿同时点亮形成橙色；灭相位必须同时关闭。 */
+    levels.red_on = blink_on ? 1U : 0U;
+    levels.green_on = levels.red_on;
+    break;
+
+  case LED_RESULT_TEST_HOT:
+    levels.red_on = blink_on ? 1U : 0U;
+    break;
+
+  case LED_RESULT_OFF:
+  default:
+    break;
+  }
+
+  return levels;
+}

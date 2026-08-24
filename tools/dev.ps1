@@ -1,11 +1,17 @@
 param(
-    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'pwr-wave-build')]
+    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'pwr-wave-build', 'led-test', 'led-wave-build')]
     [string]$Task = 'build'
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$buildDirName = if ($Task -eq 'pwr-wave-build') { 'build_pwr_wave' } else { 'build_debug' }
+$buildDirName = if ($Task -eq 'pwr-wave-build') {
+    'build_pwr_wave'
+} elseif ($Task -eq 'led-wave-build') {
+    'build_led_wave'
+} else {
+    'build_debug'
+}
 $buildDir = Join-Path $repo $buildDirName
 
 function Find-BundledExe([string]$bundle, [string]$exe) {
@@ -25,9 +31,15 @@ function Find-Python {
     throw 'Python not found. Install Python 3 or add python.exe to PATH.'
 }
 
-if ($Task -eq 'protocol-test' -or $Task -eq 'pwr-test') {
+if ($Task -eq 'protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'led-test') {
     $python = Find-Python
-    $script = if ($Task -eq 'pwr-test') { 'tests\verify_pwr_ctrl.py' } else { 'tests\verify_protocol_v2.py' }
+    $script = if ($Task -eq 'pwr-test') {
+        'tests\verify_pwr_ctrl.py'
+    } elseif ($Task -eq 'led-test') {
+        'tests\verify_result_led.py'
+    } else {
+        'tests\verify_protocol_v2.py'
+    }
     & $python -B -X utf8 (Join-Path $repo $script)
     exit $LASTEXITCODE
 }
@@ -46,10 +58,11 @@ if (-not $ninja) { throw 'STM32Cube Ninja not found.' }
 if (-not (Test-Path -LiteralPath (Join-Path $buildDir 'build.ninja'))) {
     $cmake = Find-BundledExe 'cmake' 'cmake.exe'
     if (-not $cmake) { throw 'STM32Cube CMake not found.' }
-    $waveOption = if ($Task -eq 'pwr-wave-build') { '-DENABLE_PWR_WAVE_TEST=ON' } else { '-DENABLE_PWR_WAVE_TEST=OFF' }
+    $pwrWaveOption = if ($Task -eq 'pwr-wave-build') { '-DENABLE_PWR_WAVE_TEST=ON' } else { '-DENABLE_PWR_WAVE_TEST=OFF' }
+    $ledWaveOption = if ($Task -eq 'led-wave-build') { '-DENABLE_RESULT_LED_WAVE_TEST=ON' } else { '-DENABLE_RESULT_LED_WAVE_TEST=OFF' }
     & $cmake -S $repo -B $buildDir -G Ninja `
         "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake" `
-        -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_MAKE_PROGRAM=$ninja" $waveOption
+        -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_MAKE_PROGRAM=$ninja" $pwrWaveOption $ledWaveOption
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 

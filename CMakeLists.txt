@@ -24,6 +24,9 @@ set(CMAKE_PROJECT_NAME test)
 # 仅用于阿波罗 V2 逻辑分析仪验收；默认关闭，正式镜像绝不跳过 DDR 器件访问。
 option(ENABLE_PWR_WAVE_TEST "Build Apollo V2 pwr_ctrl waveform image" OFF)
 
+# 仅用于阿波罗 V2 六路结果灯逻辑分析仪验收；正式镜像默认关闭。
+option(ENABLE_RESULT_LED_WAVE_TEST "Build Apollo V2 result LED waveform image" OFF)
+
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
@@ -66,6 +69,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/led_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/monitor_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pwr_wave_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/result_led_wave_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/qspi_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/tcp_task.c
@@ -100,6 +104,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
     $<$<BOOL:${ENABLE_PWR_WAVE_TEST}>:ENABLE_PWR_WAVE_TEST=1>
+    $<$<BOOL:${ENABLE_RESULT_LED_WAVE_TEST}>:ENABLE_RESULT_LED_WAVE_TEST=1>
 )
 
 # Remove wrong libob.a library dependency when using cpp files

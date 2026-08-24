@@ -2,6 +2,7 @@
 build/
 build_debug/
 build_pwr_wave/
+build_led_wave/
 *.o
 *.a
 *.elf

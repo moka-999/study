@@ -160,6 +160,11 @@ void MX_FREERTOS_Init(void) {
   extern void StartPwrWaveTask(void *argument);
   xTaskCreate(StartPwrWaveTask, "pwrWave", 256, NULL, 2, NULL);
 #endif
+#if defined(ENABLE_RESULT_LED_WAVE_TEST) && ENABLE_RESULT_LED_WAVE_TEST
+  /* 结果灯测试镜像使用六路替代GPIO，正式构建不会创建该任务。 */
+  extern void StartResultLedWaveTask(void *argument);
+  xTaskCreate(StartResultLedWaveTask, "resultLedWave", 256, NULL, 2, NULL);
+#endif
   /* QSPI Flash 独立测试 */
   //extern void StartQspiTestTask(void *argument);
   //xTaskCreate(StartQspiTestTask, "qspiTest", 1024, NULL, 3, NULL);
