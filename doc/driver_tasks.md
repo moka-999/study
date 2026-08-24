@@ -34,7 +34,7 @@ B2 底板 (母板, 8 槽)
 
 ```
 V2 可验证的：
-  · GPIO 逻辑（PC6/7/PG11 替代引脚翻转时序）
+  · GPIO 逻辑（阿波罗V2实脚PC6/PC7/PG11翻转时序）
   · I2C/SPI 请求帧、重试、超时和错误路径（Mock + 逻辑分析仪）
   · TLV 命令接入 + python 测试脚本（协议层全部可测）
 V2 不可验证、留给 B1 真板的：
@@ -93,7 +93,7 @@ V2 不可验证、留给 B1 真板的：
 
 **待定/待实测**：PC6/PC7的先后关系以RK3588/RK806和最终硬件要求为准；PG11→TPS I2C配置→LPDDR三轨稳定的顺序已确定。当前固件不内置猜测值，只有调用`pwr_ctrl_configure()`明确提供配置后才允许上电。`PWR_3V3_MCU_INDEP`、各阶段延时和最小掉电时间待真板验证，不把离线测试值或旧的10/10/50ms当作批准值。状态等待不休眠，但现有`ddr_power_init()`仍使用同步I2C事务，实时性优化留到真板需求明确后。
 
-**V2逻辑分析仪波形镜像**：执行`powershell -ExecutionPolicy Bypass -File tools/dev.ps1 pwr-wave-build`，烧录`build_pwr_wave/test.elf`。探头接PF2（模拟PC6/4V0）、PC7（模拟PC7/3V3）、PG1（模拟PG11/DDR）和GND。启动约2秒后循环输出：PF2↑ → 500ms → PC7↑ → 500ms → PG1↑ → 1500ms → PG1↓ → 500ms → PC7↓ → 500ms → PF2↓ → 1000ms后重复。500ms仅用于波形辨识；该镜像跳过V2不存在的TPS器件访问，编译期禁止`GPIO_USE_B1=1`，不得烧入B1。
+**V2逻辑分析仪波形镜像**：执行`powershell -ExecutionPolicy Bypass -File tools/dev.ps1 pwr-wave-build`，烧录`build_pwr_wave/test.elf`。根据正点原子官方底板原理图V2.6，探头接P2-31/PC6（4V0）、P2-32/PC7（3V3）、P3-31/PG11（DDR）和GND；这三根与B1目标引脚完全相同，不再使用替代脚。启动约2秒后循环输出：PC6↑ → 500ms → PC7↑ → 500ms → PG11↑ → 1500ms → PG11↓ → 500ms → PC7↓ → 500ms → PC6↓ → 1000ms后重复。500ms仅用于波形辨识；测试时不得插摄像头或LCD。该镜像跳过V2不存在的TPS器件访问，编译期禁止`GPIO_USE_B1=1`，不得烧入B1。
 
 ## 3. TPS62868 DDR 电源（I2C1/2/4）
 
@@ -267,7 +267,7 @@ P24 Table 1已确定0～1.8V的Boot模式目标。3.3V供电下的DAC码可由�
 | SPI2 | PB12=NSS输入 PB13=SCK输入 PB14=MISO输出 PB15=MOSI输入 (`MCU_SPI_*`) | 仅保活；B1从↔B2共享总线主，B2每槽独立CS；Mode 0、8位MSB、硬件NSS低有效，初始1MHz | B1静态合同+构建；B1/B2真板波形 |
 | ETH RMII | PA1/PA2/PA7/PB11/PC1/PC4/PC5/PG13/PG14 | YT8512H | 现用 |
 | ETH PHY复位 | PG12=`ETH_nRST` | 经ETH switch到B1/B2 PHY；PA0是WK-UP | B1 pincheck |
-| pwr_ctrl | PC6=4.0V EN, PC7=3.3V EN, PG11=DDR EN | 上电时序 | V2 GPIO 模拟 |
+| pwr_ctrl | PC6=4.0V EN, PC7=3.3V EN, PG11=DDR EN | 上电时序 | V2同名GPIO实脚验证 |
 | LED | PG0-6 | 三颗双色结果灯（2×LPDDR4/4X + 1×eMCP）+ 单色LED4；另有`CPU_GPIO_PWR`单色LED5 | V2 替代GPIO波形 |
 | SWD | PA13=JTMS PA14=JTCK | | |
 

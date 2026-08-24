@@ -17,7 +17,7 @@
 #include "ddr_power.h"
 
 #if defined(ENABLE_PWR_WAVE_TEST) && ENABLE_PWR_WAVE_TEST && GPIO_USE_B1
-#error "ENABLE_PWR_WAVE_TEST 只允许用于阿波罗 V2 替代引脚，禁止用于 B1 真板"
+#error "ENABLE_PWR_WAVE_TEST 只允许用于阿波罗 V2 验证，禁止用于 B1 真板"
 #endif
 
 static pwr_ctrl_config_t s_config;
@@ -148,7 +148,7 @@ void pwr_ctrl_process(uint32_t now_ms)
         if (delay_elapsed(now_ms, s_config.ddr_enable_to_config_delay_ms)) {
 #if defined(ENABLE_PWR_WAVE_TEST) && ENABLE_PWR_WAVE_TEST
             /*
-             * V2 未装三颗 TPS62868，波形镜像只验证 GPIO 状态迁移。
+             * V2 未装三颗 TPS62868，波形镜像只验证同名GPIO状态迁移。
              * 此分支由独立构建选项启用，且上方编译期检查禁止其用于 B1。
              */
             enter_state(PWR_CTRL_STATE_ON, now_ms);

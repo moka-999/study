@@ -97,6 +97,7 @@ class Model:
 
 def verify_source_contract() -> None:
     source = (ROOT / "HAL_Drv/pwr_ctrl.c").read_text(encoding="utf-8")
+    gpio_map = (ROOT / "HAL_Drv/bsp_gpio.c").read_text(encoding="utf-8")
     header = (ROOT / "HAL_Drv/pwr_ctrl.h").read_text(encoding="utf-8")
     main = (ROOT / "Core/Src/main.c").read_text(encoding="utf-8")
     freertos = (ROOT / "Core/Src/freertos.c").read_text(encoding="utf-8")
@@ -109,12 +110,15 @@ def verify_source_contract() -> None:
     assert "vTaskDelay(" not in source and "osDelay(" not in source, "轨间等待禁止使用任务延时"
     assert "PWR_CTRL_ERR_NOT_CONFIGURED" in header, "未确认时序必须拒绝上电"
     assert "HAL_Drv/pwr_ctrl.c" in cmake, "pwr_ctrl 未加入固件构建"
+    assert gpio_map.index("HAL_GPIO_WritePin") < gpio_map.index("HAL_GPIO_Init"), \
+        "电源使能脚必须先预置低电平，再切换为输出，避免启动毛刺"
 
 
 def verify_wave_image_contract() -> None:
     """确认波形测试与正式构建隔离，且绝不会误用于 B1 真板。"""
 
     source = (ROOT / "HAL_Drv/pwr_ctrl.c").read_text(encoding="utf-8")
+    gpio_map = (ROOT / "HAL_Drv/bsp_gpio.c").read_text(encoding="utf-8")
     task = (ROOT / "App/tasks/pwr_wave_task.c").read_text(encoding="utf-8")
     freertos = (ROOT / "Core/Src/freertos.c").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
@@ -127,6 +131,9 @@ def verify_wave_image_contract() -> None:
     assert "ddr_power_init()" in source, "正式构建不得移除真实 DDR 初始化"
     assert "PWR_WAVE_STEP_MS       500U" in task, "逻辑分析仪测试步长应清晰固定"
     assert "build_pwr_wave" in dev_script, "波形镜像必须使用独立构建目录"
+    assert gpio_map.count("{ GPIOC, GPIO_PIN_6  }") == 2, "V2/B1的4.0V控制必须都是PC6"
+    assert gpio_map.count("{ GPIOC, GPIO_PIN_7  }") == 2, "V2/B1的3.3V控制必须都是PC7"
+    assert gpio_map.count("{ GPIOG, GPIO_PIN_11 }") == 2, "V2/B1的DDR控制必须都是PG11"
 
 
 def verify_four_volt_first_sequence() -> None:
