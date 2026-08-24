@@ -5,7 +5,8 @@ not import Apollo V2 application code until that module has passed V2 testing.
 
 Current image validates the final B1 pin mux, 25 MHz HSE/400 MHz clock, safe
 power defaults, YT8512H reset on PG12, W25Q256 QSPI pins, I2C1/2, the logical
-I2C4 software bus on PH4/PH5, SPI2/4, USART1/2, UART4 and the PG0-PG6 LED walk.
+I2C4 software bus on PH4/PH5, B1 SPI2 mode-0 hardware-NSS slave, AD7124 SPI4
+mode-3 master, USART1/2, UART4 and the PG0-PG6 LED walk.
 B1 uses a UID-derived locally administered MAC.
 
 `b1.ioc` is the CubeMX pin/clock baseline and was generated with

@@ -14,22 +14,36 @@ function Find-BundledExe([string]$bundle, [string]$exe) {
         Select-Object -First 1 -ExpandProperty FullName
 }
 
+function Find-Python {
+    $cmd = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    $codexPython = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+    if (Test-Path -LiteralPath $codexPython) { return $codexPython }
+
+    throw 'Python not found. Install Python 3 or add python.exe to PATH.'
+}
+
 if ($Task -eq 'check') {
-    $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
-    if (-not $python) { throw 'Python not found.' }
+    $python = Find-Python
     & $python -B -X utf8 (Join-Path $repo 'tests\verify_project.py')
     exit $LASTEXITCODE
 }
 
-$ninja = Find-BundledExe 'ninja' 'ninja.exe'
-$cmake = Find-BundledExe 'cmake' 'cmake.exe'
-$gcc = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe'
-if (-not $ninja -or -not $cmake -or -not $gcc) {
-    throw 'STM32Cube CMake, Ninja or GNU Arm toolchain not found.'
+$ninja = $null
+$cache = Join-Path $buildDir 'CMakeCache.txt'
+if (Test-Path -LiteralPath $cache) {
+    $line = Select-String -LiteralPath $cache -Pattern '^CMAKE_MAKE_PROGRAM:(?:FILEPATH|UNINITIALIZED)=(.+)$' | Select-Object -First 1
+    if ($line) { $ninja = $line.Matches[0].Groups[1].Value }
 }
-$env:PATH = "$(Split-Path -Parent $gcc);$env:PATH"
+if (-not $ninja -or -not (Test-Path -LiteralPath $ninja)) {
+    $ninja = Find-BundledExe 'ninja' 'ninja.exe'
+}
+if (-not $ninja) { throw 'STM32Cube Ninja not found.' }
 
 if (-not (Test-Path -LiteralPath (Join-Path $buildDir 'build.ninja'))) {
+    $cmake = Find-BundledExe 'cmake' 'cmake.exe'
+    if (-not $cmake) { throw 'STM32Cube CMake not found.' }
     & $cmake -S $repo -B $buildDir -G Ninja `
         "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake" `
         -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_MAKE_PROGRAM=$ninja"

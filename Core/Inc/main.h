@@ -53,7 +53,7 @@
 #define B1_I2C4_SDA_PORT       GPIOH
 #define B1_I2C4_SDA_PIN        GPIO_PIN_5
 
-/* B1 master to B2 MCU, and AD7124 */
+/* B1 SPI2 slave to B2 MCU; SPI4 master to AD7124 */
 #define B1_SPI2_NCS_PORT       GPIOB
 #define B1_SPI2_NCS_PIN        GPIO_PIN_12
 #define B1_SPI2_SCK_PORT       GPIOB

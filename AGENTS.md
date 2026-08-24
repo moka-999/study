@@ -5,7 +5,10 @@
 - PHY is YT8512H; reset is PG12 `ETH_nRST`.
 - PC6, PC7 and PG11 power enables must remain low until an explicit power-state
   machine enables them.
-- SPI2 is the B1-master/B2-slave link; SPI4 is AD7124 mode 3.
+- SPI2 is the B1 slave on B2's shared master bus: mode 0, 8-bit MSB and hardware
+  NSS low. B2 selects eight B1 slots with independent CS GPIOs and initially
+  clocks at 1 MHz. Mailbox, polling, retries, handshake and business protocol
+  remain deferred to the B2 joint review. SPI4 is the AD7124 mode-3 master.
 - PH4/PH5 are the schematic's logical I2C4 bus and must remain open-drain GPIOs
   for software I2C; do not configure the invalid `GPIO_AF4_I2C4` mapping.
 - Final RK links are UART4 and USART2. USART1 is local console only.

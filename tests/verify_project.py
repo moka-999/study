@@ -48,6 +48,11 @@ def main() -> int:
             "PG11/PG12 safe defaults missing")
     require("SPI_POLARITY_HIGH, SPI_PHASE_2EDGE" in source,
             "AD7124 SPI4 must use mode 3")
+    require("SPI_MODE_SLAVE, SPI_NSS_HARD_INPUT" in source,
+            "B1 SPI2 must be a hardware-NSS slave")
+    require("B1_SPI2_NCS_PIN | B1_SPI2_SCK_PIN" in source and
+            "HAL_GPIO_WritePin(B1_SPI2_NCS_PORT" not in source,
+            "PB12 must be SPI2 NSS input, not a GPIO output")
     require("GPIO_MODE_OUTPUT_OD" in source and "GPIO_AF4_I2C4" not in source,
             "PH4/PH5 logical I2C4 must use software open-drain GPIO")
 
@@ -55,6 +60,14 @@ def main() -> int:
     require("SPI4.CLKPolarity=SPI_POLARITY_HIGH" in ioc and
             "SPI4.CLKPhase=SPI_PHASE_2EDGE" in ioc,
             "CubeMX baseline must generate SPI4 mode 3")
+    require("SPI2.Mode=SPI_MODE_SLAVE" in ioc and
+            "SPI2.VirtualNSS=VM_NSSHARD" in ioc and
+            "PB12.Mode=NSS_Signal_Hard_Input" in ioc,
+            "CubeMX baseline must generate SPI2 slave with hardware NSS")
+    require(all(f"PB{pin}.Mode=Full_Duplex_Slave" in ioc for pin in (13, 14, 15)) and
+            "SPI2.CLKPolarity=SPI_POLARITY_LOW" in ioc and
+            "SPI2.CLKPhase=SPI_PHASE_1EDGE" in ioc,
+            "CubeMX baseline must keep SPI2 mode 0 slave pins")
     require("PH4.GPIO_Label=I2C4_SCL" in ioc and "PH5.GPIO_Label=I2C4_SDA" in ioc,
             "CubeMX baseline must preserve the PH4/PH5 logical I2C4 bus")
 
@@ -64,7 +77,7 @@ def main() -> int:
     require(not (ROOT / "LWIP").exists() and not (ROOT / "Middlewares").exists(),
             "V2 middleware was copied before migration")
     print(f"B1 independent project: {len(actual)}/{len(EXPECTED)} pins PASS")
-    print("Safe defaults, CubeMX baseline, SPI4 mode 3, YT8512H and boundary PASS")
+    print("Safe defaults, SPI2 slave mode 0, SPI4 mode 3, YT8512H and boundary PASS")
     return 0
 
 

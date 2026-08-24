@@ -125,7 +125,6 @@ static void MX_GPIO_Init(void)
     HAL_GPIO_WritePin(GPIOG, B1_PWR_DDR_EN_PIN | B1_ETH_NRST_PIN |
                             B1_LED1_PIN | B1_LED2_PIN | B1_LED3_PIN | B1_LED4_PIN |
                             B1_LED5_PIN | B1_LED6_PIN | B1_LED7_PIN, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(B1_SPI2_NCS_PORT, B1_SPI2_NCS_PIN, GPIO_PIN_SET);
     HAL_GPIO_WritePin(B1_SPI4_NCS_PORT, B1_SPI4_NCS_PIN, GPIO_PIN_SET);
     HAL_GPIO_WritePin(GPIOH, B1_I2C4_SCL_PIN | B1_I2C4_SDA_PIN, GPIO_PIN_SET);
 
@@ -138,8 +137,6 @@ static void MX_GPIO_Init(void)
                B1_LED1_PIN | B1_LED2_PIN | B1_LED3_PIN | B1_LED4_PIN |
                B1_LED5_PIN | B1_LED6_PIN | B1_LED7_PIN;
     HAL_GPIO_Init(GPIOG, &gpio);
-    gpio.Pin = B1_SPI2_NCS_PIN;
-    HAL_GPIO_Init(B1_SPI2_NCS_PORT, &gpio);
     gpio.Pin = B1_SPI4_NCS_PIN;
     HAL_GPIO_Init(B1_SPI4_NCS_PORT, &gpio);
 
@@ -159,7 +156,7 @@ static void MX_GPIO_Init(void)
 
     gpio_af(GPIOB, B1_I2C1_SDA_PIN | B1_I2C1_SCL_PIN, GPIO_AF4_I2C1, GPIO_MODE_AF_OD);
     gpio_af(GPIOF, B1_I2C2_SDA_PIN | B1_I2C2_SCL_PIN, GPIO_AF4_I2C2, GPIO_MODE_AF_OD);
-    gpio_af(GPIOB, B1_SPI2_SCK_PIN | B1_SPI2_MISO_PIN | B1_SPI2_MOSI_PIN,
+    gpio_af(GPIOB, B1_SPI2_NCS_PIN | B1_SPI2_SCK_PIN | B1_SPI2_MISO_PIN | B1_SPI2_MOSI_PIN,
             GPIO_AF5_SPI2, GPIO_MODE_AF_PP);
     gpio_af(GPIOE, B1_SPI4_SCK_PIN | B1_SPI4_MISO_PIN | B1_SPI4_MOSI_PIN,
             GPIO_AF5_SPI4, GPIO_MODE_AF_PP);
@@ -197,16 +194,16 @@ static void MX_I2C_Init(void)
     i2c_init(&hi2c2, I2C2);
 }
 
-static void spi_init(SPI_HandleTypeDef *spi, SPI_TypeDef *instance, uint32_t prescaler,
-                     uint32_t polarity, uint32_t phase)
+static void spi_init(SPI_HandleTypeDef *spi, SPI_TypeDef *instance, uint32_t mode,
+                     uint32_t nss, uint32_t prescaler, uint32_t polarity, uint32_t phase)
 {
     spi->Instance = instance;
-    spi->Init.Mode = SPI_MODE_MASTER;
+    spi->Init.Mode = mode;
     spi->Init.Direction = SPI_DIRECTION_2LINES;
     spi->Init.DataSize = SPI_DATASIZE_8BIT;
     spi->Init.CLKPolarity = polarity;
     spi->Init.CLKPhase = phase;
-    spi->Init.NSS = SPI_NSS_SOFT;
+    spi->Init.NSS = nss;
     spi->Init.BaudRatePrescaler = prescaler;
     spi->Init.FirstBit = SPI_FIRSTBIT_MSB;
     spi->Init.TIMode = SPI_TIMODE_DISABLE;
@@ -219,7 +216,9 @@ static void spi_init(SPI_HandleTypeDef *spi, SPI_TypeDef *instance, uint32_t pre
     spi->Init.MasterSSIdleness = SPI_MASTER_SS_IDLENESS_00CYCLE;
     spi->Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
     spi->Init.MasterReceiverAutoSusp = SPI_MASTER_RX_AUTOSUSP_DISABLE;
-    spi->Init.MasterKeepIOState = SPI_MASTER_KEEP_IO_STATE_ENABLE;
+    spi->Init.MasterKeepIOState = mode == SPI_MODE_MASTER ?
+                                  SPI_MASTER_KEEP_IO_STATE_ENABLE :
+                                  SPI_MASTER_KEEP_IO_STATE_DISABLE;
     spi->Init.IOSwap = SPI_IO_SWAP_DISABLE;
     require_ok(HAL_SPI_Init(spi));
 }
@@ -228,11 +227,13 @@ static void MX_SPI_Init(void)
 {
     __HAL_RCC_SPI2_CLK_ENABLE();
     __HAL_RCC_SPI4_CLK_ENABLE();
-    /* B1-B2 mode/rate are bring-up defaults until the B2 protocol is frozen. */
-    spi_init(&hspi2, SPI2, SPI_BAUDRATEPRESCALER_64,
+    /* B2 drives the shared bus; 1 MHz is the B2 bring-up clock, not a B1 divider. */
+    spi_init(&hspi2, SPI2, SPI_MODE_SLAVE, SPI_NSS_HARD_INPUT,
+             SPI_BAUDRATEPRESCALER_2,
              SPI_POLARITY_LOW, SPI_PHASE_1EDGE);
     /* AD7124 requires SPI mode 3. */
-    spi_init(&hspi4, SPI4, SPI_BAUDRATEPRESCALER_16,
+    spi_init(&hspi4, SPI4, SPI_MODE_MASTER, SPI_NSS_SOFT,
+             SPI_BAUDRATEPRESCALER_16,
              SPI_POLARITY_HIGH, SPI_PHASE_2EDGE);
 }
 
