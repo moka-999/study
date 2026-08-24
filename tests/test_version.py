@@ -188,8 +188,13 @@ def verify_source_contract() -> None:
     assert "memcmp(s_sector_buffer" in flash_bsp, "相同数据应跳过擦写"
     assert "page_is_erased" in flash_bsp, "擦除态页面不应重复编程"
     assert "(addr / W25Q_PAGE_SIZE)" in qspi, "页写必须拒绝跨页"
-    assert "FLASH_LAYOUT_SELF_TEST_BASE" in qspi_test
+    assert "SELF_TEST_RAW_ADDRESS" in qspi_test
+    assert "0x01FFE000UL" in qspi_test, "真板测试必须覆盖16MiB以上四字节地址"
+    assert "SELF_TEST_ALIAS_ADDRESS" in qspi_test, "高地址测试必须检查24位地址回卷"
+    assert "firmware_version_save" in qspi_test and "fru_info_save" in qspi_test
+    assert "NVIC_SystemReset" in qspi_test, "真板测试必须验证复位后的数据保持"
     assert "W25Q_CAPACITY - W25Q_SECTOR_SIZE" not in qspi_test
+    assert "ENABLE_FLASH_SELF_TEST" in cmake
     assert "gen_firmware_manifest.py" in cmake
     assert "KEEP(*(.firmware_version))" in linker, "编译期版本信息被链接器回收"
 

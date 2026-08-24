@@ -112,18 +112,31 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
+#if !defined(ENABLE_FLASH_SELF_TEST) || !ENABLE_FLASH_SELF_TEST
   /* 注册 UART 接口 (先不创建 mutex, 避免堆碎片化) */
   extern uart_if_t uart1_if, uart2_if;
   uart_register(0, &uart1_if);
   uart_register(1, &uart2_if);
   uart_start_all();
+#endif
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
   /* creation of defaultTask */
+#if !defined(ENABLE_FLASH_SELF_TEST) || !ENABLE_FLASH_SELF_TEST
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+#endif
 
   /* USER CODE BEGIN RTOS_THREADS */
+#if defined(ENABLE_FLASH_SELF_TEST) && ENABLE_FLASH_SELF_TEST
+  /*
+   * W25Q256硬件自检镜像只保留自检和喂狗任务，避免网关任务占用USART1，
+   * 也避免任何非Flash业务影响串口日志与复位持久化判断。
+   */
+  extern void StartQspiTestTask(void *argument);
+  xTaskCreate(StartQspiTestTask, "qspiTest", 2048, NULL, 3, NULL);
+  xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
+#else
   /* creation of ledBlinkTask */
   xTaskCreate(StartLedBlinkTask, "ledBlinkTask", 128, NULL, 1, &ledBlinkTaskHandle);
   /* TCP server — 完整 socket+TLV 协议需 sm(1056)+rxbuf(1024)+frame(1172)+resp(1040)
@@ -165,9 +178,7 @@ void MX_FREERTOS_Init(void) {
   extern void StartResultLedWaveTask(void *argument);
   xTaskCreate(StartResultLedWaveTask, "resultLedWave", 256, NULL, 2, NULL);
 #endif
-  /* QSPI Flash 独立测试 */
-  //extern void StartQspiTestTask(void *argument);
-  //xTaskCreate(StartQspiTestTask, "qspiTest", 1024, NULL, 3, NULL);
+#endif /* ENABLE_FLASH_SELF_TEST */
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -185,8 +196,10 @@ void MX_FREERTOS_Init(void) {
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
+#if !defined(ENABLE_FLASH_SELF_TEST) || !ENABLE_FLASH_SELF_TEST
   /* init code for LWIP */
   MX_LWIP_Init();
+#endif
   /* USER CODE BEGIN StartDefaultTask */
   /* Infinite loop */
   for(;;)

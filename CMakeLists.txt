@@ -27,6 +27,9 @@ option(ENABLE_PWR_WAVE_TEST "Build Apollo V2 pwr_ctrl waveform image" OFF)
 # 仅用于阿波罗 V2 六路结果灯逻辑分析仪验收；正式镜像默认关闭。
 option(ENABLE_RESULT_LED_WAVE_TEST "Build Apollo V2 result LED waveform image" OFF)
 
+# 仅用于阿波罗 V2 板载 W25Q256；所有破坏性访问限制在末尾 64 KiB。
+option(ENABLE_FLASH_SELF_TEST "Build isolated Apollo V2 W25Q256 self-test image" OFF)
+
 # 固件身份由构建系统统一提供，禁止在 C 源文件中散落手写版本字符串。
 set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
 set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
@@ -140,6 +143,7 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
     $<$<BOOL:${ENABLE_PWR_WAVE_TEST}>:ENABLE_PWR_WAVE_TEST=1>
     $<$<BOOL:${ENABLE_RESULT_LED_WAVE_TEST}>:ENABLE_RESULT_LED_WAVE_TEST=1>
+    $<$<BOOL:${ENABLE_FLASH_SELF_TEST}>:ENABLE_FLASH_SELF_TEST=1>
 )
 
 # 版本宏只影响 flash_layout.c，刷新构建时间时无需重编译整个固件。

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test')]
+    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build')]
     [string]$Task = 'build'
 )
 
@@ -9,6 +9,8 @@ $buildDirName = if ($Task -eq 'pwr-wave-build') {
     'build_pwr_wave'
 } elseif ($Task -eq 'led-wave-build') {
     'build_led_wave'
+} elseif ($Task -eq 'flash-self-test-build') {
+    'build_flash_self_test'
 } else {
     'build_debug'
 }
@@ -77,12 +79,14 @@ $cmake = Find-BundledExe 'cmake' 'cmake.exe'
 if (-not $cmake) { throw 'STM32Cube CMake not found.' }
 $pwrWaveOption = if ($Task -eq 'pwr-wave-build') { '-DENABLE_PWR_WAVE_TEST=ON' } else { '-DENABLE_PWR_WAVE_TEST=OFF' }
 $ledWaveOption = if ($Task -eq 'led-wave-build') { '-DENABLE_RESULT_LED_WAVE_TEST=ON' } else { '-DENABLE_RESULT_LED_WAVE_TEST=OFF' }
+$flashSelfTestOption = if ($Task -eq 'flash-self-test-build') { '-DENABLE_FLASH_SELF_TEST=ON' } else { '-DENABLE_FLASH_SELF_TEST=OFF' }
 $cmakeArgs = @(
     '-S', $repo, '-B', $buildDir, '-G', 'Ninja',
     '-DCMAKE_BUILD_TYPE=Debug',
     "-DCMAKE_MAKE_PROGRAM=$ninja",
     $pwrWaveOption,
-    $ledWaveOption
+    $ledWaveOption,
+    $flashSelfTestOption
 )
 if (-not (Test-Path -LiteralPath $cache)) {
     $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake"

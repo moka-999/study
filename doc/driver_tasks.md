@@ -244,7 +244,7 @@ P24 Table 1已确定0～1.8V的Boot模式目标。3.3V供电下的DAC码可由�
 
 初版不实现 OTA 下载、镜像切换、搬移或回滚；这里只保证接口和元数据布局不妨碍后续增加 OTA。
 
-**当前实现（2026-08-24）**：32 MiB 分区、版本/FRU双副本记录、IEEE CRC-32、generation回绕和构建后镜像清单已完成，详见 [flash_layout.md](flash_layout.md)。版本与FRU各用两个独立4 KiB扇区；两个2 MiB OTA槽仅预留地址。ARM构建和逐字节掉电中断离线模型通过，本轮未擦写开发板W25Q256。PC查询命令、生产字段评审、量产写入工具和全部OTA行为仍未实现。
+**当前实现（2026-08-24）**：32 MiB 分区、版本/FRU双副本记录、IEEE CRC-32、generation回绕和构建后镜像清单已完成，详见 [flash_layout.md](flash_layout.md)。版本与FRU各用两个独立4 KiB扇区；两个2 MiB OTA槽仅预留地址。ARM构建和逐字节掉电中断离线模型通过；Apollo V2板载W25Q256真板自检也已通过JEDEC/QE、边界、跨页、RMW、16MiB以上四字节地址、A/B CRC回退和软件复位保持。PC查询命令、生产字段评审、量产写入工具和全部OTA行为仍未实现。
 
 PC板卡定位响应的最小内容已确定为：运行时实际IPv4、TCP端口、实际MAC、FRU序列号、FRU站点标签和固件语义版本。FRU另保存静态/DHCP模式及配置IP；DHCP场景不得把持久化配置地址当作当前地址。CmdID和二进制编码仍随本地管理协议一起冻结，本轮不抢占候选命令号。
 
@@ -271,7 +271,7 @@ PC板卡定位响应的最小内容已确定为：运行时实际IPv4、TCP端�
 | `tests/test_idd.py`（待创建） | PAC1934T + AD7124 请求和换算 | V2 Mock+波形 / B1 真机 |
 | `tests/test_boot_mode.py`（待创建） | DAC码映射和I2C请求 | V2 Mock+波形 / B1 真机 |
 | `tests/test_led.py`（待创建） | 结果灯状态映射和GPIO波形 | V2 Mock / B1 真机 |
-| `tests/test_version.py` | 分区、CRC、版本载荷、FRU双副本和掉电恢复；查询响应待协议冻结 | 离线通过 / V2待测 |
+| `tests/test_version.py`、`capture_flash_self_test.py` | 分区、CRC、版本载荷、FRU双副本、掉电模型及板载Flash日志；查询响应待协议冻结 | 离线通过 / V2真板通过 |
 | `tests/test_b2_spi.py`（保活定义后创建） | B1–B2 MCU SPI保活、超时和错误恢复 | B1/B2联合Mock+逻辑分析仪 |
 
 > 当前没有外接模块；TPS62868/PAC1934/AD7124/MCP4725的真实器件回读、输出和精度验证留到B1真板，SPI保活留到B1/B2联合验证。

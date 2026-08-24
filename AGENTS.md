@@ -59,6 +59,7 @@ B2 MCU由其他同事开发并由PC直接管理温控；B1不控制、代理或�
 powershell -ExecutionPolicy Bypass -File tools/dev.ps1 build
 # 全量重建：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 rebuild
 # V2电源波形镜像：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 pwr-wave-build
+# V2板载W25Q256隔离自检（只使用末尾64KiB）：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 flash-self-test-build
 ```
 
 ### 烧录（SWD）— 两步: 先 Bootloader 后 App
@@ -141,7 +142,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ❌ MCP4725/Boot 模式、真实 monitor 上报及对应 TLV 命令尚未实现
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
 - ✅ B1已拆分为同级独立工程`../b1`：46/46静态合同通过，V2验收通过的模块才逐个移植
-- ✅ W25Q256已定义32MiB分区、版本/FRU双副本、网络配置/站点标签、CRC32和构建清单；ARM构建及逐字节掉电模型通过，板载Flash待复测
+- ✅ W25Q256已定义32MiB分区、版本/FRU双副本、网络配置/站点标签、CRC32和构建清单；ARM构建、逐字节掉电模型及V2板载Flash真测通过（JEDEC/QE/跨页/RMW/四字节地址/CRC回退/复位保持）
 - ✅ 2026-08-24：结果灯业务逻辑已移植B1 PG0-PG5（B1提交`f24473f`），构建通过；红绿/对象顺序和上电毛刺待真板
 - ✅ 2026-08-24：B1取消温控职责，温控改为PC直连B2；B1–B2 SPI仅保活，B1基线为从机Mode 0/硬件NSS
 - 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`CONTEXT.md`
@@ -156,7 +157,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 6. **B1–B2 MCU SPI保活**（B2共享总线主机+8个独立CS，8块B1均为SPI2从机；Mode 0/8位MSB/初始1MHz；保活载荷/周期/超时待冻结）
 7. **Boot 模式控制**（MCP4725 DAC, I2C2, 0x60 → BOOT_SARADC_IN0）
 8. **LED结果显示**（3颗双色灯分别显示2组LPDDR4/4X和1组eMCP；另2颗单色灯显示上电/板卡状态，语义待定）
-9. **W25Q256/版本信息**（基础布局和FRU双副本软件闭环；待板载Flash复测及PC查询，初版不实现OTA）
+9. **W25Q256/版本信息**（V2板载自检已闭环；待协议冻结后接PC查询，初版不实现OTA）
 10. B1 板到货后：UART4/USART2 从 CH340 切到 RS0102→RK3588 真机联调（**注意不是 USART1**）
 11. 高波特率（460800/921600）DMA+IDLE（等真机 RS0102）
 

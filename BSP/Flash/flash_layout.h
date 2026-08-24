@@ -32,10 +32,21 @@
 #define FLASH_LAYOUT_METADATA_BASE          0x00000000UL
 #define FLASH_LAYOUT_METADATA_SIZE          0x00010000UL
 
+/*
+ * 独立硬件自检镜像把四个副本临时映射到末尾自检区，绝不擦正式元数据。
+ * 正式构建未定义 ENABLE_FLASH_SELF_TEST，地址仍固定在 Flash 起始处。
+ */
+#if defined(ENABLE_FLASH_SELF_TEST) && ENABLE_FLASH_SELF_TEST
+#define FLASH_LAYOUT_VERSION_SLOT_A         0x01FF0000UL
+#define FLASH_LAYOUT_VERSION_SLOT_B         0x01FF1000UL
+#define FLASH_LAYOUT_FRU_SLOT_A             0x01FF2000UL
+#define FLASH_LAYOUT_FRU_SLOT_B             0x01FF3000UL
+#else
 #define FLASH_LAYOUT_VERSION_SLOT_A         0x00000000UL
 #define FLASH_LAYOUT_VERSION_SLOT_B         0x00001000UL
 #define FLASH_LAYOUT_FRU_SLOT_A             0x00002000UL
 #define FLASH_LAYOUT_FRU_SLOT_B             0x00003000UL
+#endif
 
 /* 只冻结地址，不提供 OTA 行为。每槽 2 MiB，可容纳当前最大 1920 KiB App。 */
 #define FLASH_LAYOUT_OTA_SLOT_A_BASE        0x00010000UL
