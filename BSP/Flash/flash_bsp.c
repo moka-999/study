@@ -1,85 +1,145 @@
 /*
- * ===================================================================
- * Flash BSP — flash_if_t 实现 (QSPI W25Q256)
- * ===================================================================
+ * ============================================================================
+ * W25Q256 Flash BSP：flash_if_t 的 QSPI 实现
+ * ============================================================================
  */
 #include "hal_if.h"
 #include "qspi_hw.h"
+
 #include <string.h>
 
-static uint8_t _sec[W25Q_SECTOR_SIZE];  /* RMW 扇区缓冲 */
+/*
+ * 单个 4 KiB 扇区的 Read-Modify-Write 缓冲。
+ * 该实例不可重入，上层若从多个任务访问 Flash，必须使用同一把互斥锁串行化。
+ */
+static uint8_t s_sector_buffer[W25Q_SECTOR_SIZE];
 
-/* ── 初始化 ── */
-static int _init(flash_if_t *f) { (void)f; return qspi_init(); }
-
-/* ── 读取 ── */
-static int _read(flash_if_t *f, uint32_t a, uint8_t *b, uint32_t l)
+static int page_is_erased(const uint8_t *page)
 {
-    (void)f;
-    if (!l) return IF_OK;
-    if (!b || a >= W25Q_CAPACITY || l > W25Q_CAPACITY - a) return IF_ERR;
-    return qspi_read_data(a, b, l);
+    for (uint32_t index = 0U; index < W25Q_PAGE_SIZE; ++index) {
+        if (page[index] != 0xFFU) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
-/* ── 写入 (RMW) ── */
-static int _write(flash_if_t *f, uint32_t addr, const uint8_t *buf, uint32_t len)
+static int flash_init(flash_if_t *flash)
 {
-    (void)f;
-    if (!len) return IF_OK;
-    if (!buf || addr >= W25Q_CAPACITY || len > W25Q_CAPACITY - addr) return IF_ERR;
+    (void)flash;
+    return qspi_init();
+}
 
-    uint32_t ss = addr & ~(W25Q_SECTOR_SIZE - 1);
-    uint32_t se = (addr + len + W25Q_SECTOR_SIZE - 1) & ~(W25Q_SECTOR_SIZE - 1);
-    if (se > W25Q_CAPACITY) se = W25Q_CAPACITY;
+static int flash_read(flash_if_t *flash, uint32_t address,
+                      uint8_t *buffer, uint32_t length)
+{
+    (void)flash;
+    if (length == 0U) return IF_OK;
+    if (buffer == NULL || address >= W25Q_CAPACITY ||
+        length > W25Q_CAPACITY - address) return IF_ERR;
+    return qspi_read_data(address, buffer, length);
+}
 
-    for (uint32_t s = ss; s < se; s += W25Q_SECTOR_SIZE) {
-        if (qspi_read_data(s, _sec, W25Q_SECTOR_SIZE)) return IF_ERR;
+/*
+ * 任意范围写入：逐扇区 RMW，保护同扇区内未修改的数据。
+ * NOR Flash 不能把 0 直接改回 1，因此内容变化时统一擦除目标扇区。
+ */
+static int flash_write(flash_if_t *flash, uint32_t address,
+                       const uint8_t *buffer, uint32_t length)
+{
+    uint32_t first_sector;
+    uint32_t sector_end;
 
-        uint32_t cb = (addr > s) ? addr : s;
-        uint32_t ce = (addr + len < s + W25Q_SECTOR_SIZE) ? addr + len : s + W25Q_SECTOR_SIZE;
-        memcpy(_sec + (cb - s), buf + (cb - addr), ce - cb);
+    (void)flash;
+    if (length == 0U) return IF_OK;
+    if (buffer == NULL || address >= W25Q_CAPACITY ||
+        length > W25Q_CAPACITY - address) return IF_ERR;
 
-        if (qspi_erase_sector(s)) return IF_ERR;
-        for (uint32_t p = 0; p < W25Q_SECTOR_SIZE; p += W25Q_PAGE_SIZE)
-            if (qspi_write_page(s + p, _sec + p, W25Q_PAGE_SIZE)) return IF_ERR;
+    first_sector = address & ~(W25Q_SECTOR_SIZE - 1U);
+    sector_end = (address + length + W25Q_SECTOR_SIZE - 1U) &
+                 ~(W25Q_SECTOR_SIZE - 1U);
+    if (sector_end > W25Q_CAPACITY) sector_end = W25Q_CAPACITY;
+
+    for (uint32_t sector = first_sector; sector < sector_end;
+         sector += W25Q_SECTOR_SIZE) {
+        uint32_t copy_begin = (address > sector) ? address : sector;
+        uint32_t copy_end = (address + length < sector + W25Q_SECTOR_SIZE) ?
+                            address + length : sector + W25Q_SECTOR_SIZE;
+        uint32_t copy_length = copy_end - copy_begin;
+
+        if (qspi_read_data(sector, s_sector_buffer, W25Q_SECTOR_SIZE) != IF_OK) {
+            return IF_ERR;
+        }
+
+        /* 相同内容不擦写，减少 NOR Flash 磨损和无效等待。 */
+        if (memcmp(s_sector_buffer + (copy_begin - sector),
+                   buffer + (copy_begin - address), copy_length) == 0) {
+            continue;
+        }
+        memcpy(s_sector_buffer + (copy_begin - sector),
+               buffer + (copy_begin - address), copy_length);
+
+        if (qspi_erase_sector(sector) != IF_OK) return IF_ERR;
+        for (uint32_t page = 0U; page < W25Q_SECTOR_SIZE;
+             page += W25Q_PAGE_SIZE) {
+            /* 擦除态页面无需重新写入，可显著缩短稀疏记录更新时间。 */
+            if (!page_is_erased(s_sector_buffer + page) &&
+                qspi_write_page(sector + page, s_sector_buffer + page,
+                                W25Q_PAGE_SIZE) != IF_OK) {
+                return IF_ERR;
+            }
+        }
     }
     return IF_OK;
 }
 
-/* ── 范围擦除 ── */
-static int _erase(flash_if_t *f, uint32_t addr, uint32_t len)
+/* 范围擦除会向外扩展到完整 4 KiB 扇区。 */
+static int flash_erase(flash_if_t *flash, uint32_t address, uint32_t length)
 {
-    (void)f;
-    if (!len) return IF_OK;
-    if (addr >= W25Q_CAPACITY || len > W25Q_CAPACITY - addr) return IF_ERR;
-    uint32_t st = addr & ~(W25Q_SECTOR_SIZE - 1);
-    uint32_t ed = (addr + len + W25Q_SECTOR_SIZE - 1) & ~(W25Q_SECTOR_SIZE - 1);
-    if (ed > W25Q_CAPACITY) ed = W25Q_CAPACITY;
+    uint32_t erase_begin;
+    uint32_t erase_end;
 
-    for (uint32_t cur = st; cur < ed;) {
-        uint32_t rem = ed - cur;
-        if      (rem >= W25Q_BLOCK64_SIZE && !(cur & 0xFFFF))  { if (qspi_erase_block64(cur)) return IF_ERR; cur += W25Q_BLOCK64_SIZE; }
-        else if (rem >= W25Q_BLOCK32_SIZE && !(cur & 0x7FFF))  { if (qspi_erase_block32(cur)) return IF_ERR; cur += W25Q_BLOCK32_SIZE; }
-        else                                                    { if (qspi_erase_sector(cur))  return IF_ERR; cur += W25Q_SECTOR_SIZE;  }
+    (void)flash;
+    if (length == 0U) return IF_OK;
+    if (address >= W25Q_CAPACITY || length > W25Q_CAPACITY - address) return IF_ERR;
+
+    erase_begin = address & ~(W25Q_SECTOR_SIZE - 1U);
+    erase_end = (address + length + W25Q_SECTOR_SIZE - 1U) &
+                ~(W25Q_SECTOR_SIZE - 1U);
+    if (erase_end > W25Q_CAPACITY) erase_end = W25Q_CAPACITY;
+
+    for (uint32_t current = erase_begin; current < erase_end;) {
+        uint32_t remaining = erase_end - current;
+        if (remaining >= W25Q_BLOCK64_SIZE &&
+            (current % W25Q_BLOCK64_SIZE) == 0U) {
+            if (qspi_erase_block64(current) != IF_OK) return IF_ERR;
+            current += W25Q_BLOCK64_SIZE;
+        } else if (remaining >= W25Q_BLOCK32_SIZE &&
+                   (current % W25Q_BLOCK32_SIZE) == 0U) {
+            if (qspi_erase_block32(current) != IF_OK) return IF_ERR;
+            current += W25Q_BLOCK32_SIZE;
+        } else {
+            if (qspi_erase_sector(current) != IF_OK) return IF_ERR;
+            current += W25Q_SECTOR_SIZE;
+        }
     }
     return IF_OK;
 }
 
-/* ── 参数 ── */
-static void _info(flash_if_t *f, uint32_t *tk, uint32_t *ss, uint32_t *ps)
+static void flash_info(flash_if_t *flash, uint32_t *total_kb,
+                       uint32_t *sector_size, uint32_t *page_size)
 {
-    (void)f;
-    if (tk) *tk = W25Q_CAPACITY / 1024;
-    if (ss) *ss = W25Q_SECTOR_SIZE;
-    if (ps) *ps = W25Q_PAGE_SIZE;
+    (void)flash;
+    if (total_kb != NULL) *total_kb = W25Q_CAPACITY / 1024U;
+    if (sector_size != NULL) *sector_size = W25Q_SECTOR_SIZE;
+    if (page_size != NULL) *page_size = W25Q_PAGE_SIZE;
 }
 
-/* ── 工厂实例 ── */
 flash_if_t flash_if = {
     .handle = NULL,
-    .init   = _init,
-    .read   = _read,
-    .write  = _write,
-    .erase  = _erase,
-    .info   = _info,
+    .init   = flash_init,
+    .read   = flash_read,
+    .write  = flash_write,
+    .erase  = flash_erase,
+    .info   = flash_info,
 };

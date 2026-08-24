@@ -104,6 +104,8 @@ SECTIONS
   .rodata :
   {
     . = ALIGN(4);
+    /* 即使查询命令尚未接入，也必须把编译期固件身份保留在最终镜像中。 */
+    KEEP(*(.firmware_version))
     *(.rodata)         /* .rodata sections (constants, strings, etc.) */
     *(.rodata*)        /* .rodata* sections (constants, strings, etc.) */
     . = ALIGN(4);

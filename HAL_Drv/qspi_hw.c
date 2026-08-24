@@ -15,6 +15,7 @@
  */
 #include "quadspi.h"
 #include "qspi_hw.h"
+#include "hal_if.h"
 #include "cmsis_os2.h"
 #include <string.h>
 
@@ -41,6 +42,8 @@ static int _write_enable(void)
 
 int qspi_init(void)
 {
+    uint8_t sr2;
+
     /* HAL_QSPI_Init 已在 MX_QUADSPI_Init() 调用. */
 
     /* ── 1. 用四线发 0xFF 退出 QPI (若之前误入 QPI 模式) ── */
@@ -71,31 +74,28 @@ int qspi_init(void)
         QSPI_CommandTypeDef c2 = {0};
         c2.InstructionMode = QSPI_INSTRUCTION_1_LINE;
         c2.Instruction     = 0xB7;
-        HAL_QSPI_Command(&hqspi, &c2, QSPI_TO);
+        if (HAL_QSPI_Command(&hqspi, &c2, QSPI_TO) != HAL_OK) return IF_ERR;
     }
 
     /* ── 4. 使能 QE (Quad Enable) ── */
     {
-        uint8_t sr2;
-        if (qspi_read_status(W25Q_CMD_READ_STATUS2, &sr2) == 0) {
-            if (!(sr2 & W25Q_SR2_QE)) {
-                /* Write Status Register 2: QE=1 */
-                QSPI_CommandTypeDef cw = {0};
-                cw.InstructionMode = QSPI_INSTRUCTION_1_LINE;
-                cw.Instruction     = W25Q_CMD_WRITE_ENABLE;
-                HAL_QSPI_Command(&hqspi, &cw, QSPI_TO);
+        if (qspi_read_status(W25Q_CMD_READ_STATUS2, &sr2) != IF_OK) return IF_ERR;
+        if ((sr2 & W25Q_SR2_QE) == 0U) {
+            QSPI_CommandTypeDef command = {0};
+            uint8_t new_sr2 = sr2 | W25Q_SR2_QE;
 
-                QSPI_CommandTypeDef cs = {0};
-                cs.InstructionMode = QSPI_INSTRUCTION_1_LINE;
-                cs.Instruction     = W25Q_CMD_WRITE_STATUS2;
-                cs.DataMode        = QSPI_DATA_1_LINE;
-                cs.NbData          = 1;
+            if (_write_enable() != HAL_OK) return IF_ERR;
+            command.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+            command.Instruction     = W25Q_CMD_WRITE_STATUS2;
+            command.DataMode        = QSPI_DATA_1_LINE;
+            command.NbData          = 1;
 
-                uint8_t sr2_new = sr2 | W25Q_SR2_QE;
-                if (HAL_QSPI_Command(&hqspi, &cs, QSPI_TO) == HAL_OK) {
-                    HAL_QSPI_Transmit(&hqspi, &sr2_new, QSPI_TO);
-                }
-                qspi_wait_busy(100);
+            if (HAL_QSPI_Command(&hqspi, &command, QSPI_TO) != HAL_OK ||
+                HAL_QSPI_Transmit(&hqspi, &new_sr2, QSPI_TO) != HAL_OK ||
+                qspi_wait_busy(100U) != IF_OK ||
+                qspi_read_status(W25Q_CMD_READ_STATUS2, &sr2) != IF_OK ||
+                (sr2 & W25Q_SR2_QE) == 0U) {
+                return IF_ERR;
             }
         }
     }
@@ -109,6 +109,8 @@ int qspi_init(void)
 
 int qspi_read_jedec_id(uint8_t *id)
 {
+    if (id == NULL) return IF_ERR;
+
     QSPI_CommandTypeDef c = {0};
     c.InstructionMode = QSPI_INSTRUCTION_1_LINE;
     c.Instruction     = W25Q_CMD_READ_JEDEC_ID;
@@ -127,6 +129,8 @@ int qspi_read_jedec_id(uint8_t *id)
 
 int qspi_read_status(uint8_t cmd, uint8_t *sr)
 {
+    if (sr == NULL) return IF_ERR;
+
     QSPI_CommandTypeDef c = {0};
     c.InstructionMode = QSPI_INSTRUCTION_1_LINE;
     c.Instruction     = cmd;
@@ -145,10 +149,10 @@ int qspi_read_status(uint8_t cmd, uint8_t *sr)
 
 void qspi_dump_regs(uint32_t *cr, uint32_t *sr, uint32_t *ccr, uint32_t *dcr)
 {
-    *cr  = QUADSPI->CR;
-    *sr  = QUADSPI->SR;
-    *ccr = QUADSPI->CCR;
-    *dcr = QUADSPI->DCR;
+    if (cr != NULL)  *cr  = QUADSPI->CR;
+    if (sr != NULL)  *sr  = QUADSPI->SR;
+    if (ccr != NULL) *ccr = QUADSPI->CCR;
+    if (dcr != NULL) *dcr = QUADSPI->DCR;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -177,6 +181,7 @@ int qspi_wait_busy(uint32_t timeout_ms)
 
 int qspi_erase_sector(uint32_t addr)
 {
+    if (addr >= W25Q_CAPACITY || (addr % W25Q_SECTOR_SIZE) != 0U) return IF_ERR;
     if (_write_enable() != HAL_OK) return -1;
 
     QSPI_CommandTypeDef c = {0};
@@ -198,6 +203,7 @@ int qspi_erase_sector(uint32_t addr)
 
 int qspi_erase_block32(uint32_t addr)
 {
+    if (addr >= W25Q_CAPACITY || (addr % W25Q_BLOCK32_SIZE) != 0U) return IF_ERR;
     if (_write_enable() != HAL_OK) return -1;
 
     QSPI_CommandTypeDef c = {0};
@@ -215,6 +221,7 @@ int qspi_erase_block32(uint32_t addr)
 
 int qspi_erase_block64(uint32_t addr)
 {
+    if (addr >= W25Q_CAPACITY || (addr % W25Q_BLOCK64_SIZE) != 0U) return IF_ERR;
     if (_write_enable() != HAL_OK) return -1;
 
     QSPI_CommandTypeDef c = {0};
@@ -252,7 +259,12 @@ int qspi_erase_chip(void)
 
 int qspi_write_page(uint32_t addr, const uint8_t *data, uint16_t len)
 {
-    if (len > W25Q_PAGE_SIZE) return -1;
+    if (len == 0U) return IF_OK;
+    if (data == NULL || len > W25Q_PAGE_SIZE || addr >= W25Q_CAPACITY ||
+        len > W25Q_CAPACITY - addr ||
+        (addr / W25Q_PAGE_SIZE) != ((addr + len - 1U) / W25Q_PAGE_SIZE)) {
+        return IF_ERR;
+    }
     if (_write_enable() != HAL_OK) return -1;
 
     QSPI_CommandTypeDef c = {0};
@@ -283,6 +295,11 @@ int qspi_write_page(uint32_t addr, const uint8_t *data, uint16_t len)
 
 int qspi_read_data(uint32_t addr, uint8_t *buf, uint32_t len)
 {
+    if (len == 0U) return IF_OK;
+    if (buf == NULL || addr >= W25Q_CAPACITY || len > W25Q_CAPACITY - addr) {
+        return IF_ERR;
+    }
+
     QSPI_CommandTypeDef c = {0};
     c.InstructionMode   = QSPI_INSTRUCTION_1_LINE;   /* 0xEB 指令只在 IO0 上发! */
     c.Instruction       = W25Q_CMD_QUAD_READ;        /* 0xEB */

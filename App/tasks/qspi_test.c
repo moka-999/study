@@ -11,6 +11,7 @@
 #include "task.h"
 #include "usart.h"
 #include "flash_bsp.h"
+#include "flash_layout.h"
 #include "qspi_hw.h"
 #include <stdio.h>
 #include <stdarg.h>
@@ -93,7 +94,12 @@ void StartQspiTestTask(void *argument)
      * ══════════════════════════════════════════════════════════════ */
     _puts("[4] Basic R/W via flash_if...\r\n");
 
-    uint32_t addr = W25Q_CAPACITY - W25Q_SECTOR_SIZE * 2;  /* 末尾 8KB */
+    /*
+     * 只允许破坏布局明确划出的自检区，禁止再用“Flash 末尾若干扇区”这种
+     * 隐含约定，避免未来新增数据后被测试任务误擦除。
+     */
+    uint32_t addr = FLASH_LAYOUT_SELF_TEST_BASE +
+                    FLASH_LAYOUT_SELF_TEST_SIZE - W25Q_SECTOR_SIZE * 2U;
     uint8_t  wbuf[512], rbuf[512];
 
     /* erase 8KB */

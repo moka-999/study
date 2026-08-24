@@ -27,12 +27,46 @@ option(ENABLE_PWR_WAVE_TEST "Build Apollo V2 pwr_ctrl waveform image" OFF)
 # 仅用于阿波罗 V2 六路结果灯逻辑分析仪验收；正式镜像默认关闭。
 option(ENABLE_RESULT_LED_WAVE_TEST "Build Apollo V2 result LED waveform image" OFF)
 
+# 固件身份由构建系统统一提供，禁止在 C 源文件中散落手写版本字符串。
+set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
+set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
+set(FIRMWARE_VERSION_PATCH 0 CACHE STRING "Firmware semantic version patch")
+set(FIRMWARE_BUILD_NUMBER 0 CACHE STRING "CI or release build number")
+
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # Core project settings
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+# 版本字符串使用配置时刻和源码状态。重新配置即可刷新；打包清单与固件共用这些值。
+string(TIMESTAMP FIRMWARE_BUILD_TIME_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
+execute_process(
+    COMMAND git rev-parse --short=12 HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE FIRMWARE_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE FIRMWARE_GIT_RESULT
+)
+if(NOT FIRMWARE_GIT_RESULT EQUAL 0)
+    set(FIRMWARE_GIT_COMMIT "unknown")
+endif()
+execute_process(
+    COMMAND git status --porcelain
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE FIRMWARE_GIT_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(FIRMWARE_GIT_STATUS STREQUAL "")
+    set(FIRMWARE_GIT_DIRTY 0)
+else()
+    set(FIRMWARE_GIT_DIRTY 1)
+endif()
 
 # Enable CMake support for ASM and C languages
 enable_language(C ASM)
@@ -76,6 +110,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/AD7124/ad7124.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_bsp.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_layout.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/IIC/myiic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/LED/led.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PCF8574/pcf8574.c
@@ -107,6 +142,20 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     $<$<BOOL:${ENABLE_RESULT_LED_WAVE_TEST}>:ENABLE_RESULT_LED_WAVE_TEST=1>
 )
 
+# 版本宏只影响 flash_layout.c，刷新构建时间时无需重编译整个固件。
+set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_layout.c
+    APPEND PROPERTY COMPILE_DEFINITIONS
+    FIRMWARE_VERSION_MAJOR=${FIRMWARE_VERSION_MAJOR}
+    FIRMWARE_VERSION_MINOR=${FIRMWARE_VERSION_MINOR}
+    FIRMWARE_VERSION_PATCH=${FIRMWARE_VERSION_PATCH}
+    FIRMWARE_BUILD_NUMBER=${FIRMWARE_BUILD_NUMBER}
+    FIRMWARE_BUILD_TIME_UTC="${FIRMWARE_BUILD_TIME_UTC}"
+    FIRMWARE_GIT_COMMIT="${FIRMWARE_GIT_COMMIT}"
+    FIRMWARE_GIT_DIRTY=${FIRMWARE_GIT_DIRTY}
+    FIRMWARE_BUILD_ID="${CMAKE_BUILD_TYPE}"
+    FIRMWARE_TARGET="apollo-v2-h743"
+)
+
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 
@@ -115,6 +164,27 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 
     # Add user defined libraries
+)
+
+# 生成精确的裸镜像、CRC32 清单和 96 字节版本载荷；不向固件中加入 OTA 行为。
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary
+            $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_firmware_manifest.py
+            --image ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin
+            --json ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.manifest.json
+            --version-payload ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.version.bin
+            --version "${FIRMWARE_VERSION_MAJOR}.${FIRMWARE_VERSION_MINOR}.${FIRMWARE_VERSION_PATCH}"
+            --build-number "${FIRMWARE_BUILD_NUMBER}"
+            --build-time "${FIRMWARE_BUILD_TIME_UTC}"
+            --git-commit "${FIRMWARE_GIT_COMMIT}"
+            --git-dirty "${FIRMWARE_GIT_DIRTY}"
+            --build-id "${CMAKE_BUILD_TYPE}"
+            --target "apollo-v2-h743"
+    COMMENT "Generating firmware binary, CRC32 manifest and W25Q256 version payload"
+    VERBATIM
 )
 
 # ===================================================================

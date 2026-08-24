@@ -45,7 +45,7 @@
 
 /* ── API ── */
 
-/* 初始化: 复位, 退出 QPI, 清除 4B 地址, 使能 QE 进入 Quad SPI */
+/* 初始化：复位器件、进入 4 字节地址模式并确认 QE 位。 */
 int qspi_init(void);
 
 /* 诊断: 读取 QSPI 外设寄存器 (CR, SR, CCR, DCR) */
@@ -60,20 +60,20 @@ int qspi_read_status(uint8_t cmd, uint8_t *sr);
 /* 等待 Flash 空闲 (轮询 BUSY 位) */
 int qspi_wait_busy(uint32_t timeout_ms);
 
-/* 扇区擦除 (4KB), 阻塞至完成, 单线指令 */
+/* 扇区擦除 (4KB)，地址必须 4KB 对齐且位于器件范围内。 */
 int qspi_erase_sector(uint32_t addr);
 
-/* 块擦除 (32KB/64KB), 阻塞至完成 */
+/* 块擦除 (32KB/64KB)，地址必须按对应块大小对齐。 */
 int qspi_erase_block32(uint32_t addr);
 int qspi_erase_block64(uint32_t addr);
 
 /* 整片擦除, 耗时 ~60-200s */
 int qspi_erase_chip(void);
 
-/* 页写入 (≤256 字节, 不能跨页), 四线数据 */
+/* 页写入 (1~256 字节，不能跨页)，四线数据；长度 0 直接成功。 */
 int qspi_write_page(uint32_t addr, const uint8_t *data, uint16_t len);
 
-/* 读取数据 (任意长度), 四线 Quad I/O Fast Read */
+/* 读取数据（不可越过 32 MiB 末尾）；长度 0 直接成功。 */
 int qspi_read_data(uint32_t addr, uint8_t *buf, uint32_t len);
 
 #endif
