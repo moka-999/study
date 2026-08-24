@@ -152,6 +152,14 @@ void MX_FREERTOS_Init(void) {
   extern void StartTestTask(void *argument);
   xTaskCreate(StartTestTask, "drvTest", 1024, NULL, 3, NULL);
 #endif
+#if defined(ENABLE_PWR_WAVE_TEST) && ENABLE_PWR_WAVE_TEST
+  /*
+   * V2 电源波形镜像只创建这一条轻量测试任务。
+   * 正式构建未定义 ENABLE_PWR_WAVE_TEST，因此不会改变生产启动行为。
+   */
+  extern void StartPwrWaveTask(void *argument);
+  xTaskCreate(StartPwrWaveTask, "pwrWave", 256, NULL, 2, NULL);
+#endif
   /* QSPI Flash 独立测试 */
   //extern void StartQspiTestTask(void *argument);
   //xTaskCreate(StartQspiTestTask, "qspiTest", 1024, NULL, 3, NULL);

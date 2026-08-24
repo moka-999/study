@@ -111,6 +111,24 @@ def verify_source_contract() -> None:
     assert "HAL_Drv/pwr_ctrl.c" in cmake, "pwr_ctrl 未加入固件构建"
 
 
+def verify_wave_image_contract() -> None:
+    """确认波形测试与正式构建隔离，且绝不会误用于 B1 真板。"""
+
+    source = (ROOT / "HAL_Drv/pwr_ctrl.c").read_text(encoding="utf-8")
+    task = (ROOT / "App/tasks/pwr_wave_task.c").read_text(encoding="utf-8")
+    freertos = (ROOT / "Core/Src/freertos.c").read_text(encoding="utf-8")
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    dev_script = (ROOT / "tools/dev.ps1").read_text(encoding="utf-8")
+
+    assert 'option(ENABLE_PWR_WAVE_TEST "Build Apollo V2 pwr_ctrl waveform image" OFF)' in cmake
+    assert "ENABLE_PWR_WAVE_TEST=1" in cmake, "波形镜像缺少独立编译宏"
+    assert "StartPwrWaveTask" in freertos, "FreeRTOS 未创建波形测试任务"
+    assert "ENABLE_PWR_WAVE_TEST 只允许用于阿波罗 V2" in source, "缺少 B1 编译期保护"
+    assert "ddr_power_init()" in source, "正式构建不得移除真实 DDR 初始化"
+    assert "PWR_WAVE_STEP_MS       500U" in task, "逻辑分析仪测试步长应清晰固定"
+    assert "build_pwr_wave" in dev_script, "波形镜像必须使用独立构建目录"
+
+
 def verify_four_volt_first_sequence() -> None:
     model = Model(Config())
     model.request_on(0)
@@ -144,11 +162,43 @@ def verify_alternate_order_and_fault() -> None:
     assert fault.outputs == {"4V0": 0, "3V3": 0, "DDR": 0}
 
 
+def verify_wave_image_timeline() -> None:
+    """验证文档中给逻辑分析仪使用的500ms循环时间线。"""
+
+    wave = Model(Config(
+        first_to_second_ms=500,
+        second_to_ddr_ms=500,
+        ddr_to_config_ms=500,
+        ddr_to_system_off_ms=500,
+        system_off_spacing_ms=500,
+    ))
+    wave.request_on(0)
+    wave.process(500)
+    wave.process(1000)
+    wave.process(1500)
+    assert wave.state == State.ON
+
+    wave.request_off(2500)
+    wave.process(3000)
+    wave.process(3500)
+    assert wave.state == State.OFF
+    assert wave.events == [
+        (0, "4V0", 1),
+        (500, "3V3", 1),
+        (1000, "DDR", 1),
+        (2500, "DDR", 0),
+        (3000, "3V3", 0),
+        (3500, "4V0", 0),
+    ]
+
+
 def main() -> None:
     verify_source_contract()
+    verify_wave_image_contract()
     verify_four_volt_first_sequence()
     verify_alternate_order_and_fault()
-    print("pwr_ctrl: source contract and 3 state-machine scenarios PASS")
+    verify_wave_image_timeline()
+    print("pwr_ctrl: production/wave-image contracts and 4 state-machine scenarios PASS")
     print("Timing values are test-only; B1 PC6/PC7 order remains explicitly unconfigured")
 
 

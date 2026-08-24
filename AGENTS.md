@@ -58,6 +58,7 @@ B2 MCU由其他同事开发并由PC直接管理温控；B1不控制、代理或�
 ```bash
 powershell -ExecutionPolicy Bypass -File tools/dev.ps1 build
 # 全量重建：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 rebuild
+# V2电源波形镜像：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 pwr-wave-build
 ```
 
 ### 烧录（SWD）— 两步: 先 Bootloader 后 App
@@ -134,6 +135,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ✅ 已修复 3 个网关固件 bug（重传热循环 / 转发丢命令 / ACK回环）
 - ⚠️ TPS62868、PAC1934、AD7124 当前是“代码可编译 + 自检入口”；手头没有外接模块，V2 只做 Mock 与逻辑分析仪波形验证
 - ✅ 2026-08-24：新增`pwr_ctrl`安全状态机（默认全关、未配置拒绝上电、顺序可配置、失败全关）；ARM全量构建及3组离线状态迁移通过，V2波形/B1真板时序/TLV仍待完成
+- ✅ 2026-08-24：新增独立`build_pwr_wave/test.elf`波形镜像；仅V2替代引脚PF2/PC7/PG1循环输出500ms测试时序，默认正式构建关闭且B1编译期禁止；待逻辑分析仪实测
 - ❌ MCP4725/Boot 模式、真实 monitor 上报及对应 TLV 命令尚未实现
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
 - ✅ B1已拆分为同级独立工程`../b1`：46/46静态合同通过，V2验收通过的模块才逐个移植

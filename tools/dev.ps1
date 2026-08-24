@@ -1,11 +1,12 @@
 param(
-    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test')]
+    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'pwr-wave-build')]
     [string]$Task = 'build'
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$buildDir = Join-Path $repo 'build_debug'
+$buildDirName = if ($Task -eq 'pwr-wave-build') { 'build_pwr_wave' } else { 'build_debug' }
+$buildDir = Join-Path $repo $buildDirName
 
 function Find-BundledExe([string]$bundle, [string]$exe) {
     $root = Join-Path $env:LOCALAPPDATA "stm32cube\bundles\$bundle"
@@ -45,9 +46,10 @@ if (-not $ninja) { throw 'STM32Cube Ninja not found.' }
 if (-not (Test-Path -LiteralPath (Join-Path $buildDir 'build.ninja'))) {
     $cmake = Find-BundledExe 'cmake' 'cmake.exe'
     if (-not $cmake) { throw 'STM32Cube CMake not found.' }
+    $waveOption = if ($Task -eq 'pwr-wave-build') { '-DENABLE_PWR_WAVE_TEST=ON' } else { '-DENABLE_PWR_WAVE_TEST=OFF' }
     & $cmake -S $repo -B $buildDir -G Ninja `
         "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake" `
-        -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_MAKE_PROGRAM=$ninja"
+        -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_MAKE_PROGRAM=$ninja" $waveOption
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
