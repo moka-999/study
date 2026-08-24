@@ -47,7 +47,9 @@ if ($Task -eq 'protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'led-test')
 $ninja = $null
 $cache = Join-Path $buildDir 'CMakeCache.txt'
 if (Test-Path -LiteralPath $cache) {
-    $line = Select-String -LiteralPath $cache -Pattern '^CMAKE_MAKE_PROGRAM:FILEPATH=(.+)$' | Select-Object -First 1
+    # 首次由命令行指定 Ninja 时，CMake 可能把类型记为 UNINITIALIZED；
+    # 两种缓存类型都应复用，避免受当前 PowerShell PATH 或沙箱可见性影响。
+    $line = Select-String -LiteralPath $cache -Pattern '^CMAKE_MAKE_PROGRAM:(?:FILEPATH|UNINITIALIZED)=(.+)$' | Select-Object -First 1
     if ($line) { $ninja = $line.Matches[0].Groups[1].Value }
 }
 if (-not $ninja -or -not (Test-Path -LiteralPath $ninja)) {

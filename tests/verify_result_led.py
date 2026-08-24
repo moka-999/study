@@ -44,6 +44,7 @@ def verify_source_contract() -> None:
     led = (ROOT / "BSP/LED/led.c").read_text(encoding="utf-8")
     header = (ROOT / "BSP/LED/led.h").read_text(encoding="utf-8")
     task = (ROOT / "App/tasks/result_led_wave_task.c").read_text(encoding="utf-8")
+    main_c = (ROOT / "Core/Src/main.c").read_text(encoding="utf-8")
     freertos = (ROOT / "Core/Src/freertos.c").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     dev_script = (ROOT / "tools/dev.ps1").read_text(encoding="utf-8")
@@ -62,13 +63,21 @@ def verify_source_contract() -> None:
     assert "build_led_wave" in dev_script, "测试镜像必须使用独立构建目录"
     assert task.index("HAL_GPIO_WritePin") < task.index("HAL_GPIO_Init"), \
         "结果灯测试脚必须先预置低电平，再切换为输出"
+    assert "void result_led_wave_early_init(void)" in task, \
+        "测试镜像必须提供调度器启动前的GPIO安全初始化入口"
+    assert "result_led_wave_early_init();" in main_c, \
+        "调度器启动前必须提前关闭六路替代结果灯"
+    assert main_c.index("result_led_wave_early_init();") < main_c.index("osKernelInitialize()"), \
+        "结果灯安全初始化必须早于FreeRTOS调度器"
+    assert "ENABLE_RESULT_LED_WAVE_TEST" in main_c, \
+        "提前初始化必须仅存在于独立测试镜像"
 
 
 def main() -> None:
     verify_semantics()
     verify_source_contract()
     print("result_led: 5 states, 500ms blink and isolated V2 waveform image PASS")
-    print("B1 PG0-PG5 mapping remains deferred until V2 waveform acceptance")
+    print("V2 waveform accepted; B1 PG0-PG5 port and real 2N7002 startup check remain")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "pwr_ctrl.h"
+#if defined(ENABLE_RESULT_LED_WAVE_TEST) && ENABLE_RESULT_LED_WAVE_TEST
+extern void result_led_wave_early_init(void);
+#endif
 
 /* USER CODE END Includes */
 
@@ -110,6 +113,13 @@ int main(void)
   MX_I2C4_Init();
   MX_QUADSPI_Init();
   /* USER CODE BEGIN 2 */
+#if defined(ENABLE_RESULT_LED_WAVE_TEST) && ENABLE_RESULT_LED_WAVE_TEST
+  /*
+   * 在调度器和LWIP启动前关闭六路替代结果灯。若等低优先级测试任务运行，
+   * 部分高阻引脚会被Apollo V2板上外部网络拉高，形成数秒假亮窗口。
+   */
+  result_led_wave_early_init();
+#endif
   /*
    * 未确认 PC6/PC7 真板时序前不加载默认配置，电源保持安全关闭。
    * 后续完成硬件评审后，只需在此传入经过批准的 pwr_ctrl_config_t。

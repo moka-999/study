@@ -46,7 +46,7 @@ static const result_led_pin_pair_t s_v2_result_pins[RESULT_LED_TARGET_COUNT] = {
     [RESULT_LED_EMCP]   = { GPIOC, GPIO_PIN_11, GPIOC, GPIO_PIN_10 },
 };
 
-static void result_led_wave_init(void)
+void result_led_wave_early_init(void)
 {
     GPIO_InitTypeDef gpio = {0};
 
@@ -113,7 +113,11 @@ static void result_led_wave_blink(result_led_target_t first,
 void StartResultLedWaveTask(void *argument)
 {
     (void)argument;
-    result_led_wave_init();
+    /*
+     * GPIO阶段已经做过一次上电安全初始化；这里再次执行，避免测试任务被
+     * 单独复用或后续初始化代码改写引脚模式时留下不可控状态。
+     */
+    result_led_wave_early_init();
 
     /* 预留两秒全低窗口，便于断电重上电采集并检查启动毛刺。 */
     vTaskDelay(pdMS_TO_TICKS(2000U));
