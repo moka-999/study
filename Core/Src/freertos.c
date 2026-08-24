@@ -38,6 +38,7 @@
 #include "dispatch.h"
 #include "hb_task.h"
 #include "uart_router.h"
+#include "pwr_ctrl.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -177,6 +178,8 @@ void StartDefaultTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
+    /* 非阻塞推进电源状态机；未配置时保持 OFF，不产生 GPIO 翻转。 */
+    pwr_ctrl_process(HAL_GetTick());
     osDelay(1);
   }
   /* USER CODE END StartDefaultTask */

@@ -32,6 +32,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "pwr_ctrl.h"
 
 /* USER CODE END Includes */
 
@@ -109,6 +110,11 @@ int main(void)
   MX_I2C4_Init();
   MX_QUADSPI_Init();
   /* USER CODE BEGIN 2 */
+  /*
+   * 未确认 PC6/PC7 真板时序前不加载默认配置，电源保持安全关闭。
+   * 后续完成硬件评审后，只需在此传入经过批准的 pwr_ctrl_config_t。
+   */
+  pwr_ctrl_init(NULL);
 
   /* USER CODE END 2 */
 

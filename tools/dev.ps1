@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('build', 'rebuild', 'protocol-test')]
+    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test')]
     [string]$Task = 'build'
 )
 
@@ -24,9 +24,10 @@ function Find-Python {
     throw 'Python not found. Install Python 3 or add python.exe to PATH.'
 }
 
-if ($Task -eq 'protocol-test') {
+if ($Task -eq 'protocol-test' -or $Task -eq 'pwr-test') {
     $python = Find-Python
-    & $python -B -X utf8 (Join-Path $repo 'tests\verify_protocol_v2.py')
+    $script = if ($Task -eq 'pwr-test') { 'tests\verify_pwr_ctrl.py' } else { 'tests\verify_protocol_v2.py' }
+    & $python -B -X utf8 (Join-Path $repo $script)
     exit $LASTEXITCODE
 }
 
