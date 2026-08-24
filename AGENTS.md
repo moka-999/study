@@ -13,11 +13,11 @@ STM32H743 **阿波罗 V2** 板，作为 **TCP server + TLV 协议中继**，把 
 ```
 PC ──TCP:8888──► MCU(STM32H743) ──逻辑 RK 串口──► RK3588
                                        └─ 阿波罗 V2: USART1 / B1: UART4 或 USART2（待真机定）
-B2 MCU（共享SPI主机）──SCK/MOSI/MISO + CS0..7──► B1 MCU ×8（各自SPI2从机）
-                                                        └─ B2 MCU拥有全部加热及其他底板级控制权
+PC ──独立温控接口──► B2 MCU ──► 全部加热及其他底板级控制
+B2 MCU（共享SPI主机）──SCK/MOSI/MISO + CS0..7──► B1 MCU ×8（各自SPI2从机，仅保活）
 ```
 
-B2 MCU由其他同事开发：一组SPI主机共享SCK/MOSI/MISO，并用8个独立CS选择8块B1。B1的SPI2暂按从机、Mode 0、8位MSB、硬件NSS低有效配置；B2初始时钟暂按1MHz。邮箱长度、精确轮询周期、重试/幂等、启动握手和业务命令留待B2双方评审冻结。
+B2 MCU由其他同事开发并由PC直接管理温控；B1不控制、代理或转发温控。B2以一组SPI主机共享SCK/MOSI/MISO，并用8个独立CS选择8块B1，SPI只用于保活。B1暂按从机、Mode 0、8位MSB、硬件NSS低有效配置，B2初始时钟暂按1MHz；保活载荷、周期、超时判定留待B2双方评审冻结。
 
 **软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (YT8512C, RMII) + TLV 协议。B1是同级独立工程 `../b1`，不在本V2源码树内混合构建。
 
@@ -136,7 +136,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ❌ `pwr_ctrl`、MCP4725/Boot 模式、真实 monitor 上报及对应 TLV 命令尚未实现
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
 - ✅ B1已拆分为同级独立工程`../b1`：46/46静态合同通过，V2验收通过的模块才逐个移植
-- ✅ 2026-08-24：B1–B2职责与SPI主从已纠正；B1基线为从机Mode 0/硬件NSS，协议细节继续待B2联调
+- ✅ 2026-08-24：B1取消温控职责，温控改为PC直连B2；B1–B2 SPI仅保活，B1基线为从机Mode 0/硬件NSS
 - 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`CONTEXT.md`
 
 **下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B1/B2真板验证）
@@ -146,7 +146,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 3. **pwr_ctrl**（PC6/PC7/PG11 上电时序, 默认 OFF 已确认）— 阻塞所有电源类驱动
 4. **TPS62868/69**（A版VSET配置：VDD1/VDD2/VDDQ地址0x49/0x41/0x4F；与pwr_on联动）
 5. **PAC1934T**（I2C4, 0x2C）+ **AD7124**（SPI4 PE11-14，完成Mock/波形验证后待真板标定）
-6. **B1–B2 MCU SPI**（B2共享总线主机+8个独立CS，8块B1均为SPI2从机；Mode 0/8位MSB/初始1MHz；其余协议待冻结）
+6. **B1–B2 MCU SPI保活**（B2共享总线主机+8个独立CS，8块B1均为SPI2从机；Mode 0/8位MSB/初始1MHz；保活载荷/周期/超时待冻结）
 7. **Boot 模式控制**（MCP4725 DAC, I2C2, 0x60 → BOOT_SARADC_IN0）
 8. **LED结果显示**（3颗双色灯分别显示2组LPDDR4/4X和1组eMCP；另2颗单色灯显示上电/板卡状态，语义待定）
 9. **W25Q256/版本信息**（基础存储和PC查询；初版不实现OTA）
@@ -172,17 +172,17 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 | LED | PG0-6 → 2N7002 | 三颗红绿双色结果灯（2×LPDDR4/4X+1×eMCP）+ 单色LED4；另有`CPU_GPIO_PWR`单色LED5 | 红常亮FAIL、绿常亮PASS、橙闪常温测试中、红闪高温测试中；闪烁亮500ms/灭500ms；两颗单色语义待定 |
 | SWD/调试 | PA13=JTMS PA14=JTCK, NRST→MCU_RESET_L, BOOT0 | | |
 | ETH RMII | PA1 REF_CLK / PA2 MDIO / PA7 CRS_DV / PB11 TX_EN / PC1 MDC / PC4 PC5 RXD0/1 / PG13 PG14 TXD0/1 | 经 SN74LVC1G3157×8 可选 B1(核心板)/B2(背板) | YT8512H (P23) |
-| SPI2 (PB12-15, MCU_SPI_*) | B1从机 ↔ B2主机 | B2共享SCK/MOSI/MISO并以8个独立CS选槽；B1基线Mode 0、8位MSB、硬件NSS低有效，B2初始1MHz；协议待定义 | |
+| SPI2 (PB12-15, MCU_SPI_*) | B1从机 ↔ B2主机，仅保活 | B2共享SCK/MOSI/MISO并以8个独立CS选槽；B1基线Mode 0、8位MSB、硬件NSS低有效，B2初始1MHz；保活载荷/周期/超时待定义 | |
 
-> **职责边界**：风扇PWM由RK3588控制；全部加热和其他底板级控制由B2 MCU负责，B1 MCU只通过SPI提出请求和读取状态，B2负责轮询与仲裁。B1正常RK上电/重启走PC6/PC7/PG11；B2的`/RESET_n`接RK3588/RK806 `RESET_L`（1.8V域），`/MCU_RESET_n`接B1 STM32 `NRST/MCU_RESET_L`（3.3V域），仅作异常恢复。P24的“VCC_24V软开关输出”与人工按键`PWRON_L`不是同一网络。
+> **职责边界**：风扇PWM由RK3588控制；温控由PC直接管理B2 MCU，全部加热和其他底板级控制由B2执行，B1不参与控制或转发；B1–B2 SPI仅保活。B1正常RK上电/重启走PC6/PC7/PG11；B2的`/RESET_n`接RK3588/RK806 `RESET_L`（1.8V域），`/MCU_RESET_n`接B1 STM32 `NRST/MCU_RESET_L`（3.3V域），仅作异常恢复。P24的“VCC_24V软开关输出”与人工按键`PWRON_L`不是同一网络。
 
 ### 原理图 20260811 版新增（docs/MYZR-RK3588-ZUOYI_SCH_20260811.pdf, 当前最新）
 
-> ⚠️ 职责修正：P18虽画出PH8/PH9/PH10候选加热电路，但B1 MCU固件不负责加热；全部加热归B2 MCU。**优先用本版分析**，与20260807版差异如下：
+> ⚠️ 职责修正：P18虽画出PH8/PH9/PH10候选加热电路，但B1 MCU固件不负责加热或温控转发；PC直接管理B2 MCU完成温控。**优先用本版分析**，与20260807版差异如下：
 
 | 新增电路 | 内容 | MCU 影响 |
 |----------|------|----------|
-| 加热候选电路 (P18) | **PH8/PH9/PH10** → Q19/Q21/Q23 → Q18/Q20/Q22 → 加热片×3 | 不作为B1 MCU固件需求；实际加热由B2 MCU统一控制 |
+| 加热候选电路 (P18) | **PH8/PH9/PH10** → Q19/Q21/Q23 → Q18/Q20/Q22 → 加热片×3 | 不作为B1 MCU固件需求；PC直接管理B2 MCU完成实际温控 |
 | **引导模式控制 (P24)** | **U4030 MCP4725A0 DAC** (SOT23-6): VDD=3V3_MCU, A0→GND(**地址 0x60**), SCL/SDA ← R7286/R7287(0R) ← **I2C2**（与 TPS62868 U4026 同总线）; VOUT → R7288(0R) → **BOOT_SARADC_IN0** → RK3588 (p<6>) | **MCU 写 DAC 电压 → 选 RK3588 引导模式**: 0V=USB / 0.3V=SD / 0.6V=EMMC / 0.9V=FSPI M0 / 1.2V=FSPI M1 / 1.5V=FSPI M2 / 1.8V=EMMC-SD（TABLE 1, 100K 上拉域）。另有 SARADC_VIN1_KEY/RECOVERY 电阻阶梯 (LEVEL1-7) + MASKROM_Key (J36/J37) |
 | 连接器 | 40x2 头子 → **FX18-60P-08SV10 (30x2=60pin)** ×2；新增 J35 (CXC01L3Z) | |
 | P22 | PAC1934T 采样路径新增 R7268-7271 (4×0402, 值未提取) | |

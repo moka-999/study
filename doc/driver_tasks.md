@@ -12,7 +12,7 @@ B2 底板 (母板, 8 槽)
 
 - **B1** = 完整单板：STM32H743 + RK3588 + DDR，自带电源监控（TPS62868×3 + PAC1934 + AD7124），自管本板 3 路 DDR 电压/电流
 - **B2** = 底板母板：8 个 B1 插槽 + 共享资源（ETH 切换 SN74LVC1G3157×8、供电、BMC console）
-- **B1–B2 SPI拓扑**：B2 MCU使用一组共享SPI主机总线（SCK/MOSI/MISO）和8个独立CS，每个CS选择一块B1 SPI2从机。B2负责轮询和仲裁；B1只提出请求并返回本槽状态。
+- **B1–B2 SPI拓扑**：B2 MCU使用一组共享SPI主机总线（SCK/MOSI/MISO）和8个独立CS，每个CS选择一块B1 SPI2从机；该链路只做保活，不传温控或其他业务命令。
 - 之前解析的 MB360 原理图引脚（AD7124 SPI4 PE11-14、TPS62868 I2C1/2/逻辑I2C4、PAC逻辑I2C4 PH4/5）即**单块 B1 上的 STM32 外设**；PH4/PH5按软件开漏GPIO实现，不是STM32 I2C4 AF引脚对
 - **网络拓扑（架构A）**：每块 B1 独立 IP（.201-.208），各自 TCP:8888；PC 按 IP 区分槽位，**连接即槽位 → TLV 命令无需 slot 字段**
 - 每块 B1 固件相同；IP 按槽位差异化配置（拨码/底板读取，待 B2 定）
@@ -74,7 +74,7 @@ V2 不可验证、留给 B1 真板的：
 | 1.1 | GPIO 抽象：`bsp_gpio.h` 定义电源引脚组（V2测试引脚 ↔ B1正式引脚双映射） | ✅ `bsp_gpio.c/h`；尚未接启动流程 | 待V2 GPIO波形验证 |
 | 1.2 | I2C 总线层：确认 V2 I2C1/I2C3 实例可用（i2c_hw.c 已有），补 is_ready 扫描 | ✅ I2C1/3/4；I2C2 为 `NULL` 占位 | Mock+I2C波形（无模块） |
 | 1.3 | AD7124开发总线：Apollo V2临时使用SPI2，最终B1切到SPI4 | ✅ `spi2_if` + AD7124 CS | Mock+SPI波形（无模块） |
-| 1.4 | B1–B2 MCU SPI链路：B2共享总线主机+8个独立CS，B1 SPI2从机；Mode 0、8位MSB、硬件NSS低有效，B2初始1MHz | ✅ B1 `.ioc`与初始化基线；邮箱/轮询/重试/握手/业务协议暂不实现 | 静态合同+构建；真板逻辑分析仪验证NSS/SCK/MOSI/MISO |
+| 1.4 | B1–B2 MCU SPI保活：B2共享总线主机+8个独立CS，B1 SPI2从机；Mode 0、8位MSB、硬件NSS低有效，B2初始1MHz | ✅ B1 `.ioc`与初始化基线；保活载荷/周期/超时待定 | 静态合同+构建；真板逻辑分析仪验证NSS/SCK/MOSI/MISO |
 
 > **总线互斥**：Apollo V2的AD7124开发映射与最终B1–B2链路都使用SPI2。构建配置必须按板型二选一，禁止同时创建AD7124-on-SPI2测试任务和B2 SPI通信任务；最终B1的AD7124使用SPI4。
 
@@ -172,9 +172,9 @@ V2 不可验证、留给 B1 真板的：
 | 5.3 | 电压换算 + 分压系数 | ✅ 代码 API | 未留存标定记录 | 待 |
 | 5.4 | TLV：电压采样上报 | 未实现；`monitor_task` 仍为占位 | 待 | 待 |
 
-## 6. 加热控制 — **不属于B1 MCU，由B2 MCU负责**
+## 6. 温控 — **PC直连B2，不经过B1**
 
-> B1 MCU不直接控制加热。全部加热逻辑和其他底板级控制归B2 MCU，B2 MCU固件由其他同事开发。P18保留的PH8/PH9/PH10候选电路不能作为B1固件需求；B1仅通过SPI向B2 MCU交换命令/状态，具体协议后续统一定义。
+> B1 MCU不控制、代理或转发温控。PC通过独立接口直接管理B2 MCU，全部加热逻辑和其他底板级控制归B2 MCU。P18保留的PH8/PH9/PH10候选电路不能作为B1固件需求；B1–B2 SPI仅保活。
 
 ## 7. Boot 模式控制（MCP4725 DAC, I2C2, 0x60）— 未实现
 
@@ -233,7 +233,7 @@ P24 Table 1已确定0～1.8V的Boot模式目标。3.3V供电下的DAC码可由�
 | 0x003A | BOOT_MODE_SET | 引导模式: [mode] |
 | 0x003B | BOOT_MODE_QUERY | DAC 输出查询 |
 
-> B1本地加热命令已移除：加热归B2 MCU。若PC/RK需要控制加热，应通过后续冻结的B1–B2 MCU SPI业务协议转发。
+> B1本地加热命令及温控转发均不实现：PC直接通过B2工程提供的接口管理温控。
 
 > 上述 CmdID 目前只是候选，`0x0029-0x003D` 在旧协议中曾作为结果区；相关方协议冻结前不得写入固件枚举。
 
@@ -247,9 +247,9 @@ P24 Table 1已确定0～1.8V的Boot模式目标。3.3V供电下的DAC码可由�
 | `tests/test_boot_mode.py`（待创建） | DAC码映射和I2C请求 | V2 Mock+波形 / B1 真机 |
 | `tests/test_led.py`（待创建） | 结果灯状态映射和GPIO波形 | V2 Mock / B1 真机 |
 | `tests/test_version.py`（待创建） | 版本元数据和查询响应 | 离线 / V2 |
-| `tests/test_b2_spi.py`（协议冻结后创建） | B1–B2 MCU SPI帧、超时和错误恢复 | B1/B2联合Mock+逻辑分析仪 |
+| `tests/test_b2_spi.py`（保活定义后创建） | B1–B2 MCU SPI保活、超时和错误恢复 | B1/B2联合Mock+逻辑分析仪 |
 
-> 当前没有外接模块；TPS62868/PAC1934/AD7124/MCP4725的真实器件回读、输出和精度验证留到B1真板，SPI控制通道留到B1/B2联合验证。
+> 当前没有外接模块；TPS62868/PAC1934/AD7124/MCP4725的真实器件回读、输出和精度验证留到B1真板，SPI保活留到B1/B2联合验证。
 
 ## 11. 引脚总表（几何法提取 + H743 AF 校验, 20260811 版）
 
@@ -262,7 +262,7 @@ P24 Table 1已确定0～1.8V的Boot模式目标。3.3V供电下的DAC码可由�
 | I2C2 | PF0=SDA PF1=SCL | TPS62868 U4026 + **MCP4725(0x60)** | V2 Mock+波形 |
 | 逻辑I2C4 | PH4=SCL PH5=SDA（软件开漏GPIO） | TPS62868 U4027 + PAC1934T(0x2C) | V2 Mock+波形 |
 | SPI4 | PE11=NSS PE12=SCK PE13=MISO PE14=MOSI | AD7124 U4028 | V2 SPI2 模块 |
-| SPI2 | PB12=NSS输入 PB13=SCK输入 PB14=MISO输出 PB15=MOSI输入 (`MCU_SPI_*`) | B1从↔B2共享总线主；B2每槽独立CS；Mode 0、8位MSB、硬件NSS低有效，初始1MHz | B1静态合同+构建；B1/B2真板波形 |
+| SPI2 | PB12=NSS输入 PB13=SCK输入 PB14=MISO输出 PB15=MOSI输入 (`MCU_SPI_*`) | 仅保活；B1从↔B2共享总线主，B2每槽独立CS；Mode 0、8位MSB、硬件NSS低有效，初始1MHz | B1静态合同+构建；B1/B2真板波形 |
 | ETH RMII | PA1/PA2/PA7/PB11/PC1/PC4/PC5/PG13/PG14 | YT8512H | 现用 |
 | ETH PHY复位 | PG12=`ETH_nRST` | 经ETH switch到B1/B2 PHY；PA0是WK-UP | B1 pincheck |
 | pwr_ctrl | PC6=4.0V EN, PC7=3.3V EN, PG11=DDR EN | 上电时序 | V2 GPIO 模拟 |
