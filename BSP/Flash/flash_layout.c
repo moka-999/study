@@ -129,6 +129,12 @@ static int fixed_string_is_terminated(const char *text, uint32_t capacity)
     return text != NULL && memchr(text, '\0', capacity) != NULL;
 }
 
+static int ipv4_is_zero(const uint8_t address[4])
+{
+    return address[0] == 0U && address[1] == 0U &&
+           address[2] == 0U && address[3] == 0U;
+}
+
 static int firmware_info_is_valid(const firmware_version_info_t *info)
 {
     return info != NULL &&
@@ -148,6 +154,7 @@ static int fru_is_valid(const fru_info_t *fru)
            fru->schema_version == FRU_INFO_SCHEMA_VERSION &&
            fru->struct_size == sizeof(*fru) &&
            fru->mac_valid <= 1U &&
+           fru->network_mode <= FRU_NETWORK_MODE_DHCP &&
            fixed_string_is_terminated(fru->product_name,
                                       sizeof(fru->product_name)) &&
            fixed_string_is_terminated(fru->part_number,
@@ -157,7 +164,14 @@ static int fru_is_valid(const fru_info_t *fru)
            fixed_string_is_terminated(fru->hardware_revision,
                                       sizeof(fru->hardware_revision)) &&
            fixed_string_is_terminated(fru->manufacturing_date,
-                                      sizeof(fru->manufacturing_date));
+                                      sizeof(fru->manufacturing_date)) &&
+           fixed_string_is_terminated(fru->site_label,
+                                      sizeof(fru->site_label)) &&
+           (fru->network_mode == FRU_NETWORK_MODE_UNSET ||
+            fru->service_port != 0U) &&
+           (fru->network_mode != FRU_NETWORK_MODE_STATIC ||
+            (!ipv4_is_zero(fru->configured_ipv4) &&
+             !ipv4_is_zero(fru->configured_netmask)));
 }
 
 static int generation_is_newer(uint32_t left, uint32_t right)

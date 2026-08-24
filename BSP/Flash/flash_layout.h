@@ -100,9 +100,17 @@ typedef struct {
 
 #define FRU_INFO_SCHEMA_VERSION             1U
 
+typedef enum {
+    FRU_NETWORK_MODE_UNSET  = 0,  /* 未写入网络配置，使用板型固件默认值 */
+    FRU_NETWORK_MODE_STATIC = 1,  /* 使用 configured_ipv4/netmask/gateway */
+    FRU_NETWORK_MODE_DHCP   = 2,  /* 地址由 DHCP 获取，配置地址字段忽略 */
+} fru_network_mode_t;
+
 /*
  * FRU v1 基础字段（固定 192 字节）。
- * 当前字段覆盖产品名、料号、序列号、硬件版本、生产日期和可选 MAC。
+ * 当前字段覆盖产品名、料号、序列号、硬件版本、生产日期、网络配置、
+ * 可选 MAC 和站点标签。网络字段是持久化配置，不等同于运行时实际地址；
+ * PC 查询时必须同时读取 lwIP 当前地址。
  * 产品字段尚未最终冻结；以后新增字段只能占用 reserved 或提升 schema，
  * 不能改变 v1 已有字段的偏移。
  */
@@ -116,7 +124,13 @@ typedef struct {
     char     manufacturing_date[16];
     uint8_t  mac_address[6];
     uint8_t  mac_valid;
-    uint8_t  reserved[53];
+    uint8_t  network_mode;
+    uint8_t  configured_ipv4[4];
+    uint8_t  configured_netmask[4];
+    uint8_t  configured_gateway[4];
+    uint16_t service_port;
+    char     site_label[16];
+    uint8_t  reserved[22];
 } fru_info_t;
 
 typedef enum {

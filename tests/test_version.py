@@ -23,6 +23,7 @@ FORMAT_VERSION = 1
 SECTOR_SIZE = 0x1000
 HEADER_FORMAT = "<IHHIIII8s"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+FRU_FORMAT = "<HH32s32s32s16s16s6sBB4s4s4sH16s22s"
 
 
 def header_define(name: str) -> int:
@@ -133,6 +134,7 @@ def verify_crc_and_payload_layout() -> None:
     assert zlib.crc32(b"123456789") & 0xFFFFFFFF == 0xCBF43926
     assert HEADER_SIZE == 32
     assert struct.calcsize(PAYLOAD_FORMAT) == STRUCT_SIZE == 96
+    assert struct.calcsize(FRU_FORMAT) == 192
 
 
 def verify_dual_copy_and_power_loss() -> None:
@@ -172,6 +174,17 @@ def verify_source_contract() -> None:
 
     assert "generation_is_newer" in layout_c and "payload_crc32" in layout_c
     assert "fixed_string_is_terminated" in layout_c, "定长FRU字符串必须校验NUL结尾"
+    assert "ipv4_is_zero" in layout_c, "静态模式必须拒绝全零IP和掩码"
+    for field in (
+        "configured_ipv4",
+        "configured_netmask",
+        "configured_gateway",
+        "service_port",
+        "site_label",
+    ):
+        assert field in layout_c or field in (
+            ROOT / "BSP/Flash/flash_layout.h"
+        ).read_text(encoding="utf-8"), f"FRU缺少板卡定位字段: {field}"
     assert "memcmp(s_sector_buffer" in flash_bsp, "相同数据应跳过擦写"
     assert "page_is_erased" in flash_bsp, "擦除态页面不应重复编程"
     assert "(addr / W25Q_PAGE_SIZE)" in qspi, "页写必须拒绝跨页"
