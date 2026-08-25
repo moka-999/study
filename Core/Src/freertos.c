@@ -159,8 +159,8 @@ void MX_FREERTOS_Init(void) {
   /* TCP server — 完整 socket+TLV 协议需 sm(1056)+rxbuf(1024)+frame(1172)+resp(1040)
      ≈峰值6KB, 4KB(1024字)不够, 加大到 16KB(4096字) */
   xTaskCreate(StartTcpServerTask, "tcp", 4096, NULL, 5, &tcpClientTaskHandle);
-  /* 监测任务 */
-  xTaskCreate(StartMonitorTask, "monitor", 256, NULL, 2, &monitorTaskHandle);
+  /* 监测任务包含AD/PAC采集栈帧，保留2KiB栈空间。 */
+  xTaskCreate(StartMonitorTask, "monitor", 512, NULL, 2, &monitorTaskHandle);
   monitorQueue = xQueueCreate(4, 128);
   /* rk 任务: 栈上 6.5KB 大缓冲(buf+sm+frame+msg+ack+fwd), 8KB 会溢出踩 TCB,
      加大到 32KB(8192字) */

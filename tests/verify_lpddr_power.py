@@ -57,6 +57,8 @@ def verify_source_contract() -> None:
     power = (ROOT / "HAL_Drv/ddr_power.c").read_text(encoding="utf-8")
     state = (ROOT / "HAL_Drv/pwr_ctrl.c").read_text(encoding="utf-8")
     pac = (ROOT / "BSP/PAC1934/pac1934.c").read_text(encoding="utf-8")
+    monitor = (ROOT / "HAL_Drv/memory_monitor.c").read_text(encoding="utf-8")
+    monitor_task = (ROOT / "App/tasks/monitor_task.c").read_text(encoding="utf-8")
     mock = (ROOT / "App/tasks/driver_mock_test.c").read_text(encoding="utf-8")
 
     assert "_bias_profile = DDR_BIAS_NOMINAL" in power, "每次上电必须清除上次拉偏"
@@ -69,6 +71,12 @@ def verify_source_contract() -> None:
     assert "s_state != PWR_CTRL_STATE_ON" in state, "拉偏只能在稳定 ON 状态执行"
     assert "enter_fault();" in state, "拉偏失败必须收敛到全关故障态"
     assert "pac1934_measure_all" in pac, "PAC1934 缺少三轨工程量采样接口"
+    assert "memory_monitor_sample" in monitor and "valid_mask" in monitor, \
+        "TPS/PAC/AD尚未组合为可部分有效的正式快照"
+    assert "snapshot.power_state == PWR_CTRL_STATE_ON" in monitor_task, \
+        "监测任务不得在DDR电源未稳定时访问采样器件"
+    assert "memory_monitor_invalidate" in monitor_task, \
+        "下电后必须清除PAC/AD就绪态"
     assert "test_lpddr_power_idd_bias_flow" in mock, "ARM Mock 镜像未覆盖完整流程"
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     assert "if(ENABLE_DRIVER_MOCK_TEST)" in cmake, "正式固件不应编译Mock任务体"

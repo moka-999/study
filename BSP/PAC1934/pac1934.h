@@ -60,6 +60,9 @@
 /* 产品/厂商 ID 值 */
 #define PAC1934_PRODUCT_ID          0x5B   /* PAC1934 */
 #define PAC1934_MANUF_ID            0x5D   /* Microchip */
+#define PAC1934_ADDR_B1             0x2C   /* ADDRSEL=5.23kΩ接地 */
+#define PAC1934_RSENSE_B1_UOHM      10000U /* 三路均为0.01Ω */
+#define PAC1934_CH_MASK_B1_RAILS    0x07   /* 启用CH1-3，关闭CH4 */
 #define PAC1934_CH_MASK_ALL          0x0F   /* bit0-3 = ch1-4 使能位 */
 
 /* CHANNEL_DIS(0x1C) 的通道关闭位实际位于bit7..4，不是bit3..0。 */

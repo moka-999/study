@@ -13,6 +13,7 @@
 #include "bsp_gpio.h"
 #include "ddr_power.h"
 #include "mcp4725.h"
+#include "memory_monitor.h"
 #include "pac1934.h"
 #include "pwr_ctrl.h"
 #include "tps62868.h"
@@ -438,6 +439,51 @@ static void test_ad7124(void)
     mock_check(ad7124_init(&adc) == IF_ERR, "AD7124传播寄存器写失败");
 }
 
+static void test_memory_monitor(void)
+{
+    i2c_if_t saved_i2c1 = i2c1_if;
+    i2c_if_t saved_i2c2 = i2c2_if;
+    i2c_if_t saved_i2c4 = i2c4_if;
+    mock_i2c_t i2c_mock;
+    mock_spi_t spi_mock;
+    memory_monitor_t monitor;
+    memory_monitor_sample_t sample;
+
+    mock_i2c_reset(&i2c_mock);
+    mock_spi_reset(&spi_mock);
+    i2c1_if = i2c_mock.interface;
+    i2c2_if = i2c_mock.interface;
+    i2c4_if = i2c_mock.interface;
+    s_pac_waited_ms = 0U;
+
+    memory_monitor_configure(&monitor, &i2c4_if, &spi_mock.interface,
+                             GPIOB, GPIO_PIN_12, mock_pac_wait);
+    mock_check(memory_monitor_init(&monitor) == IF_OK,
+               "监测层初始化PAC与AD");
+    mock_check(memory_monitor_sample(&monitor, &sample) == IF_OK &&
+               sample.valid_mask == MEMORY_MONITOR_VALID_ALL &&
+               sample.idd[0].current_ma == 312U,
+               "监测层生成三路结构化快照");
+    memory_monitor_invalidate(&monitor);
+    mock_check(memory_monitor_sample(&monitor, &sample) == IF_ERR &&
+               sample.valid_mask == MEMORY_MONITOR_VALID_TPS_STATUS,
+               "监测层下电后拒绝AD/PAC旧就绪态");
+
+    mock_spi_reset(&spi_mock);
+    spi_mock.id_value = 0x00U;
+    memory_monitor_configure(&monitor, &i2c4_if, &spi_mock.interface,
+                             GPIOB, GPIO_PIN_12, mock_pac_wait);
+    mock_check(memory_monitor_init(&monitor) == IF_ERR &&
+               memory_monitor_sample(&monitor, &sample) == IF_ERR &&
+               sample.valid_mask == (MEMORY_MONITOR_VALID_IDD |
+                                     MEMORY_MONITOR_VALID_TPS_STATUS),
+               "AD失败时仍保留PAC与TPS有效快照");
+
+    i2c1_if = saved_i2c1;
+    i2c2_if = saved_i2c2;
+    i2c4_if = saved_i2c4;
+}
+
 static void test_lpddr_power_idd_bias_flow(void)
 {
     static const pwr_ctrl_config_t config = {
@@ -570,6 +616,7 @@ void StartDriverMockTestTask(void *argument)
     test_mcp4725();
     test_pac1934();
     test_ad7124();
+    test_memory_monitor();
     test_lpddr_power_idd_bias_flow();
 
     mock_uart_printf("RESULT: %lu PASS, %lu FAIL\r\n",

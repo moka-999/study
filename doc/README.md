@@ -14,7 +14,7 @@
 | pwr_ctrl | 已实现安全默认关闭、可配置顺序和轮询式上/下电状态机；另有隔离的V2波形镜像 | 正式镜像与`build_pwr_wave/test.elf`均构建通过；离线源码合同+3组状态迁移通过；V2断电重上电50s GPIO波形实测通过 | 软件及V2 GPIO模拟闭环；B1真板待标定 |
 | LED结果显示 | 已实现PASS/FAIL/常温测试/高温测试颜色映射及500ms调度；已移植B1 PG0-PG5 | V2断电重上电50s六路功能波形通过；B1 46/46合同及ARM构建通过 | 软件/V2模拟闭环；B1真板待确认红绿/对象顺序和上电毛刺 |
 | Boot 模式控制 | 已实现MCP4725 Fast Write、掉电模式和7种Boot电压映射；不写EEPROM | `boot-test` 7/7；V2隔离Mock实机52 PASS/0 FAIL；B1 I2C2移植构建通过 | 软件驱动闭环；reboot/PC命令和真板VOUT/RK启动待完成 |
-| 电压/电流监测上报 | `monitor_task` 仍是占位且发送被注释 | 无真实采样接入 | 未实现 |
+| 电压/电流监测上报 | `memory_monitor` + `monitor_task`已生成TPS/PAC/AD结构化快照，仅电源ON时采集，支持部分有效标志 | V2 MCU纯内存Mock 56 PASS/0 FAIL；无真实器件 | 正式软件接入完成；PC JSON查询和真板标定待办 |
 | 驱动 TLV 命令 | 仅 reboot/frame_error 为本地命令 | PWR、DDR 调压、采样、Boot 命令均未接入 | 未实现 |
 | B1–B2 MCU SPI | B1引脚工程已配置SPI2从机；保活任务未实现 | 仅用于保活，不承载温控；B2共享SPI主机并用8个独立CS选择8块B1 | 硬件基线完成，保活定义待定 |
 | W25Q256版本/FRU | 32MiB分区、版本/FRU双副本、CRC32、网络配置/站点标签和构建清单已实现 | ARM构建+逐字节断电模型通过；V2板载Flash实测JEDEC/QE、跨页/RMW、四字节地址、CRC回退及复位保持全部通过 | V2软硬件闭环；PC查询待协议冻结 |
