@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build')]
+    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'lpddr-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build')]
     [string]$Task = 'build'
 )
 
@@ -11,6 +11,8 @@ $buildDirName = if ($Task -eq 'pwr-wave-build') {
     'build_led_wave'
 } elseif ($Task -eq 'flash-self-test-build') {
     'build_flash_self_test'
+} elseif ($Task -eq 'driver-mock-build') {
+    'build_driver_mock'
 } else {
     'build_debug'
 }
@@ -44,10 +46,12 @@ function Find-Python {
     throw 'Python not found. Install Python 3 or add python.exe to PATH.'
 }
 
-if ($Task -eq 'protocol-test' -or $Task -eq 'pwr-test' -or
+if ($Task -eq 'protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'lpddr-test' -or
     $Task -eq 'led-test' -or $Task -eq 'flash-test') {
     $python = Find-Python
-    $script = if ($Task -eq 'pwr-test') {
+    $script = if ($Task -eq 'lpddr-test') {
+        'tests\verify_lpddr_power.py'
+    } elseif ($Task -eq 'pwr-test') {
         'tests\verify_pwr_ctrl.py'
     } elseif ($Task -eq 'led-test') {
         'tests\verify_result_led.py'
@@ -80,6 +84,7 @@ if (-not $cmake) { throw 'STM32Cube CMake not found.' }
 $pwrWaveOption = if ($Task -eq 'pwr-wave-build') { '-DENABLE_PWR_WAVE_TEST=ON' } else { '-DENABLE_PWR_WAVE_TEST=OFF' }
 $ledWaveOption = if ($Task -eq 'led-wave-build') { '-DENABLE_RESULT_LED_WAVE_TEST=ON' } else { '-DENABLE_RESULT_LED_WAVE_TEST=OFF' }
 $flashSelfTestOption = if ($Task -eq 'flash-self-test-build') { '-DENABLE_FLASH_SELF_TEST=ON' } else { '-DENABLE_FLASH_SELF_TEST=OFF' }
+$driverMockOption = if ($Task -eq 'driver-mock-build') { '-DENABLE_DRIVER_MOCK_TEST=ON' } else { '-DENABLE_DRIVER_MOCK_TEST=OFF' }
 $cmakeArgs = @(
     '-S', $repo, '-B', $buildDir, '-G', 'Ninja',
     '-DCMAKE_BUILD_TYPE=Debug',
@@ -87,6 +92,7 @@ $cmakeArgs = @(
     $pwrWaveOption,
     $ledWaveOption,
     $flashSelfTestOption
+    $driverMockOption
 )
 if (-not (Test-Path -LiteralPath $cache)) {
     $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake"

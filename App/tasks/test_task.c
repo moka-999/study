@@ -24,6 +24,10 @@ extern UART_HandleTypeDef huart1;
 static void _adc_wait_ms(uint32_t ms)
 { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
+/* PAC1934的REFRESH_V后同样必须让出CPU并等待至少1ms。 */
+static void _pac_wait_ms(uint32_t ms)
+{ vTaskDelay(pdMS_TO_TICKS(ms)); }
+
 static void _uart_puts(const char *s)
 {
     HAL_UART_Transmit(&huart1, (uint8_t *)s, strlen(s), 100);
@@ -247,6 +251,7 @@ static void _test_pac1934(void)
     pac.bus = &i2c4_if;
     pac.addr = 0x2C;
     pac.rsense_uohm = 10000;   /* 0.01Ω */
+    pac.wait_ms = _pac_wait_ms;
 
     /* 初始化: 使能 ch1-3, 禁 ch4, 1024 SPS */
     int r = pac1934_init(&pac, 0x07, 0);

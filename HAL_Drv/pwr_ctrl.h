@@ -8,6 +8,7 @@
 #define PWR_CTRL_H
 
 #include <stdint.h>
+#include "ddr_power.h"
 
 /* PC6 与 PC7 的先后关系必须由最终硬件评审结果显式选择。 */
 typedef enum {
@@ -56,6 +57,13 @@ pwr_ctrl_result_t pwr_ctrl_configure(const pwr_ctrl_config_t *config);
 /* 请求非阻塞上电/下电；now_ms 应使用同一单调递增毫秒时基。 */
 pwr_ctrl_result_t pwr_ctrl_request_on(uint32_t now_ms);
 pwr_ctrl_result_t pwr_ctrl_request_off(uint32_t now_ms);
+
+/*
+ * 器件类型只能在OFF状态选择；拉偏只能在完成标称电压初始化的ON状态执行。
+ * 任一轨调压失败会进入FAULT并立即关闭全部电源。
+ */
+pwr_ctrl_result_t pwr_ctrl_select_memory_type(ddr_memory_type_t type);
+pwr_ctrl_result_t pwr_ctrl_apply_ddr_bias(ddr_bias_profile_t profile);
 
 /*
  * 周期调用以推进状态；各段毫秒等待不会休眠或占用 CPU。

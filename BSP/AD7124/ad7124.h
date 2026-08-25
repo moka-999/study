@@ -49,18 +49,13 @@
 #define AD7124_COMM_RA(x)       ((x) & 0x3F)
 
 /* ═══════════════════════════════════════════════════════════════════
- * ID 寄存器 (R, 8-bit)
- *   [7:4] DEVICE_ID        = 0x0 → AD7124-4, 0x1 → AD7124-8
- *   [3:0] SILICON_REVISION
- * 注意: Reset 值随硅版本 (手册 Rev.E 表 0x07, 官方 no-OS 默认 0x02),
- *       只校验 DEVICE_ID, 不校验 revision (以实物芯片为准)
+ * ID寄存器（R，8-bit）：B1原理图的1～24脚功能与AD7124-4 TSSOP一致。
+ * ADI资料给出的有效值包括0x04（早期器件）、0x06（B grade）和
+ * Rev.E复位值0x07。按有效整字节白名单校验，拒绝浮空MISO的0x00/0xFF。
  * ═══════════════════════════════════════════════════════════════════ */
-#define AD7124_ID_DEVICE_MASK   0xF0
-#define AD7124_ID_REV_MASK      0x0F
-#define AD7124_ID_DEVICE_AD7124_4   0x00    /* DEVICE_ID = 0  */
-#define AD7124_ID_DEVICE_AD7124_8   0x10    /* DEVICE_ID = 1  */
-/* revision 随硅版本 (手册 0x07 / 官方 0x02), 不校验, 仅参考 */
-#define AD7124_ID_SILICON           0x04
+#define AD7124_ID_AD7124_4_STD      0x04U
+#define AD7124_ID_AD7124_4_B        0x06U
+#define AD7124_ID_AD7124_4_REV_E    0x07U
 
 /* ═══════════════════════════════════════════════════════════════════
  * 状态寄存器 (R, 8-bit)
@@ -297,7 +292,7 @@ int  ad7124_read_error(ad7124_t *d, uint32_t *err_flags);
 float  ad7124_raw_to_voltage(int32_t raw, float vref, uint8_t pga, uint8_t bipolar);
 int32_t ad7124_raw_to_mv(int32_t raw, float vref, uint8_t pga, uint8_t bipolar);
 
-/* ── 带前端分压换算 (B2: AIN 输入经 100R+10K 分压, divider=1.01) ──
+/* ── 带前端分压换算（B1: AIN输入经100R+10K分压，divider=1.01）──
  *   V_src = V_ADC × divider,  divider = (100+10000)/10000 = 1.01
  *   1.0 = 无分压 (与 raw_to_voltage/mv 等价) */
 float  ad7124_raw_to_voltage_div(int32_t raw, float vref, uint8_t pga,
@@ -305,7 +300,7 @@ float  ad7124_raw_to_voltage_div(int32_t raw, float vref, uint8_t pga,
 int32_t ad7124_raw_to_mv_div(int32_t raw, float vref, uint8_t pga,
                              uint8_t bipolar, float divider);
 
-/* B2 三轨前端分压 (VDD1/VDD2/VDDQ 均 100R+10K) */
+/* B1三轨前端分压（VDD1/VDD2/VDDQ均为100R+10K） */
 #define AD7124_DIV_100R_10K   1.01f
 
 #endif

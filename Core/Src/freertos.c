@@ -136,6 +136,14 @@ void MX_FREERTOS_Init(void) {
   extern void StartQspiTestTask(void *argument);
   xTaskCreate(StartQspiTestTask, "qspiTest", 2048, NULL, 3, NULL);
   xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
+#elif defined(ENABLE_DRIVER_MOCK_TEST) && ENABLE_DRIVER_MOCK_TEST
+  /*
+   * 事务级Mock镜像不创建网络、RK或真实器件自检任务，保证结果只来自
+   * TPS/PAC/AD正式驱动代码和内存Mock接口。
+   */
+  extern void StartDriverMockTestTask(void *argument);
+  xTaskCreate(StartDriverMockTestTask, "drvMock", 2048, NULL, 3, NULL);
+  xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
 #else
   /* creation of ledBlinkTask */
   xTaskCreate(StartLedBlinkTask, "ledBlinkTask", 128, NULL, 1, &ledBlinkTaskHandle);

@@ -11,7 +11,7 @@
 /* ── 寄存器读/写 ── */
 int tps62868_read_reg(tps62868_t *d, uint8_t reg, uint8_t *val)
 {
-    if (!d || !d->bus || !d->bus->read_reg) return IF_ERR;
+    if (!d || !val || !d->bus || !d->bus->read_reg) return IF_ERR;
     return d->bus->read_reg(d->bus, d->addr, reg, val);
 }
 
@@ -25,7 +25,7 @@ int tps62868_write_reg(tps62868_t *d, uint8_t reg, uint8_t val)
 int tps62868_scan(i2c_if_t *bus, uint8_t *addrs, uint8_t max)
 {
     uint8_t found = 0;
-    if (!bus || !bus->is_ready) return 0;
+    if (!bus || !bus->is_ready || (max > 0U && !addrs)) return 0;
     for (uint8_t a = 0x40; a <= 0x4F && found < max; a++) {
         if (bus->is_ready(bus, a) == IF_OK)
             addrs[found++] = a;
@@ -42,12 +42,21 @@ int tps62868_scan(i2c_if_t *bus, uint8_t *addrs, uint8_t max)
 /* ── VOUT 设置: 按因子换算并写寄存器 ── */
 static int _set_vout(tps62868_t *d, uint8_t reg, uint16_t mv)
 {
+    int32_t base_mv;
     int32_t code;
 
-    if (!d || d->factor_x10 == 0) return IF_ERR;
-    if (mv < (uint16_t)(40 * d->factor_x10)) return IF_ERR;  /* 低于因子最小值 */
+    if (!d || d->factor_x10 == 0U) return IF_ERR;
 
-    code = ((int32_t)mv * 10 / d->factor_x10 - 400) / 5;
+    /*
+     * 先还原为器件寄存器所表示的“因子前电压”。若目标电压不能被
+     * 当前器件因子和5mV步进精确表示，直接拒绝，避免1805mV在x2
+     * 器件上被悄悄截断成1800mV。
+     */
+    if (((int32_t)mv * 10) % d->factor_x10 != 0) return IF_ERR;
+    base_mv = (int32_t)mv * 10 / d->factor_x10;
+    if (base_mv < 400 || ((base_mv - 400) % 5) != 0) return IF_ERR;
+
+    code = (base_mv - 400) / 5;
     if (code < 0 || code > 0xFF) return IF_ERR;       /* 超出可设范围 */
     return tps62868_write_reg(d, reg, (uint8_t)code);
 }

@@ -56,13 +56,11 @@ static void force_all_rails_off(void)
     bsp_gpio_set(GPIO_FUNC_PWR_4V0_EN, 0);
 }
 
-#if !defined(ENABLE_PWR_WAVE_TEST) || !ENABLE_PWR_WAVE_TEST
 static void enter_fault(void)
 {
     force_all_rails_off();
     s_state = PWR_CTRL_STATE_FAULT;
 }
-#endif
 
 pwr_ctrl_result_t pwr_ctrl_configure(const pwr_ctrl_config_t *config)
 {
@@ -123,6 +121,25 @@ pwr_ctrl_result_t pwr_ctrl_request_off(uint32_t now_ms)
 
     bsp_gpio_set(GPIO_FUNC_PWR_DDR_EN, 0);
     enter_state(PWR_CTRL_STATE_WAIT_DDR_OFF, now_ms);
+    return PWR_CTRL_OK;
+}
+
+pwr_ctrl_result_t pwr_ctrl_select_memory_type(ddr_memory_type_t type)
+{
+    if (s_state != PWR_CTRL_STATE_OFF) return PWR_CTRL_ERR_BUSY;
+    return ddr_power_select_memory_type(type) == IF_OK
+         ? PWR_CTRL_OK : PWR_CTRL_ERR_PARAM;
+}
+
+pwr_ctrl_result_t pwr_ctrl_apply_ddr_bias(ddr_bias_profile_t profile)
+{
+    if (s_state == PWR_CTRL_STATE_FAULT) return PWR_CTRL_ERR_FAULT;
+    if (s_state != PWR_CTRL_STATE_ON) return PWR_CTRL_ERR_BUSY;
+
+    if (ddr_power_apply_bias(profile) != IF_OK) {
+        enter_fault();
+        return PWR_CTRL_ERR_FAULT;
+    }
     return PWR_CTRL_OK;
 }
 

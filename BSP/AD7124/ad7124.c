@@ -36,7 +36,8 @@ int ad7124_read_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len)
 {
     uint8_t tx[5] = { 0x40 | (reg & 0x3F), 0, 0, 0, 0 };  /* cmd + dummy */
     uint8_t rx[5] = {0};
-    if (len > 4) return IF_ERR;
+    if (!d || !buf || !d->spi || !d->spi->transfer || len == 0U || len > 4U)
+        return IF_ERR;
 
     _cs_low(d);
     int r = d->spi->transfer(d->spi, tx, rx, 1 + len);
@@ -50,7 +51,8 @@ int ad7124_read_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len)
 int ad7124_write_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len)
 {
     uint8_t tx[5] = { reg & 0x3F, 0, 0, 0, 0 };
-    if (len > 4) return IF_ERR;
+    if (!d || !buf || !d->spi || !d->spi->send || len == 0U || len > 4U)
+        return IF_ERR;
     memcpy(tx + 1, buf, len);
 
     _cs_low(d);
@@ -96,6 +98,8 @@ int ad7124_reset(ad7124_t *d)
 {
     uint8_t tx[8] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
 
+    if (!d || !d->spi || !d->spi->send) return IF_ERR;
+
     _cs_low(d);
     int r = d->spi->send(d->spi, tx, 8);
     _cs_high(d);
@@ -116,9 +120,9 @@ int ad7124_read_id(ad7124_t *d)
     uint8_t id;
     if (ad7124_read_reg(d, AD7124_REG_ID, &id, 1) != IF_OK) return IF_ERR;
     d->id = id;
-    /* 检查 DEVICE_ID: AD7124-4 → 0x0X, AD7124-8 → 0x1X */
-    uint8_t dev = (id & AD7124_ID_DEVICE_MASK) >> 4;
-    return (dev == 0 || dev == 1) ? IF_OK : IF_ERR;
+    return (id == AD7124_ID_AD7124_4_STD ||
+            id == AD7124_ID_AD7124_4_B ||
+            id == AD7124_ID_AD7124_4_REV_E) ? IF_OK : IF_ERR;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -197,7 +201,7 @@ int ad7124_config_setup(ad7124_t *d, uint8_t setup,
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * 初始化: 复位 → 读 ID → 配置 3 通道 (B2 原理图 20260811, AIN0/2/4)
+ * 初始化：复位 → 读ID → 配置3通道（B1/MB360原理图20260811，AIN0/2/4）
  *   CH0: AIN0 ↔ AVSS → VCC_1V8_S3_LPDDR4X (VDD1, 1.8V, TPS62868 U4025)
  *   CH1: AIN2 ↔ AVSS → VDD2_DDR_S3       (VDD2, 1.1V, TPS62868 U4026)
  *   CH2: AIN4 ↔ AVSS → VDDQ_DDR          (VDDQ, 0.6V, TPS62868 U4027)
@@ -211,48 +215,56 @@ int ad7124_config_setup(ad7124_t *d, uint8_t setup,
 
 int ad7124_init(ad7124_t *d)
 {
-    /* B2 原理图: CH0→AIN0, CH1→AIN2, CH2→AIN4 (AIN1/3/5=AGND) */
-    static const uint8_t b2_ainp[3] = {
+    /* B1原理图：CH0→AIN0，CH1→AIN2，CH2→AIN4（AIN1/3/5=AGND）。 */
+    static const uint8_t b1_ainp[3] = {
         AD7124_AIN_AIN0, AD7124_AIN_AIN2, AD7124_AIN_AIN4
     };
 
-    if (ad7124_reset(d) != IF_OK) return -1;
-    ad7124_read_id(d);  /* 无芯片时 id=0x00, 继续配置以便逻辑分析仪抓波形 */
+    if (!d || !d->spi) return IF_ERR;
+    if (ad7124_reset(d) != IF_OK) return IF_ERR;
+    if (ad7124_read_id(d) != IF_OK) return IF_ERR;
 
     /* ADC_CTRL: 内部时钟, 外部基准 REFIN1 (见 CFGx REF_SEL), 连续模式, 全功率, DATA_STATUS */
-    _wr16(d, AD7124_REG_ADC_CTRL,
-          AD7124_ADC_CLK_SEL(AD7124_CLK_INT) |
-          AD7124_ADC_POWER_MODE(AD7124_PWR_FULL) |
-          AD7124_ADC_REF_EN |
-          AD7124_ADC_DATA_STATUS |
-          AD7124_ADC_MODE(AD7124_MODE_CONT));
+    if (_wr16(d, AD7124_REG_ADC_CTRL,
+              AD7124_ADC_CLK_SEL(AD7124_CLK_INT) |
+              AD7124_ADC_POWER_MODE(AD7124_PWR_FULL) |
+              AD7124_ADC_REF_EN |
+              AD7124_ADC_DATA_STATUS |
+              AD7124_ADC_MODE(AD7124_MODE_CONT)) != IF_OK)
+        return IF_ERR;
     d->adc_mode = AD7124_MODE_CONT;
 
-    d->num_ch = 3;  /* B2: 3 路 DDR 电压回读 */
+    d->num_ch = 3;  /* B1本板的3路DDR电压回读 */
 
     for (int ch = 0; ch < d->num_ch; ch++) {
-        /* CHx_MAP: enable, AIN(b2_ainp) ↔ AVSS, setup=ch */
-        _wr16(d, AD7124_REG_CH0 + ch,
-              AD7124_CH_ENABLE | AD7124_CH_AINP(b2_ainp[ch]) | AD7124_CH_AINM(AD7124_AIN_AVSS)
-              | AD7124_CH_SETUP(ch));
+        /* CHx_MAP：使能，AIN(b1_ainp)对AVSS，setup=ch。 */
+        if (_wr16(d, AD7124_REG_CH0 + ch,
+                  AD7124_CH_ENABLE | AD7124_CH_AINP(b1_ainp[ch]) |
+                  AD7124_CH_AINM(AD7124_AIN_AVSS) |
+                  AD7124_CH_SETUP(ch)) != IF_OK)
+            return IF_ERR;
 
         /* CFGx: 单极性, gain=1, 外部基准 REFIN1, 缓冲器使能
          * (单极性: AIN 范围 0~VREF/gain, DDR 电压全正用满 24-bit 分辨率) */
-        _wr16(d, AD7124_REG_CFG0 + ch,
-              AD7124_CFG_PGA(0) |
-              AD7124_CFG_REF_SEL(AD7124_REF_EXT1) |
-              AD7124_CFG_REF_BUFP | AD7124_CFG_REF_BUFM |
-              AD7124_CFG_AIN_BUFP | AD7124_CFG_AIN_BUFM);
+        if (_wr16(d, AD7124_REG_CFG0 + ch,
+                  AD7124_CFG_PGA(0) |
+                  AD7124_CFG_REF_SEL(AD7124_REF_EXT1) |
+                  AD7124_CFG_REF_BUFP | AD7124_CFG_REF_BUFM |
+                  AD7124_CFG_AIN_BUFP | AD7124_CFG_AIN_BUFM) != IF_OK)
+            return IF_ERR;
 
         /* FILTERx: SINC4, FS=384 → fADC = 614400/(32*384) ≈ 50Hz */
-        _wr24(d, AD7124_REG_FILTER0 + ch, AD7124_FILT_SINC4 | AD7124_FILT_FS(384));
+        if (_wr24(d, AD7124_REG_FILTER0 + ch,
+                  AD7124_FILT_SINC4 | AD7124_FILT_FS(384)) != IF_OK)
+            return IF_ERR;
     }
 
     /* ── 禁用未用通道 (仅保留 CH0-2; AIN1/3/5=AGND, 6/7=NC 原理图) ── */
-    for (int ch = d->num_ch; ch < 8; ch++)
-        _wr16(d, AD7124_REG_CH0 + ch, 0);
+    for (int ch = d->num_ch; ch < 8; ch++) {
+        if (_wr16(d, AD7124_REG_CH0 + ch, 0) != IF_OK) return IF_ERR;
+    }
 
-    return 0;
+    return IF_OK;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -477,7 +489,7 @@ float ad7124_raw_to_voltage(int32_t raw, float vref, uint8_t pga, uint8_t bipola
  * 原始值 → mV (int32_t, 整数, 协议上报用)
  *
  * vref 传基准电压 (REFIN1 = 2.5V); 若前端有分压, 用 _div 系列传 divider:
- *   B2: AIN 输入经 100R+10K 分压 → V_src = V_ADC × (100+10000)/10000
+ *   B1: AIN输入经100R+10K分压 → V_src = V_ADC × (100+10000)/10000
  *       = V_ADC × 1.01  → divider = AD7124_DIV_100R_10K
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -522,7 +534,7 @@ int ad7124_read_all_mv(ad7124_t *d, int32_t *mv, uint8_t max_ch, uint8_t *got,
     if (r != IF_OK) return r;
     for (uint8_t i = 0; i < *got; i++) {
         uint8_t p = pga     ? pga[i]    : 0;
-        uint8_t b = bipolar ? bipolar[i] : 0;   /* 默认 unipolar (B2 全正电压轨) */
+        uint8_t b = bipolar ? bipolar[i] : 0;   /* 默认unipolar（B1全是正电压轨）。 */
         mv[i] = ad7124_raw_to_mv(raw[i], vref, p, b);
     }
     return IF_OK;

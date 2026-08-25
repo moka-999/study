@@ -30,6 +30,9 @@ option(ENABLE_RESULT_LED_WAVE_TEST "Build Apollo V2 result LED waveform image" O
 # 仅用于阿波罗 V2 板载 W25Q256；所有破坏性访问限制在末尾 64 KiB。
 option(ENABLE_FLASH_SELF_TEST "Build isolated Apollo V2 W25Q256 self-test image" OFF)
 
+# 无外接TPS/PAC/AD器件时，运行正式驱动源码的事务级Mock验收镜像。
+option(ENABLE_DRIVER_MOCK_TEST "Build isolated TPS/PAC/AD mock self-test image" OFF)
+
 # 固件身份由构建系统统一提供，禁止在 C 源文件中散落手写版本字符串。
 set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
 set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
@@ -122,6 +125,13 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/WDT/wdt.c
 )
 
+# Mock任务体只进入隔离测试镜像，正式固件不编译测试代码。
+if(ENABLE_DRIVER_MOCK_TEST)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/driver_mock_test.c
+    )
+endif()
+
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
@@ -144,6 +154,7 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     $<$<BOOL:${ENABLE_PWR_WAVE_TEST}>:ENABLE_PWR_WAVE_TEST=1>
     $<$<BOOL:${ENABLE_RESULT_LED_WAVE_TEST}>:ENABLE_RESULT_LED_WAVE_TEST=1>
     $<$<BOOL:${ENABLE_FLASH_SELF_TEST}>:ENABLE_FLASH_SELF_TEST=1>
+    $<$<BOOL:${ENABLE_DRIVER_MOCK_TEST}>:ENABLE_DRIVER_MOCK_TEST=1>
 )
 
 # 版本宏只影响 flash_layout.c，刷新构建时间时无需重编译整个固件。

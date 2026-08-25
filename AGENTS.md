@@ -151,7 +151,8 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ✅ 2026-08-21：从干净构建目录全量编译成功，生成 `boot.elf` / `test.elf`；离线协议模型 65/65 PASS
 - ✅ 已修复 3 个网关固件 bug（重传热循环 / 转发丢命令 / ACK回环）
 - ✅ 2026-08-24：结果灯V2六路功能波形闭环；首次采集发现并修复调度前数秒假高，B1真板仍需复测复位高阻瞬态
-- ⚠️ TPS62868、PAC1934、AD7124 当前是“代码可编译 + 自检入口”；手头没有外接模块，V2 只做 Mock 与逻辑分析仪波形验证
+- ⚠️ TPS62868、PAC1934、AD7124 已有事务级Mock和隔离自检镜像；手头没有外接模块，真实ID/电压/电流与标定仍待B1真板
+- ✅ 2026-08-25：TPS/PAC/AD事务级Mock镜像与LPDDR离线模型建立；覆盖LPDDR4/4X标称与±偏压、反序下电、跨电源周期回标称、PAC三轨IDD换算和AD7124-4 ID白名单。ARM正式/Mock构建与离线合同通过，V2实机串口结果41 PASS/0 FAIL并已恢复正式镜像；B1真值/标定仍未闭环
 - ✅ 2026-08-24：新增`pwr_ctrl`安全状态机（默认全关、未配置拒绝上电、顺序可配置、失败全关）；ARM全量构建、3组离线状态迁移及V2 GPIO波形通过，B1真板时序与TLV仍待完成
 - ✅ 2026-08-24：新增独立`build_pwr_wave/test.elf`波形镜像；经正点原子官方原理图确认，V2直接使用与B1一致的P2-31/PC6、P2-32/PC7、P3-31/PG11；断电重上电50s逻辑分析仪实测通过，三路初始低电平、首边沿无可见毛刺、正反顺序及500ms测试间隔均正常；默认正式构建关闭且B1编译期禁止
 - ✅ 2026-08-24：完成结果灯纯颜色映射（PASS绿常亮/FAIL红常亮/常温橙闪/高温红闪）和独立`build_led_wave/test.elf`波形镜像；离线合同、正式镜像及波形镜像构建通过，波形镜像已烧录V2；六路实测待接线
@@ -187,7 +188,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 
 | 外设 | 引脚 | 目标 | 备注 |
 |------|------|------|------|
-| AD7124 (U4028) | SPI4: PE11=NSS PE12=SCK PE13=MISO PE14=MOSI | AIN0 ← VCC_1V8_S3_LPDDR4X / AIN2 ← VDD2_DDR_S3 / AIN4 ← VDDQ_DDR（导线追踪已确认, 各经 100R+10K+0.1uF 滤波）; AIN1/3/5=AGND, AIN6/7=NC | REFIN1+ ← VCC_2V5 (U4029 RY6211B-25C LDO) |
+| AD7124-4 (U4028) | SPI4: PE11=NSS PE12=SCK PE13=MISO PE14=MOSI | AIN0 ← VCC_1V8_S3_LPDDR4X / AIN2 ← VDD2_DDR_S3 / AIN4 ← VDDQ_DDR（导线追踪已确认, 各经 100R+10K+0.1uF 滤波）; AIN1/3/5=AGND, AIN6/7=NC | 符号1～24脚匹配TSSOP-24；图面`LFCSP-32`文字冲突待硬件修正。REFIN1+ ← VCC_2V5 |
 | PAC1934T (U204) | 原理图逻辑I2C4 (PH4=SCL/PH5=SDA，软件开漏GPIO；不是STM32 I2C4 AF引脚对) | 地址 **0x2C/0x2D**（ADDRSEL=5.23K→GND） | SENSE1-3: VCC_1V8_S3/VDD2_DDR_S3/VDDQ_DDR 各 0.01Ω; SENSE4 未用 |
 | TPS62868/69 ×3 | U4025=I2C1, U4026=I2C2, U4027=I2C4 | VDD1 / VDD2 / VDDQ | U4025 **TPS628692A**+56.2kΩ→因子2/启动1.60V/0x49；U4026 **TPS628681A**+86.8kΩ（TI 86.6kΩ档）→因子1/0.90V/0x41；U4027 **TPS628681A**+15.4kΩ→因子1/0.50V/0x4F |
 | pwr_ctrl | **PC6**→MP8759 EN (VCC4V0_SYS 4.0V), **PC7**→RT8070 EN (VCC3V3_SYS 3.3V), **PG11**→3×TPS62868 EN | PC6/PC7顺序按RK3588/RK806和最终原理图要求；PG11使能TPS后通过I2C配置LPDDR三轨 | 延时和掉电顺序待真板测量，旧10/10/50ms不是批准值 |
@@ -211,7 +212,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 | **引导模式控制 (P24)** | **U4030 MCP4725A0 DAC** (SOT23-6): VDD=3V3_MCU, A0→GND(**地址 0x60**), SCL/SDA ← R7286/R7287(0R) ← **I2C2**（与 TPS62868 U4026 同总线）; VOUT → R7288(0R) → **BOOT_SARADC_IN0** → RK3588 (p<6>) | **MCU 写 DAC 电压 → 选 RK3588 引导模式**: 0V=USB / 0.3V=SD / 0.6V=EMMC / 0.9V=FSPI M0 / 1.2V=FSPI M1 / 1.5V=FSPI M2 / 1.8V=EMMC-SD（TABLE 1, 100K 上拉域）。另有 SARADC_VIN1_KEY/RECOVERY 电阻阶梯 (LEVEL1-7) + MASKROM_Key (J36/J37) |
 | 连接器 | 40x2 头子 → **FX18-60P-08SV10 (30x2=60pin)** ×2；新增 J35 (CXC01L3Z) | |
 | P22 | PAC1934T 采样路径新增 R7268-7271 (4×0402, 值未提取) | |
-| P21 | VDD 去耦 C4094-4104 + FB0603×4 + R7272；AD7124 封装注记 LFCSP-32（疑 AD7124-8?）；CHS-01TB 按键 | |
+| P21 | VDD 去耦 C4094-4104 + FB0603×4 + R7272；U4028的1～24脚符号匹配AD7124-4 TSSOP-24，但图面又写`LFCSP-32`，属于封装/符号冲突，须硬件核对BOM与PCB封装；CHS-01TB 按键 | 固件暂按AD7124-4，ID白名单0x04/0x06/0x07 |
 | P14/P15/P23 | TYPEC-16P 焊座替换 P1 插头；WAFER-GH125 线束座 | |
 
 ---
