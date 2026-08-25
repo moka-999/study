@@ -10,7 +10,7 @@
 | Bootloader + App 偏移 | 已实现 | 本次全量编译生成 `boot.elf` / `test.elf` | 可构建，未在本次重新烧录 |
 | TPS62868 / DDR 电源 API | 已实现驱动骨架；U4027已按TPS628681A修正为因子1 | 可编译；I2C2仍为`NULL`占位；无本次模块实测 | 未闭环 |
 | PAC1934T | 已实现驱动骨架 | 可编译；无本次模块/真板实测 | 未闭环 |
-| AD7124 | 已实现驱动骨架 | 可编译；无本次模块/真板实测 | 未闭环 |
+| AD7124 | 已实现AD7124-4驱动、事务Mock和隔离SPI波形镜像 | V2 SPI2实脚Mode 3发送事务已验收；无外接器件，MISO真实ID/电压及标定待B1 | V2发送侧闭环；B1器件侧未闭环 |
 | pwr_ctrl | 已实现安全默认关闭、可配置顺序和轮询式上/下电状态机；另有隔离的V2波形镜像 | 正式镜像与`build_pwr_wave/test.elf`均构建通过；离线源码合同+3组状态迁移通过；V2断电重上电50s GPIO波形实测通过 | 软件及V2 GPIO模拟闭环；B1真板待标定 |
 | LED结果显示 | 已实现PASS/FAIL/常温测试/高温测试颜色映射及500ms调度；已移植B1 PG0-PG5 | V2断电重上电50s六路功能波形通过；B1 46/46合同及ARM构建通过 | 软件/V2模拟闭环；B1真板待确认红绿/对象顺序和上电毛刺 |
 | Boot 模式控制 | 无 MCP4725/boot_mode 代码 | 文档曾误写“代码完成” | 未实现 |
@@ -61,7 +61,7 @@ python -X utf8 tests\full_chain_stress.py
 - Apollo V2保留MAC `00:80:E1:00:00:00`；B1使用STM32 UID生成稳定的本地管理单播MAC，量产MAC/FRU规则冻结后再替换策略。
 - Apollo V2 PHY为YT8512C，通过PCF8574 P7复位；B1 PHY为YT8512H，通过PG12 `ETH_nRST`复位，其固件在独立`../b1`工程维护。
 - 驱动自检已默认关闭；开发镜像可显式定义`ENABLE_DRIVER_SELF_TEST=1`启用。
-- 新驱动目前只有“编译通过”，不能写成“V2 或 B1/B2 已验证”。
+- TPS/PAC目前完成事务Mock；AD7124还完成V2 SPI2发送侧实脚波形验收。没有外接器件，三者均不能写成“真实器件或B1/B2已验证”。
 
 暂定需求见 [`requirements_baseline.md`](requirements_baseline.md)，协议问题记录在 [`adr/0001-protocol-contract.md`](adr/0001-protocol-contract.md)，规范术语见 [`../CONTEXT.md`](../CONTEXT.md)。
 

@@ -123,7 +123,8 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the thread(s) */
   /* creation of defaultTask */
-#if !defined(ENABLE_FLASH_SELF_TEST) || !ENABLE_FLASH_SELF_TEST
+#if (!defined(ENABLE_FLASH_SELF_TEST) || !ENABLE_FLASH_SELF_TEST) && \
+    (!defined(ENABLE_AD7124_WAVE_TEST) || !ENABLE_AD7124_WAVE_TEST)
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 #endif
 
@@ -143,6 +144,14 @@ void MX_FREERTOS_Init(void) {
    */
   extern void StartDriverMockTestTask(void *argument);
   xTaskCreate(StartDriverMockTestTask, "drvMock", 2048, NULL, 3, NULL);
+  xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
+#elif defined(ENABLE_AD7124_WAVE_TEST) && ENABLE_AD7124_WAVE_TEST
+  /*
+   * AD7124波形镜像只运行SPI2测试任务和喂狗任务，避免网络及其他驱动
+   * 占用CPU或在采集窗口内产生无关活动。
+   */
+  extern void StartAd7124WaveTask(void *argument);
+  xTaskCreate(StartAd7124WaveTask, "adWave", 512, NULL, 3, NULL);
   xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
 #else
   /* creation of ledBlinkTask */

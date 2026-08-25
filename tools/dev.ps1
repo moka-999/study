@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'lpddr-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build')]
+    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'lpddr-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build')]
     [string]$Task = 'build'
 )
 
@@ -13,6 +13,8 @@ $buildDirName = if ($Task -eq 'pwr-wave-build') {
     'build_flash_self_test'
 } elseif ($Task -eq 'driver-mock-build') {
     'build_driver_mock'
+} elseif ($Task -eq 'ad-wave-build') {
+    'build_ad_wave'
 } else {
     'build_debug'
 }
@@ -75,16 +77,33 @@ if (Test-Path -LiteralPath $cache) {
 if (-not $ninja) {
     $ninja = Find-BundledExe 'ninja' 'ninja.exe'
 }
+# A restricted shell may not enumerate the STM32Cube bundle directory.
+# Reuse the absolute tool path from the configured production build cache.
+if (-not $ninja) {
+    $referenceCache = Join-Path $repo 'build_debug\CMakeCache.txt'
+    if (Test-Path -LiteralPath $referenceCache) {
+        $line = Select-String -LiteralPath $referenceCache -Pattern '^CMAKE_MAKE_PROGRAM:(?:FILEPATH|UNINITIALIZED)=(.+)$' | Select-Object -First 1
+        if ($line) { $ninja = $line.Matches[0].Groups[1].Value }
+    }
+}
 if (-not $ninja) { throw 'STM32Cube Ninja not found.' }
 
 # 每次正式构建都快速重新配置一次，用当前 UTC/Git 状态刷新固件版本元数据。
 # 版本宏只属于 flash_layout.c，因此通常只重编译该文件并重新链接。
 $cmake = Find-BundledExe 'cmake' 'cmake.exe'
+if (-not $cmake) {
+    $referenceCache = Join-Path $repo 'build_debug\CMakeCache.txt'
+    if (Test-Path -LiteralPath $referenceCache) {
+        $line = Select-String -LiteralPath $referenceCache -Pattern '^CMAKE_COMMAND:INTERNAL=(.+)$' | Select-Object -First 1
+        if ($line) { $cmake = $line.Matches[0].Groups[1].Value }
+    }
+}
 if (-not $cmake) { throw 'STM32Cube CMake not found.' }
 $pwrWaveOption = if ($Task -eq 'pwr-wave-build') { '-DENABLE_PWR_WAVE_TEST=ON' } else { '-DENABLE_PWR_WAVE_TEST=OFF' }
 $ledWaveOption = if ($Task -eq 'led-wave-build') { '-DENABLE_RESULT_LED_WAVE_TEST=ON' } else { '-DENABLE_RESULT_LED_WAVE_TEST=OFF' }
 $flashSelfTestOption = if ($Task -eq 'flash-self-test-build') { '-DENABLE_FLASH_SELF_TEST=ON' } else { '-DENABLE_FLASH_SELF_TEST=OFF' }
 $driverMockOption = if ($Task -eq 'driver-mock-build') { '-DENABLE_DRIVER_MOCK_TEST=ON' } else { '-DENABLE_DRIVER_MOCK_TEST=OFF' }
+$adWaveOption = if ($Task -eq 'ad-wave-build') { '-DENABLE_AD7124_WAVE_TEST=ON' } else { '-DENABLE_AD7124_WAVE_TEST=OFF' }
 $cmakeArgs = @(
     '-S', $repo, '-B', $buildDir, '-G', 'Ninja',
     '-DCMAKE_BUILD_TYPE=Debug',
@@ -93,6 +112,7 @@ $cmakeArgs = @(
     $ledWaveOption,
     $flashSelfTestOption
     $driverMockOption
+    $adWaveOption
 )
 if (-not (Test-Path -LiteralPath $cache)) {
     $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake"

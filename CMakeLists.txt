@@ -33,6 +33,9 @@ option(ENABLE_FLASH_SELF_TEST "Build isolated Apollo V2 W25Q256 self-test image"
 # 无外接TPS/PAC/AD器件时，运行正式驱动源码的事务级Mock验收镜像。
 option(ENABLE_DRIVER_MOCK_TEST "Build isolated TPS/PAC/AD mock self-test image" OFF)
 
+# 仅用于阿波罗 V2 实脚 SPI2 波形验收；循环输出 AD7124 典型事务。
+option(ENABLE_AD7124_WAVE_TEST "Build isolated Apollo V2 AD7124 SPI waveform image" OFF)
+
 # 固件身份由构建系统统一提供，禁止在 C 源文件中散落手写版本字符串。
 set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
 set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
@@ -132,6 +135,13 @@ if(ENABLE_DRIVER_MOCK_TEST)
     )
 endif()
 
+# 实脚SPI波形任务同样只进入专用镜像，正式固件不携带测试入口。
+if(ENABLE_AD7124_WAVE_TEST)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/ad7124_wave_task.c
+    )
+endif()
+
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
@@ -155,6 +165,7 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     $<$<BOOL:${ENABLE_RESULT_LED_WAVE_TEST}>:ENABLE_RESULT_LED_WAVE_TEST=1>
     $<$<BOOL:${ENABLE_FLASH_SELF_TEST}>:ENABLE_FLASH_SELF_TEST=1>
     $<$<BOOL:${ENABLE_DRIVER_MOCK_TEST}>:ENABLE_DRIVER_MOCK_TEST=1>
+    $<$<BOOL:${ENABLE_AD7124_WAVE_TEST}>:ENABLE_AD7124_WAVE_TEST=1>
 )
 
 # 版本宏只影响 flash_layout.c，刷新构建时间时无需重编译整个固件。
