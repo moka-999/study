@@ -50,6 +50,8 @@ def main() -> int:
             "PG11/PG12 safe defaults missing")
     require("SPI_POLARITY_HIGH, SPI_PHASE_2EDGE" in source,
             "AD7124 SPI4 must use mode 3")
+    require("SPI_BAUDRATEPRESCALER_256" in source,
+            "AD7124 SPI4 must start at the conservative 390.625kHz rate")
     require("SPI_MODE_SLAVE, SPI_NSS_HARD_INPUT" in source,
             "B1 SPI2 must be a hardware-NSS slave")
     require("B1_SPI2_NCS_PIN | B1_SPI2_SCK_PIN" in source and
@@ -81,8 +83,9 @@ def main() -> int:
 
     ioc = (ROOT / "b1.ioc").read_text(encoding="utf-8")
     require("SPI4.CLKPolarity=SPI_POLARITY_HIGH" in ioc and
-            "SPI4.CLKPhase=SPI_PHASE_2EDGE" in ioc,
-            "CubeMX baseline must generate SPI4 mode 3")
+            "SPI4.CLKPhase=SPI_PHASE_2EDGE" in ioc and
+            "SPI4.BaudRatePrescaler=SPI_BAUDRATEPRESCALER_256" in ioc,
+            "CubeMX baseline must generate conservative SPI4 mode 3")
     require("SPI2.Mode=SPI_MODE_SLAVE" in ioc and
             "SPI2.VirtualNSS=VM_NSSHARD" in ioc and
             "PB12.Mode=NSS_Signal_Hard_Input" in ioc,
@@ -145,6 +148,23 @@ def main() -> int:
             "firmware_version_save" not in source and "fru_info_save" not in source,
             "B1启动应初始化Flash但不得自动写生产元数据")
 
+    # AD7124只同步V2已验收的驱动与SPI4板级适配；真板前不得启动即访问器件。
+    ad_header = (ROOT / "BSP/AD7124/ad7124.h").read_text(encoding="utf-8")
+    ad_source = (ROOT / "BSP/AD7124/ad7124.c").read_text(encoding="utf-8")
+    spi_source = (ROOT / "HAL_Drv/spi_hw.c").read_text(encoding="utf-8")
+    require(all(value in ad_header for value in (
+        "AD7124_ID_AD7124_4_STD", "AD7124_ID_AD7124_4_B",
+        "AD7124_ID_AD7124_4_REV_E", "AD7124_DIV_100R_10K")),
+            "AD7124-4 ID白名单或B1分压系数缺失")
+    require("AD7124_AIN_AIN0, AD7124_AIN_AIN2, AD7124_AIN_AIN4" in ad_source and
+            "AD7124_AIN_AVSS" in ad_source,
+            "AD7124 B1三路电压通道映射缺失")
+    require("spi_if_t spi4_if" in spi_source and "&hspi4" in spi_source and
+            "hspi2" not in spi_source,
+            "AD7124必须只绑定B1 SPI4，不能占用SPI2保活总线")
+    require("ad7124_init" not in source,
+            "B1真板前不得在启动流程中自动访问AD7124")
+
     linker = (ROOT / "STM32H743xx_FLASH.ld").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     require("KEEP(*(.firmware_version))" in linker,
@@ -158,6 +178,8 @@ def main() -> int:
     require("Middlewares/Third_Party/FreeRTOS" in cmake and
             "Middlewares/Third_Party/LwIP" in cmake,
             "B1 build does not compile the migrated FreeRTOS/LwIP sources")
+    require("BSP/AD7124/ad7124.c" in cmake and "HAL_Drv/spi_hw.c" in cmake,
+            "B1 build does not compile the accepted AD7124 module")
 
     manifest_path = ROOT / "build_debug/b1.manifest.json"
     image_path = ROOT / "build_debug/b1.bin"
@@ -174,6 +196,7 @@ def main() -> int:
     print("Result LED states, 500ms scheduler, active-high PG0-PG5 map and boundary PASS")
     print("W25Q256 32MiB layout, 4-byte QSPI, version/FRU and manifest contract PASS")
     print("FreeRTOS 128KiB heap, LwIP IPv4, YT8512H reset and UID MAC contract PASS")
+    print("AD7124-4 driver, SPI4-only binding and conservative mode-3 clock PASS")
     return 0
 
 

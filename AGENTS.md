@@ -18,6 +18,9 @@
 - `b1.ioc` is the CubeMX hardware baseline. After regeneration, restore the app
   linker origin `0x08020000`/length `1920K` and vector offset `0x020000`.
 - Do not copy an Apollo V2 module until its V2 acceptance check passes.
+- The V2-accepted AD7124-4 driver is ported and bound only to B1 SPI4. SPI4
+  starts in mode 3 at about 390.625kHz; do not auto-run `ad7124_init()` before
+  the first B1 board can provide a real ID and voltage-reference check.
 - The accepted W25Q256 driver and version/FRU v1 layout are ported. B1 boot only
   initializes QSPI; it must never auto-write the production metadata sectors.
 - FreeRTOS 10.6.2 and LwIP 2.2.1 have been migrated for the final gateway using

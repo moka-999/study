@@ -248,9 +248,12 @@ static void MX_SPI_Init(void)
     spi_init(&hspi2, SPI2, SPI_MODE_SLAVE, SPI_NSS_HARD_INPUT,
              SPI_BAUDRATEPRESCALER_2,
              SPI_POLARITY_LOW, SPI_PHASE_1EDGE);
-    /* AD7124 requires SPI mode 3. */
+    /*
+     * AD7124使用Mode 3。SPI4内核为100MHz，256分频约390.6kHz；
+     * 首版优先保证B1布线和器件时序裕量，真板确认后再评估是否提速。
+     */
     spi_init(&hspi4, SPI4, SPI_MODE_MASTER, SPI_NSS_SOFT,
-             SPI_BAUDRATEPRESCALER_16,
+             SPI_BAUDRATEPRESCALER_256,
              SPI_POLARITY_HIGH, SPI_PHASE_2EDGE);
 }
 

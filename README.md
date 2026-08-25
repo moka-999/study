@@ -28,6 +28,9 @@ directly; B1 SPI2 is reserved only for B1-B2 keepalive.
 `D:\stm32cubemx\STM32CubeMX.exe`. PH4/PH5 deliberately stay open-drain GPIOs:
 the schematic calls this bus I2C4, but those pins are not an STM32 I2C4 AF pair.
 SPI4 is stored in the `.ioc` and generated as AD7124 mode 3.
+The V2-accepted AD7124-4 driver is compiled against B1 `spi4_if` only. SPI4
+starts at about 390.625kHz for first-board margin; startup deliberately does
+not access the ADC until the B1 board is available for ID and voltage checks.
 
 ```powershell
 .\tools\dev.ps1 check
