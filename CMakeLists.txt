@@ -92,7 +92,12 @@ add_executable(b1
     HAL_Drv/qspi_hw.c
     HAL_Drv/i2c_hw.c
     HAL_Drv/spi_hw.c
+    HAL_Drv/ddr_power.c
+    HAL_Drv/pwr_ctrl.c
+    HAL_Drv/memory_monitor.c
     BSP/AD7124/ad7124.c
+    BSP/TPS62868/tps62868.c
+    BSP/PAC1934/pac1934.c
     BSP/Flash/flash_bsp.c
     BSP/Flash/flash_layout.c
     BSP/MCP4725/mcp4725.c
@@ -111,6 +116,8 @@ target_include_directories(b1 PRIVATE
     HAL_Drv
     BSP/Flash
     BSP/AD7124
+    BSP/TPS62868
+    BSP/PAC1934
     BSP/MCP4725
     LWIP/App
     LWIP/Target

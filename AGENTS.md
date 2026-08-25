@@ -24,6 +24,12 @@
 - The V2-accepted MCP4725 driver is bound to B1 hardware I2C2 at address 0x60.
   It uses Fast Write only and must not write EEPROM. Do not set a Boot voltage
   automatically before B1 output-voltage and RK boot-mode validation.
+- The V2-accepted TPS62868/PAC1934/DDR power baseline is ported without startup
+  device access. VDD1/VDD2/VDDQ use I2C1/I2C2/PH4-PH5 software I2C respectively;
+  `pwr_ctrl_init(NULL)` only reinforces PC6/PC7/PG11 low and leaves power-on
+  prohibited until real-board timing is frozen. Runtime voltage offsets are
+  independent signed 20mV steps across the TPS-register writable range; these
+  extreme values are not DDR-safe and must never be swept automatically.
 - The accepted W25Q256 driver and version/FRU v1 layout are ported. B1 boot only
   initializes QSPI; it must never auto-write the production metadata sectors.
 - FreeRTOS 10.6.2 and LwIP 2.2.1 have been migrated for the final gateway using

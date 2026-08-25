@@ -182,6 +182,64 @@ def main() -> int:
     require("mcp4725_set_boot_mode" not in source,
             "B1真板前不得在启动流程中自动改写Boot模式")
 
+    # TPS/PAC/DDR电源基线只绑定B1实际总线，启动仍保持全关且不访问器件。
+    tps_header = (ROOT / "BSP/TPS62868/tps62868.h").read_text(encoding="utf-8")
+    pac_header = (ROOT / "BSP/PAC1934/pac1934.h").read_text(encoding="utf-8")
+    ddr_header = (ROOT / "HAL_Drv/ddr_power.h").read_text(encoding="utf-8")
+    ddr_source = (ROOT / "HAL_Drv/ddr_power.c").read_text(encoding="utf-8")
+    power_source = (ROOT / "HAL_Drv/pwr_ctrl.c").read_text(encoding="utf-8")
+    monitor_source = (ROOT / "HAL_Drv/memory_monitor.c").read_text(encoding="utf-8")
+    require(all(value in tps_header for value in (
+        "TPS62868_ADDR_VDD1      0x49", "TPS62868_ADDR_VDD2      0x41",
+        "TPS62868_ADDR_VDDQ      0x4F", "TPS62868_FACTOR_2X0",
+        "TPS62868_FACTOR_1X0")), "TPS三路地址或器件因子错误")
+    require("PAC1934_ADDR_B1             0x2C" in pac_header and
+            "PAC1934_RSENSE_B1_UOHM      10000U" in pac_header and
+            "PAC1934_CH_MASK_B1_RAILS    0x07" in pac_header,
+            "PAC1934地址、采样电阻或三通道配置错误")
+    require("&i2c1_if" in ddr_source and "&i2c2_if" in ddr_source and
+            "&i2c4_if" in ddr_source,
+            "VDD1/VDD2/VDDQ未分别绑定I2C1/I2C2/逻辑I2C4")
+    require("DDR_VOLTAGE_STEP_MV      20" in ddr_header and
+            "DDR_VDD1_WRITABLE_MIN_MV 800" in ddr_header and
+            "DDR_VDD1_WRITABLE_MAX_MV 3350" in ddr_header and
+            "DDR_VDDX_WRITABLE_MIN_MV 400" in ddr_header and
+            "DDR_VDDX_WRITABLE_MAX_MV 1675" in ddr_header and
+            "steps[rail] * DDR_VOLTAGE_STEP_MV" in ddr_source,
+            "DDR三路20mV全可写范围接口缺失")
+    require("B1_PWR_4V0_EN_PORT" in power_source and
+            "B1_PWR_3V3_EN_PORT" in power_source and
+            "B1_PWR_DDR_EN_PORT" in power_source and
+            "pwr_ctrl_init(NULL);" in source,
+            "B1电源状态机未绑定PC6/PC7/PG11安全OFF基线")
+    require("memory_monitor_configure" in monitor_source and "valid_mask" in monitor_source,
+            "TPS/PAC/AD未组合为可部分有效的监测快照")
+    require("ddr_power_init();" not in source and "memory_monitor_init" not in source and
+            "pwr_ctrl_request_on" not in source,
+            "B1启动期禁止自动访问采样器件或打开DDR电源")
+
+    # PH4/PH5软件I2C必须同时支持TPS寄存器访问和PAC多字节/Send Byte操作。
+    require("i2c_if_t i2c4_if" in i2c_source and
+            "soft_i2c_read_bytes" in i2c_source and
+            "soft_i2c_write_command" in i2c_source and
+            "soft_i2c_is_ready" in i2c_source and
+            "SOFT_I2C_STRETCH_LIMIT" in i2c_source and
+            "pulse < 9U" in i2c_source,
+            "PH4/PH5软件I2C的交易、超时或总线恢复不完整")
+
+    # 穷举确认以标称值为零点的全部20mV档位均能被TPS精确编码。
+    for nominal, minimum, maximum, factor in (
+        (1800, 800, 3350, 2), (1100, 400, 1675, 1),
+        (1100, 400, 1675, 1), (600, 400, 1675, 1)):
+        first = (minimum - nominal + 19) // 20
+        last = (maximum - nominal) // 20
+        for step in range(first, last + 1):
+            target = nominal + step * 20
+            base = target // factor
+            require(target % factor == 0 and 400 <= base <= 1675 and
+                    (base - 400) % 5 == 0,
+                    f"20mV step cannot be encoded: nominal={nominal}, step={step}")
+
     linker = (ROOT / "STM32H743xx_FLASH.ld").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     require("KEEP(*(.firmware_version))" in linker,
@@ -199,6 +257,11 @@ def main() -> int:
             "B1 build does not compile the accepted AD7124 module")
     require("BSP/MCP4725/mcp4725.c" in cmake and "HAL_Drv/i2c_hw.c" in cmake,
             "B1 build does not compile the accepted MCP4725 module")
+    require(all(path in cmake for path in (
+        "BSP/TPS62868/tps62868.c", "BSP/PAC1934/pac1934.c",
+        "HAL_Drv/ddr_power.c", "HAL_Drv/pwr_ctrl.c",
+        "HAL_Drv/memory_monitor.c")),
+            "B1 build does not compile the accepted power/monitor modules")
 
     manifest_path = ROOT / "build_debug/b1.manifest.json"
     image_path = ROOT / "build_debug/b1.bin"
@@ -217,6 +280,7 @@ def main() -> int:
     print("FreeRTOS 128KiB heap, LwIP IPv4, YT8512H reset and UID MAC contract PASS")
     print("AD7124-4 driver, SPI4-only binding and conservative mode-3 clock PASS")
     print("MCP4725 Boot map, Fast Write and I2C2-only binding contract PASS")
+    print("TPS/PAC/AD monitor, pwr_ctrl and all 20mV DDR steps contract PASS")
     return 0
 
 

@@ -3,6 +3,7 @@
 #include "flash_bsp.h"
 #include "app_freertos.h"
 #include "result_led.h"
+#include "pwr_ctrl.h"
 #include "cmsis_os2.h"
 #include <string.h>
 
@@ -49,6 +50,8 @@ int main(void)
     HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
+    /* 只建立安全OFF基线；时序未冻结前不允许上电。 */
+    pwr_ctrl_init(NULL);
     MX_I2C_Init();
     MX_SPI_Init();
     MX_UART_Init();
