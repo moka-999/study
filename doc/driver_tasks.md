@@ -182,7 +182,7 @@ V2 不可验证、留给 B1 真板的：
 
 > B1 MCU不控制、代理或转发温控。PC通过独立接口直接管理B2 MCU，全部加热逻辑和其他底板级控制归B2 MCU。P18保留的PH8/PH9/PH10候选电路不能作为B1固件需求；B1–B2 SPI仅保活。
 
-## 7. Boot 模式控制（MCP4725 DAC, I2C2, 0x60）— 未实现
+## 7. Boot 模式控制（MCP4725 DAC, I2C2, 0x60）— 驱动/映射已实现
 
 **原理图**（P24, 20260811 新增）：
 ```
@@ -199,8 +199,8 @@ MCU I2C2 (PF0/PF1) → R7286/87 (0R) → U4030 MCP4725A0T-E/CH (12-bit DAC)
 
 | # | 任务 | 输出 | V2 验证 | B1 验证 |
 |---|------|------|---------|---------|
-| 7.1 | MCP4725 驱动（Fast Write + 掉电模式）, 0x60 | mcp4725.c/h | Mock+I2C波形 | 真机 |
-| 7.2 | `boot_mode_set(mode)` 电压↔DAC 码映射 | API | DAC码离线验证 | 万用表 + RK 真启动 |
+| 7.1 | MCP4725 驱动（Fast Write + 掉电模式）, 0x60 | ✅ `mcp4725.c/h`，只写DAC寄存器、不写EEPROM | ✅ 并入隔离Mock，V2实机总结52 PASS/0 FAIL；无外接DAC，物理I2C/VOUT待真板 | ✅ 已绑定I2C2并构建/静态合同通过（`3ed8784`）；真实I2C/VOUT待板 |
+| 7.2 | `mcp4725_set_boot_mode(mode)` 电压↔DAC 码映射 | ✅ 0/0.3/0.6/0.9/1.2/1.5/1.8V，VDD可标定 | ✅ `boot-test` 7/7，Mock验证两字节Fast Write | 待万用表 + RK 真启动 |
 | 7.3 | 与 reboot 集成：设模式 → pwr_ctrl电源循环 | 非阻塞流程/状态机 | Mock+GPIO波形 | RK 按模式启动 |
 | 7.4 | PC–MCU命令：BOOT_MODE_SET/QUERY | 新协议dispatch | python | 真机 |
 

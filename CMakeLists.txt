@@ -30,8 +30,8 @@ option(ENABLE_RESULT_LED_WAVE_TEST "Build Apollo V2 result LED waveform image" O
 # 仅用于阿波罗 V2 板载 W25Q256；所有破坏性访问限制在末尾 64 KiB。
 option(ENABLE_FLASH_SELF_TEST "Build isolated Apollo V2 W25Q256 self-test image" OFF)
 
-# 无外接TPS/PAC/AD器件时，运行正式驱动源码的事务级Mock验收镜像。
-option(ENABLE_DRIVER_MOCK_TEST "Build isolated TPS/PAC/AD mock self-test image" OFF)
+# 无外接TPS/PAC/AD/MCP器件时，运行正式驱动源码的事务级Mock验收镜像。
+option(ENABLE_DRIVER_MOCK_TEST "Build isolated TPS/PAC/AD/MCP mock self-test image" OFF)
 
 # 仅用于阿波罗 V2 实脚 SPI2 波形验收；循环输出 AD7124 典型事务。
 option(ENABLE_AD7124_WAVE_TEST "Build isolated Apollo V2 AD7124 SPI waveform image" OFF)
@@ -122,6 +122,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_layout.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/IIC/myiic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/LED/led.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/MCP4725/mcp4725.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PCF8574/pcf8574.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PAC1934/pac1934.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/TPS62868/tps62868.c
@@ -152,6 +153,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/IIC
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/LED
+    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/MCP4725
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PCF8574
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PAC1934
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/TPS62868

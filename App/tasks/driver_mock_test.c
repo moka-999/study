@@ -1,5 +1,5 @@
 /*
- * TPS62868/69、PAC1934、AD7124事务级Mock验证。
+ * TPS62868/69、PAC1934、AD7124、MCP4725事务级Mock验证。
  *
  * 本任务只在ENABLE_DRIVER_MOCK_TEST=1的隔离镜像中创建。它调用正式驱动
  * 源码，但用内存中的I2C/SPI接口代替不存在的外接芯片，从而验证寄存器
@@ -12,6 +12,7 @@
 #include "ad7124.h"
 #include "bsp_gpio.h"
 #include "ddr_power.h"
+#include "mcp4725.h"
 #include "pac1934.h"
 #include "pwr_ctrl.h"
 #include "tps62868.h"
@@ -28,6 +29,7 @@ extern i2c_if_t i2c4_if;
 typedef enum {
     MOCK_OP_READ,
     MOCK_OP_WRITE,
+    MOCK_OP_WRITE_BYTES,
     MOCK_OP_COMMAND,
 } mock_op_kind_t;
 
@@ -156,6 +158,15 @@ static int mock_i2c_write_command(i2c_if_t *interface, uint8_t address,
     return IF_OK;
 }
 
+static int mock_i2c_write_bytes(i2c_if_t *interface, uint8_t address,
+                                const uint8_t *buffer, uint16_t length)
+{
+    if (!buffer || length != 2U) return IF_ERR;
+    mock_i2c_record((mock_i2c_t *)interface->handle, MOCK_OP_WRITE_BYTES,
+                    address, buffer[0], buffer[1], length);
+    return IF_OK;
+}
+
 static int mock_i2c_is_ready(i2c_if_t *interface, uint8_t address)
 {
     mock_i2c_t *mock = (mock_i2c_t *)interface->handle;
@@ -169,6 +180,7 @@ static void mock_i2c_reset(mock_i2c_t *mock)
     mock->interface.read_reg = mock_i2c_read_reg;
     mock->interface.write_reg = mock_i2c_write_reg;
     mock->interface.read_bytes = mock_i2c_read_bytes;
+    mock->interface.write_bytes = mock_i2c_write_bytes;
     mock->interface.write_cmd = mock_i2c_write_command;
     mock->interface.is_ready = mock_i2c_is_ready;
     mock->product_id = PAC1934_PRODUCT_ID;
@@ -192,6 +204,18 @@ static int mock_i2c_has_command(const mock_i2c_t *mock, uint8_t command)
 {
     for (uint8_t i = 0U; i < mock->count; i++) {
         if (mock->log[i].kind == MOCK_OP_COMMAND && mock->log[i].reg == command)
+            return 1;
+    }
+    return 0;
+}
+
+static int mock_i2c_has_bytes(const mock_i2c_t *mock, uint8_t address,
+                              uint8_t first, uint8_t second)
+{
+    for (uint8_t i = 0U; i < mock->count; i++) {
+        const mock_i2c_op_t *entry = &mock->log[i];
+        if (entry->kind == MOCK_OP_WRITE_BYTES && entry->address == address &&
+            entry->reg == first && entry->value == second && entry->length == 2U)
             return 1;
     }
     return 0;
@@ -300,6 +324,41 @@ static void test_tps62868(void)
                mock_i2c_has_write(&mock, 0x49U, 0x03U, 0x6CU), "TPS CONTROL镜像");
     mock_check(tps62868_read_status(&vdd1, &status) == IF_OK && status == 0x19U,
                "TPS STATUS读取");
+}
+
+static void test_mcp4725(void)
+{
+    static const uint8_t expected[BOOT_MODE_COUNT][2] = {
+        {0x00U, 0x00U}, /* USB/Maskrom: 0mV, code=0 */
+        {0x01U, 0x74U}, /* SD:          300mV, code=372 */
+        {0x02U, 0xE9U}, /* eMMC:        600mV, code=745 */
+        {0x04U, 0x5DU}, /* FSPI M0:     900mV, code=1117 */
+        {0x05U, 0xD1U}, /* FSPI M1:    1200mV, code=1489 */
+        {0x07U, 0x45U}, /* FSPI M2:    1500mV, code=1861 */
+        {0x08U, 0xBAU}, /* eMMC-SD:    1800mV, code=2234 */
+    };
+    mock_i2c_t mock;
+    uint16_t code = 0U;
+    mock_i2c_reset(&mock);
+    mcp4725_t dac = {.bus = &mock.interface, .address = MCP4725_ADDR_A0_LOW,
+                     .vdd_mv = 3300U};
+
+    for (uint8_t mode = 0U; mode < BOOT_MODE_COUNT; mode++) {
+        mock_check(mcp4725_set_boot_mode(&dac, (boot_mode_t)mode) == IF_OK &&
+                   mock_i2c_has_bytes(&mock, MCP4725_ADDR_A0_LOW,
+                                       expected[mode][0], expected[mode][1]),
+                   "MCP4725 Boot模式与Fast Write编码");
+    }
+    mock_check(mcp4725_mv_to_code(1800U, 3300U, &code) == IF_OK && code == 2234U,
+               "MCP4725按实测VDD换算DAC码");
+    mock_check(mcp4725_write_fast(&dac, code, MCP4725_POWER_DOWN_100K) == IF_OK &&
+               mock_i2c_has_bytes(&mock, MCP4725_ADDR_A0_LOW, 0x28U, 0xBAU),
+               "MCP4725 100K掉电模式编码");
+    mock_check(mcp4725_set_boot_mode(&dac, BOOT_MODE_COUNT) == IF_ERR,
+               "MCP4725拒绝非法Boot模式");
+    dac.bus->write_bytes = NULL;
+    mock_check(mcp4725_set_boot_mode(&dac, BOOT_MODE_EMMC) == IF_ERR,
+               "MCP4725传播I2C发送能力缺失");
 }
 
 static void test_pac1934(void)
@@ -505,9 +564,10 @@ void StartDriverMockTestTask(void *argument)
 {
     (void)argument;
     vTaskDelay(pdMS_TO_TICKS(500U));
-    mock_uart_printf("\r\n=== TPS/PAC/AD driver mock test ===\r\n");
+    mock_uart_printf("\r\n=== TPS/PAC/AD/MCP driver mock test ===\r\n");
 
     test_tps62868();
+    test_mcp4725();
     test_pac1934();
     test_ad7124();
     test_lpddr_power_idd_bias_flow();

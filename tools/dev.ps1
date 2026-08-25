@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'lpddr-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build')]
+    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build')]
     [string]$Task = 'build'
 )
 
@@ -48,10 +48,12 @@ function Find-Python {
     throw 'Python not found. Install Python 3 or add python.exe to PATH.'
 }
 
-if ($Task -eq 'protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'lpddr-test' -or
+if ($Task -eq 'protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'lpddr-test' -or $Task -eq 'boot-test' -or
     $Task -eq 'led-test' -or $Task -eq 'flash-test') {
     $python = Find-Python
-    $script = if ($Task -eq 'lpddr-test') {
+    $script = if ($Task -eq 'boot-test') {
+        'tests\test_boot_mode.py'
+    } elseif ($Task -eq 'lpddr-test') {
         'tests\verify_lpddr_power.py'
     } elseif ($Task -eq 'pwr-test') {
         'tests\verify_pwr_ctrl.py'

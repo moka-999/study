@@ -77,6 +77,7 @@ powershell -ExecutionPolicy Bypass -File tools/dev.ps1 build
 # V2电源波形镜像：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 pwr-wave-build
 # V2板载W25Q256隔离自检（只使用末尾64KiB）：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 flash-self-test-build
 # V2 AD7124 SPI2波形镜像：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 ad-wave-build
+# MCP4725 Boot电压/DAC码离线合同：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 boot-test
 ```
 
 ### 烧录（SWD）— 两步: 先 Bootloader 后 App
@@ -156,10 +157,11 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ✅ 2026-08-25：TPS/PAC/AD事务级Mock镜像与LPDDR离线模型建立；覆盖LPDDR4/4X标称与±偏压、反序下电、跨电源周期回标称、PAC三轨IDD换算和AD7124-4 ID白名单。ARM正式/Mock构建与离线合同通过，V2实机串口结果41 PASS/0 FAIL并已恢复正式镜像；B1真值/标定仍未闭环
 - ✅ 2026-08-25：新增独立`build_ad_wave/test.elf`，V2 SPI2实脚验证AD7124复位、STATUS/ID读取、ADC_CTRL/CH0写入及DATA读取，物理时序为Mode 3、MSB、约504kHz。ATK-Logic V1.1.2.0的CPHA标签/首位对齐存在歧义：CPHA=1整字节右移，CPHA=0会在下降切换沿偶发读旧位；须查看原始波形并以上升采样沿判断，禁止据此把固件改为Mode 2。真实MISO回读仍待B1真板
 - ✅ 2026-08-25：AD7124-4驱动已同步到B1 `SPI4`（PE11-PE14），仅导出`spi4_if`，首板保守时钟390.625kHz；B1静态合同46/46与ARM构建通过（B1提交`9cebabc`），未在启动期自动访问芯片，真实ID/MISO/电压与标定待B1真板
+- ✅ 2026-08-25：MCP4725 Fast Write、掉电模式及7种RK Boot电压映射已实现；离线合同7/7、V2隔离Mock实机52 PASS/0 FAIL，已恢复正式镜像。B1已绑定硬件I2C2并通过46/46合同与ARM构建（B1提交`3ed8784`）；上电不自动写DAC，真实VOUT/RK启动待B1真板
 - ✅ 2026-08-24：新增`pwr_ctrl`安全状态机（默认全关、未配置拒绝上电、顺序可配置、失败全关）；ARM全量构建、3组离线状态迁移及V2 GPIO波形通过，B1真板时序与TLV仍待完成
 - ✅ 2026-08-24：新增独立`build_pwr_wave/test.elf`波形镜像；经正点原子官方原理图确认，V2直接使用与B1一致的P2-31/PC6、P2-32/PC7、P3-31/PG11；断电重上电50s逻辑分析仪实测通过，三路初始低电平、首边沿无可见毛刺、正反顺序及500ms测试间隔均正常；默认正式构建关闭且B1编译期禁止
 - ✅ 2026-08-24：完成结果灯纯颜色映射（PASS绿常亮/FAIL红常亮/常温橙闪/高温红闪）和独立`build_led_wave/test.elf`波形镜像；离线合同、正式镜像及波形镜像构建通过，波形镜像已烧录V2；六路实测待接线
-- ❌ MCP4725/Boot 模式、真实 monitor 上报及对应 TLV 命令尚未实现
+- ⚠️ MCP4725驱动与Boot电压映射已实现；与`pwr_ctrl` reboot联动、PC命令、真实VOUT及RK启动验证尚未完成
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
 - ✅ B1已拆分为同级独立工程`../b1`：46/46静态合同通过，V2验收通过的模块才逐个移植
 - ✅ W25Q256已定义32MiB分区、版本/FRU双副本、网络配置/站点标签、CRC32和构建清单；ARM构建、逐字节掉电模型及V2板载Flash真测通过（JEDEC/QE/跨页/RMW/四字节地址/CRC回退/复位保持）
@@ -176,7 +178,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 4. **TPS62868/69**（A版VSET配置：VDD1/VDD2/VDDQ地址0x49/0x41/0x4F；与pwr_on联动）
 5. **PAC1934T**（I2C4, 0x2C）+ **AD7124**（SPI4 PE11-14，完成Mock/波形验证后待真板标定）
 6. **B1–B2 MCU SPI保活**（B2共享总线主机+8个独立CS，8块B1均为SPI2从机；Mode 0/8位MSB/初始1MHz；保活载荷/周期/超时待冻结）
-7. **Boot 模式控制**（MCP4725 DAC, I2C2, 0x60 → BOOT_SARADC_IN0）
+7. **Boot 模式控制**（MCP4725驱动/映射/V2 Mock与B1软件移植已完成；待reboot联动、PC命令和真板VOUT/RK启动）
 8. **LED结果显示**（3颗双色灯分别显示2组LPDDR4/4X和1组eMCP；另2颗单色灯显示上电/板卡状态，语义待定）
 9. **W25Q256/版本信息**（V2板载自检已闭环；待协议冻结后接PC查询，初版不实现OTA）
 10. B1 板到货后：UART4/USART2 从 CH340 切到 RS0102→RK3588 真机联调（**注意不是 USART1**）

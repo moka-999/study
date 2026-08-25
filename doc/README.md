@@ -13,7 +13,7 @@
 | AD7124 | 已实现AD7124-4驱动、事务Mock和隔离SPI波形镜像 | V2 SPI2实脚Mode 3发送事务已验收；无外接器件，MISO真实ID/电压及标定待B1 | V2发送侧闭环；B1器件侧未闭环 |
 | pwr_ctrl | 已实现安全默认关闭、可配置顺序和轮询式上/下电状态机；另有隔离的V2波形镜像 | 正式镜像与`build_pwr_wave/test.elf`均构建通过；离线源码合同+3组状态迁移通过；V2断电重上电50s GPIO波形实测通过 | 软件及V2 GPIO模拟闭环；B1真板待标定 |
 | LED结果显示 | 已实现PASS/FAIL/常温测试/高温测试颜色映射及500ms调度；已移植B1 PG0-PG5 | V2断电重上电50s六路功能波形通过；B1 46/46合同及ARM构建通过 | 软件/V2模拟闭环；B1真板待确认红绿/对象顺序和上电毛刺 |
-| Boot 模式控制 | 无 MCP4725/boot_mode 代码 | 文档曾误写“代码完成” | 未实现 |
+| Boot 模式控制 | 已实现MCP4725 Fast Write、掉电模式和7种Boot电压映射；不写EEPROM | `boot-test` 7/7；V2隔离Mock实机52 PASS/0 FAIL；B1 I2C2移植构建通过 | 软件驱动闭环；reboot/PC命令和真板VOUT/RK启动待完成 |
 | 电压/电流监测上报 | `monitor_task` 仍是占位且发送被注释 | 无真实采样接入 | 未实现 |
 | 驱动 TLV 命令 | 仅 reboot/frame_error 为本地命令 | PWR、DDR 调压、采样、Boot 命令均未接入 | 未实现 |
 | B1–B2 MCU SPI | B1引脚工程已配置SPI2从机；保活任务未实现 | 仅用于保活，不承载温控；B2共享SPI主机并用8个独立CS选择8块B1 | 硬件基线完成，保活定义待定 |
@@ -28,6 +28,7 @@
 .\tools\dev.ps1 build
 .\tools\dev.ps1 rebuild
 .\tools\dev.ps1 protocol-test
+.\tools\dev.ps1 boot-test
 ```
 
 脚本会从 STM32Cube bundle/CMake 缓存寻找 Ninja，并以 UTF-8 模式运行 Python，避免依赖当前终端 `PATH` 和 GBK 输出编码。
@@ -70,6 +71,6 @@ python -X utf8 tests\full_chain_stress.py
 1. 先实现PC–MCU独立帧解析和与MCU–RK TLV隔离的转换层，再分别冻结PC与RK黄金帧；与B2负责人只冻结SPI保活载荷、周期和超时。PC–B2温控协议由B2工程独立维护。
 2. B1到板后在实际PG0-PG5→2N7002网络上复测结果灯波形和上电毛刺，并确认红绿顺序及三颗灯对应的测试对象；两颗单色状态灯语义仍待确认。
 3. 与硬件/RK负责人冻结PC6/PC7顺序和延时后再加载配置；B1真板复测PC6/PC7/PG11、TPS62868初始化窗口及三路实际电压建立过程。
-4. 逐个完成TPS62868→PAC1934→AD7124的Mock、波形验证和协议接入；真实器件回读留到真板。
+4. MCP4725驱动与B1软件移植已完成；按当前优先级继续完成TPS62868/PAC1934/AD7124正式任务接入，随后完成LPDDR上下电、拉偏与IDD业务闭环；真实器件回读留到真板。
 5. W25Q256板载自检已闭环；后续仅在本地管理协议冻结后接入PC版本/FRU查询，SPD功能不实现。
 6. B1/B2到板后先烧录`../b1/build_debug/b1.elf`做引脚/波形验收，再把V2验收通过的模块逐个移植到独立B1工程，完成标定、UART4/USART2、B1–B2 SPI和全链路回归。
