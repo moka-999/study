@@ -63,7 +63,7 @@ pwr_ctrl_result_t pwr_ctrl_request_off(uint32_t now_ms);
  * 任一轨调压失败会进入FAULT并立即关闭全部电源。
  */
 pwr_ctrl_result_t pwr_ctrl_select_memory_type(ddr_memory_type_t type);
-pwr_ctrl_result_t pwr_ctrl_apply_ddr_bias(ddr_bias_profile_t profile);
+pwr_ctrl_result_t pwr_ctrl_apply_ddr_steps(const int16_t steps[DDR_RAIL_COUNT]);
 
 /*
  * 周期调用以推进状态；各段毫秒等待不会休眠或占用 CPU。

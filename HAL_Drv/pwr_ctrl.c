@@ -131,12 +131,12 @@ pwr_ctrl_result_t pwr_ctrl_select_memory_type(ddr_memory_type_t type)
          ? PWR_CTRL_OK : PWR_CTRL_ERR_PARAM;
 }
 
-pwr_ctrl_result_t pwr_ctrl_apply_ddr_bias(ddr_bias_profile_t profile)
+pwr_ctrl_result_t pwr_ctrl_apply_ddr_steps(const int16_t steps[DDR_RAIL_COUNT])
 {
     if (s_state == PWR_CTRL_STATE_FAULT) return PWR_CTRL_ERR_FAULT;
     if (s_state != PWR_CTRL_STATE_ON) return PWR_CTRL_ERR_BUSY;
 
-    if (ddr_power_apply_bias(profile) != IF_OK) {
+    if (ddr_power_apply_steps(steps) != IF_OK) {
         enter_fault();
         return PWR_CTRL_ERR_FAULT;
     }

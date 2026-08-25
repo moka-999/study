@@ -27,7 +27,6 @@ static const uint16_t _nominal_mv[2][DDR_RAIL_COUNT] = {
 };
 
 static ddr_memory_type_t _memory_type = DDR_MEMORY_LPDDR4X;
-static ddr_bias_profile_t _bias_profile = DDR_BIAS_NOMINAL;
 static uint16_t _mv[DDR_RAIL_COUNT] = {
     DDR_VDD1_DEFAULT_MV, DDR_VDD2_DEFAULT_MV, DDR_VDDQ_DEFAULT_MV
 };
@@ -50,44 +49,47 @@ static int _set_one(uint8_t rail, uint16_t mv)
     return IF_OK;
 }
 
-static int _targets_are_safe(const uint16_t mv[DDR_RAIL_COUNT])
+static int _targets_are_writable(const uint16_t mv[DDR_RAIL_COUNT])
 {
     if (!mv) return 0;
 
-    /* JESD209-4E绝对最大额定值，并保留上电/掉电期间的电源相对关系。 */
-    if (mv[DDR_RAIL_VDD1] > 2100U || mv[DDR_RAIL_VDD2] > 1400U ||
-        mv[DDR_RAIL_VDDQ] > 1400U)
-        return 0;
-    if (mv[DDR_RAIL_VDD1] < mv[DDR_RAIL_VDD2]) return 0;
-    if ((uint32_t)mv[DDR_RAIL_VDD2] + 200U < mv[DDR_RAIL_VDDQ]) return 0;
-    return 1;
+    /*
+     * 此处只校验TPS是否能精确编码。测试会故意超出DDR工作区，
+     * 因此不再使用JESD建议值或三路相对电压拦截。
+     */
+    return mv[DDR_RAIL_VDD1] >= DDR_VDD1_WRITABLE_MIN_MV &&
+           mv[DDR_RAIL_VDD1] <= DDR_VDD1_WRITABLE_MAX_MV &&
+           (mv[DDR_RAIL_VDD1] % 10U) == 0U &&
+           mv[DDR_RAIL_VDD2] >= DDR_VDDX_WRITABLE_MIN_MV &&
+           mv[DDR_RAIL_VDD2] <= DDR_VDDX_WRITABLE_MAX_MV &&
+           ((mv[DDR_RAIL_VDD2] - DDR_VDDX_WRITABLE_MIN_MV) % 5U) == 0U &&
+           mv[DDR_RAIL_VDDQ] >= DDR_VDDX_WRITABLE_MIN_MV &&
+           mv[DDR_RAIL_VDDQ] <= DDR_VDDX_WRITABLE_MAX_MV &&
+           ((mv[DDR_RAIL_VDDQ] - DDR_VDDX_WRITABLE_MIN_MV) % 5U) == 0U;
 }
 
-int ddr_power_build_profile(ddr_memory_type_t type, ddr_bias_profile_t profile,
-                            uint16_t mv[DDR_RAIL_COUNT])
+int ddr_power_build_step_targets(ddr_memory_type_t type,
+                                 const int16_t steps[DDR_RAIL_COUNT],
+                                 uint16_t mv[DDR_RAIL_COUNT])
 {
-    static const uint8_t percent[] = {100U, 105U, 95U, 90U};
-
-    if (!mv || type > DDR_MEMORY_LPDDR4X || profile > DDR_BIAS_MINUS_10_PERCENT)
+    if (!steps || !mv || type > DDR_MEMORY_LPDDR4X)
         return IF_ERR;
 
     for (uint8_t rail = 0U; rail < DDR_RAIL_COUNT; rail++) {
-        uint32_t scaled = (uint32_t)_nominal_mv[type][rail] * percent[profile];
-        if ((scaled % 100U) != 0U) return IF_ERR;
-        mv[rail] = (uint16_t)(scaled / 100U);
+        int32_t target = (int32_t)_nominal_mv[type][rail] +
+                         (int32_t)steps[rail] * DDR_VOLTAGE_STEP_MV;
+        if (target < 0 || target > UINT16_MAX) return IF_ERR;
+        mv[rail] = (uint16_t)target;
     }
-    return _targets_are_safe(mv) ? IF_OK : IF_ERR;
+    return _targets_are_writable(mv) ? IF_OK : IF_ERR;
 }
 
 int ddr_power_select_memory_type(ddr_memory_type_t type)
 {
-    uint16_t nominal[DDR_RAIL_COUNT];
-    if (ddr_power_build_profile(type, DDR_BIAS_NOMINAL, nominal) != IF_OK)
-        return IF_ERR;
+    if (type > DDR_MEMORY_LPDDR4X) return IF_ERR;
 
     _memory_type = type;
-    _bias_profile = DDR_BIAS_NOMINAL;
-    memcpy(_mv, nominal, sizeof(_mv));
+    memcpy(_mv, _nominal_mv[type], sizeof(_mv));
     return IF_OK;
 }
 
@@ -104,10 +106,8 @@ int ddr_power_init(void)
      * TPS在PG11拉低后寄存器复位，软件镜像也必须同步复位。更重要的是，
      * 上一次测试留下的拉偏目标绝不能带入下一次DRAM初始化窗口。
      */
-    if (ddr_power_build_profile(_memory_type, DDR_BIAS_NOMINAL, nominal) != IF_OK)
-        return IF_ERR;
+    memcpy(nominal, _nominal_mv[_memory_type], sizeof(nominal));
     memcpy(_mv, nominal, sizeof(_mv));
-    _bias_profile = DDR_BIAS_NOMINAL;
     for (uint8_t rail = 0U; rail < DDR_RAIL_COUNT; rail++)
         _ddr[rail].ctl_cache = 0U;
 
@@ -143,10 +143,10 @@ int ddr_power_set(uint8_t rail_mask, const uint16_t *mv)
     for (uint8_t rail = 0U; rail < DDR_RAIL_COUNT; rail++) {
         if (rail_mask & (1U << rail)) candidate[rail] = mv[rail];
     }
-    if (!_targets_are_safe(candidate)) return IF_ERR;
+    if (!_targets_are_writable(candidate)) return IF_ERR;
 
     /*
-     * 三颗芯片无法原子改压。为让过渡态也满足JESD电源相对关系：
+     * 三颗芯片无法原子改压。为尽量缩短常规拉偏时的不利过渡态：
      * 1) 先抬高VDD1，为VDD2升压留余量；
      * 2) 先降低VDDQ，为VDD2降压留余量；
      * 3) 再改变中间轨VDD2；
@@ -184,14 +184,13 @@ int ddr_power_set(uint8_t rail_mask, const uint16_t *mv)
     return IF_OK;
 }
 
-int ddr_power_apply_bias(ddr_bias_profile_t profile)
+int ddr_power_apply_steps(const int16_t steps[DDR_RAIL_COUNT])
 {
     uint16_t target[DDR_RAIL_COUNT];
-    if (ddr_power_build_profile(_memory_type, profile, target) != IF_OK)
+    if (ddr_power_build_step_targets(_memory_type, steps, target) != IF_OK)
         return IF_ERR;
     if (ddr_power_set(DDR_RAIL_MASK_ALL, target) != IF_OK)
         return IF_ERR;
-    _bias_profile = profile;
     return IF_OK;
 }
 
@@ -214,9 +213,4 @@ uint16_t ddr_power_get_mv(uint8_t rail)
 ddr_memory_type_t ddr_power_get_memory_type(void)
 {
     return _memory_type;
-}
-
-ddr_bias_profile_t ddr_power_get_bias_profile(void)
-{
-    return _bias_profile;
 }

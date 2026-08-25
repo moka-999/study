@@ -499,6 +499,10 @@ static void test_lpddr_power_idd_bias_flow(void)
     i2c_if_t saved_i2c4 = i2c4_if;
     mock_i2c_t mock;
     uint16_t target[DDR_RAIL_COUNT];
+    const int16_t normal_steps[DDR_RAIL_COUNT] = {2, -3, 5};
+    const int16_t lp4x_min_steps[DDR_RAIL_COUNT] = {-50, -35, -10};
+    const int16_t lp4x_max_steps[DDR_RAIL_COUNT] = {77, 28, 53};
+    const int16_t vdd1_too_high[DDR_RAIL_COUNT] = {78, 0, 0};
     pac1934_measurement_t idd[4];
 
     mock_i2c_reset(&mock);
@@ -529,16 +533,26 @@ static void test_lpddr_power_idd_bias_flow(void)
                                    TPS62868_REG_VOUT1, 0x28U),
                "LPDDR4X按1.8/1.1/0.6V标称初始化");
 
-    mock_check(ddr_power_build_profile(DDR_MEMORY_LPDDR4X,
-                                       DDR_BIAS_PLUS_5_PERCENT,
-                                       target) == IF_OK &&
-               target[0] == 1890U && target[1] == 1155U && target[2] == 630U,
-               "LPDDR4X加5%拉偏档位");
-    mock_check(pwr_ctrl_apply_ddr_bias(DDR_BIAS_PLUS_5_PERCENT) == PWR_CTRL_OK &&
-               ddr_power_get_mv(DDR_RAIL_VDD1) == 1890U &&
-               ddr_power_get_mv(DDR_RAIL_VDD2) == 1155U &&
-               ddr_power_get_mv(DDR_RAIL_VDDQ) == 630U,
-               "LPDDR上电完成后允许拉偏");
+    mock_check(ddr_power_build_step_targets(DDR_MEMORY_LPDDR4X,
+                                            normal_steps, target) == IF_OK &&
+               target[0] == 1840U && target[1] == 1040U && target[2] == 700U,
+               "LPDDR4X三路独立20mV步进目标");
+    mock_check(ddr_power_build_step_targets(DDR_MEMORY_LPDDR4X,
+                                            lp4x_min_steps, target) == IF_OK &&
+               target[0] == 800U && target[1] == 400U && target[2] == 400U,
+               "LPDDR4X全三路20mV步进下边界");
+    mock_check(ddr_power_build_step_targets(DDR_MEMORY_LPDDR4X,
+                                            lp4x_max_steps, target) == IF_OK &&
+               target[0] == 3340U && target[1] == 1660U && target[2] == 1660U,
+               "LPDDR4X全三路20mV步进上边界");
+    mock_check(ddr_power_build_step_targets(DDR_MEMORY_LPDDR4X,
+                                            vdd1_too_high, target) == IF_ERR,
+               "20mV步进超出TPS可写范围时拒绝");
+    mock_check(pwr_ctrl_apply_ddr_steps(normal_steps) == PWR_CTRL_OK &&
+               ddr_power_get_mv(DDR_RAIL_VDD1) == 1840U &&
+               ddr_power_get_mv(DDR_RAIL_VDD2) == 1040U &&
+               ddr_power_get_mv(DDR_RAIL_VDDQ) == 700U,
+               "LPDDR上电完成后允许独立步进拉偏");
 
     s_pac_waited_ms = 0U;
     pac1934_t pac = {.bus = &i2c4_if, .addr = 0x2CU,
@@ -570,7 +584,8 @@ static void test_lpddr_power_idd_bias_flow(void)
     pwr_ctrl_process(80U);
     pwr_ctrl_process(81U);
     mock_check(pwr_ctrl_get_state() == PWR_CTRL_STATE_ON &&
-               ddr_power_get_bias_profile() == DDR_BIAS_NOMINAL &&
+               ddr_power_get_mv(DDR_RAIL_VDD1) == 1800U &&
+               ddr_power_get_mv(DDR_RAIL_VDD2) == 1100U &&
                ddr_power_get_mv(DDR_RAIL_VDDQ) == 1100U &&
                mock_i2c_has_write(&mock, TPS62868_ADDR_VDDQ,
                                    TPS62868_REG_VOUT1, 0x8CU),
@@ -589,13 +604,13 @@ static void test_lpddr_power_idd_bias_flow(void)
     pwr_ctrl_process(141U);
     mock.count = 0U;
     i2c2_if.write_reg = NULL;
-    mock_check(pwr_ctrl_apply_ddr_bias(DDR_BIAS_PLUS_5_PERCENT) == PWR_CTRL_ERR_FAULT &&
+    mock_check(pwr_ctrl_apply_ddr_steps(normal_steps) == PWR_CTRL_ERR_FAULT &&
                pwr_ctrl_get_state() == PWR_CTRL_STATE_FAULT &&
                bsp_gpio_get(GPIO_FUNC_PWR_DDR_EN) == 0U &&
                bsp_gpio_get(GPIO_FUNC_PWR_3V3_EN) == 0U &&
                bsp_gpio_get(GPIO_FUNC_PWR_4V0_EN) == 0U &&
                mock_i2c_has_write(&mock, TPS62868_ADDR_VDD1,
-                                   TPS62868_REG_VOUT1, 0x6DU) &&
+                                   TPS62868_REG_VOUT1, 0x68U) &&
                mock_i2c_has_write(&mock, TPS62868_ADDR_VDD1,
                                    TPS62868_REG_VOUT1, 0x64U),
                "拉偏中途失败回滚已改轨并进入全关故障态");

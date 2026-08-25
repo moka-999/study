@@ -15,7 +15,7 @@
  *   选料原则: 启动电压 ≤ 目标电压 → DDR 上电单调爬升, 无过压
  *
  * 上电流程: PG11(EN) 拉高 → ddr_power_init() 清STATUS+设基准电压
- * 拉偏:     ddr_power_set(mask, mv) 随时动态调压 (ramp 20mV/µs)
+ * 拉偏:     三路相对各自标称值独立按20mV步进调压
  *
  * V2 阶段: i2c1_if/i2c4_if 可用 (V2 已配), i2c2_if 未配置 → rail1 返回 IF_ERR
  * B1 阶段: 接入硬件I2C2和PH4/PH5软件开漏总线后，三路全通
@@ -43,6 +43,17 @@
 #define DDR_VDDQ_DEFAULT_MV  600
 
 /*
+ * TPS寄存器的物理可写范围。VDD1使用×2器件，原生分辨率为10mV；
+ * VDD2/VDDQ使用×1器件，原生分辨率为5mV。上层老化测试统一只暴露20mV步进。
+ * 这些上限是“芯片能写”而不是“DDR安全”上限，极端值可能永久损坏被测器件。
+ */
+#define DDR_VOLTAGE_STEP_MV      20
+#define DDR_VDD1_WRITABLE_MIN_MV 800
+#define DDR_VDD1_WRITABLE_MAX_MV 3350
+#define DDR_VDDX_WRITABLE_MIN_MV 400
+#define DDR_VDDX_WRITABLE_MAX_MV 1675
+
+/*
  * 被测器件类型只影响VDDQ标称值：LPDDR4为1.1V，LPDDR4X为0.6V。
  * VDD1/VDD2分别保持1.8V/1.1V。
  */
@@ -51,24 +62,21 @@ typedef enum {
     DDR_MEMORY_LPDDR4X,
 } ddr_memory_type_t;
 
-/* 老化测试使用的受控拉偏档位；初始化阶段始终强制回到NOMINAL。 */
-typedef enum {
-    DDR_BIAS_NOMINAL = 0,
-    DDR_BIAS_PLUS_5_PERCENT,
-    DDR_BIAS_MINUS_5_PERCENT,
-    DDR_BIAS_MINUS_10_PERCENT,
-} ddr_bias_profile_t;
-
 /* 初始化: 清 STATUS 残留标志 + 写基准电压 + ramp 最快 (EN 拉高后调用) */
 int  ddr_power_init(void);
 
 /* 仅应在整机电源OFF状态选择器件类型；下一次初始化按对应标称值上电。 */
 int  ddr_power_select_memory_type(ddr_memory_type_t type);
 
-/* 生成并应用固定拉偏档位，避免上层自行计算出不可表示或越界的电压。 */
-int  ddr_power_build_profile(ddr_memory_type_t type, ddr_bias_profile_t profile,
-                             uint16_t mv[DDR_RAIL_COUNT]);
-int  ddr_power_apply_bias(ddr_bias_profile_t profile);
+/*
+ * 以选定内存类型的标称电压为零点，三路分别加 steps[rail] * 20mV。
+ * 例：LPDDR4X的{+2,-3,+5}对应VDD1=1840mV、VDD2=1040mV、VDDQ=700mV。
+ * 仅按TPS寄存器可写范围拒绝越界，不再限制为JEDEC推荐或绝对最大范围。
+ */
+int  ddr_power_build_step_targets(ddr_memory_type_t type,
+                                  const int16_t steps[DDR_RAIL_COUNT],
+                                  uint16_t mv[DDR_RAIL_COUNT]);
+int  ddr_power_apply_steps(const int16_t steps[DDR_RAIL_COUNT]);
 
 /* 动态调压: mask 选轨 (bit0=VDD1,bit1=VDD2,bit2=VDDQ), mv[3] 各轨目标 mV */
 int  ddr_power_set(uint8_t rail_mask, const uint16_t *mv);
@@ -80,6 +88,5 @@ int  ddr_power_read_status(uint8_t rail, uint8_t *flags);
 uint16_t ddr_power_get_mv(uint8_t rail);
 
 ddr_memory_type_t ddr_power_get_memory_type(void);
-ddr_bias_profile_t ddr_power_get_bias_profile(void);
 
 #endif
