@@ -90,10 +90,12 @@ add_executable(b1
     LWIP/Target/ethernetif.c
     LWIP/Target/eth_custom_phy_interface.c
     HAL_Drv/qspi_hw.c
+    HAL_Drv/i2c_hw.c
     HAL_Drv/spi_hw.c
     BSP/AD7124/ad7124.c
     BSP/Flash/flash_bsp.c
     BSP/Flash/flash_layout.c
+    BSP/MCP4725/mcp4725.c
     Core/Src/stm32h7xx_it.c
     Core/Src/system_stm32h7xx.c
     Core/Src/syscalls.c
@@ -109,6 +111,7 @@ target_include_directories(b1 PRIVATE
     HAL_Drv
     BSP/Flash
     BSP/AD7124
+    BSP/MCP4725
     LWIP/App
     LWIP/Target
     ${LWIP_DIR}/src/include

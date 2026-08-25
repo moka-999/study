@@ -165,6 +165,23 @@ def main() -> int:
     require("ad7124_init" not in source,
             "B1真板前不得在启动流程中自动访问AD7124")
 
+    # MCP4725只绑定硬件I2C2，Fast Write不写EEPROM，启动期不改Boot模式。
+    mcp_header = (ROOT / "BSP/MCP4725/mcp4725.h").read_text(encoding="utf-8")
+    mcp_source = (ROOT / "BSP/MCP4725/mcp4725.c").read_text(encoding="utf-8")
+    i2c_source = (ROOT / "HAL_Drv/i2c_hw.c").read_text(encoding="utf-8")
+    require(all(value in mcp_header for value in (
+        "MCP4725_ADDR_A0_LOW  0x60U", "BOOT_MODE_USB_MASKROM",
+        "BOOT_MODE_EMMC_SD", "mcp4725_set_boot_mode")),
+            "MCP4725地址、Boot模式或API缺失")
+    require("0U, 300U, 600U, 900U, 1200U, 1500U, 1800U" in mcp_source and
+            "MCP4725_POWER_NORMAL" in mcp_source,
+            "RK Boot电压表或Fast Write正常模式缺失")
+    require("i2c_if_t i2c2_if" in i2c_source and "&hi2c2" in i2c_source and
+            "HAL_I2C_Master_Transmit" in i2c_source,
+            "MCP4725必须通过B1硬件I2C2发送原始Fast Write数据")
+    require("mcp4725_set_boot_mode" not in source,
+            "B1真板前不得在启动流程中自动改写Boot模式")
+
     linker = (ROOT / "STM32H743xx_FLASH.ld").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     require("KEEP(*(.firmware_version))" in linker,
@@ -180,6 +197,8 @@ def main() -> int:
             "B1 build does not compile the migrated FreeRTOS/LwIP sources")
     require("BSP/AD7124/ad7124.c" in cmake and "HAL_Drv/spi_hw.c" in cmake,
             "B1 build does not compile the accepted AD7124 module")
+    require("BSP/MCP4725/mcp4725.c" in cmake and "HAL_Drv/i2c_hw.c" in cmake,
+            "B1 build does not compile the accepted MCP4725 module")
 
     manifest_path = ROOT / "build_debug/b1.manifest.json"
     image_path = ROOT / "build_debug/b1.bin"
@@ -197,6 +216,7 @@ def main() -> int:
     print("W25Q256 32MiB layout, 4-byte QSPI, version/FRU and manifest contract PASS")
     print("FreeRTOS 128KiB heap, LwIP IPv4, YT8512H reset and UID MAC contract PASS")
     print("AD7124-4 driver, SPI4-only binding and conservative mode-3 clock PASS")
+    print("MCP4725 Boot map, Fast Write and I2C2-only binding contract PASS")
     return 0
 
 

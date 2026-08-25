@@ -31,6 +31,10 @@ SPI4 is stored in the `.ioc` and generated as AD7124 mode 3.
 The V2-accepted AD7124-4 driver is compiled against B1 `spi4_if` only. SPI4
 starts at about 390.625kHz for first-board margin; startup deliberately does
 not access the ADC until the B1 board is available for ID and voltage checks.
+The accepted MCP4725 driver is also compiled and bound only to hardware I2C2
+(PF0/PF1, address `0x60`). It maps the seven schematic Boot modes from 0V to
+1.8V using Fast Write without touching EEPROM. Startup does not write the DAC;
+the first B1 board must verify VOUT before RK mode switching is enabled.
 
 ```powershell
 .\tools\dev.ps1 check
