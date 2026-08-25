@@ -95,12 +95,16 @@ add_executable(b1
     HAL_Drv/ddr_power.c
     HAL_Drv/pwr_ctrl.c
     HAL_Drv/memory_monitor.c
+    # PC-MCU协议独立放置；MCU-RK任务层验收后再增加rk目录。
+    App/protocol/pc/pc_protocol.c
+    App/protocol/pc/pc_test_message.c
     BSP/AD7124/ad7124.c
     BSP/TPS62868/tps62868.c
     BSP/PAC1934/pac1934.c
     BSP/Flash/flash_bsp.c
     BSP/Flash/flash_layout.c
     BSP/MCP4725/mcp4725.c
+    Middlewares/Third_Party/cJSON/cJSON.c
     Core/Src/stm32h7xx_it.c
     Core/Src/system_stm32h7xx.c
     Core/Src/syscalls.c
@@ -119,6 +123,8 @@ target_include_directories(b1 PRIVATE
     BSP/TPS62868
     BSP/PAC1934
     BSP/MCP4725
+    App/protocol/pc
+    Middlewares/Third_Party/cJSON
     LWIP/App
     LWIP/Target
     ${LWIP_DIR}/src/include
@@ -132,7 +138,13 @@ target_include_directories(b1 PRIVATE
     Drivers/CMSIS/Include
     Drivers/CMSIS/Device/ST/STM32H7xx/Include
 )
-target_compile_definitions(b1 PRIVATE USE_HAL_DRIVER STM32H743xx USE_PWR_LDO_SUPPLY)
+target_compile_definitions(b1 PRIVATE
+    USE_HAL_DRIVER
+    STM32H743xx
+    USE_PWR_LDO_SUPPLY
+    # 与V2真实网络验收保持一致，限制畸形JSON的递归内存占用。
+    CJSON_NESTING_LIMIT=16
+)
 
 # 版本宏只作用于持久化布局实现，避免字符串定义散落到业务代码。
 set_property(SOURCE BSP/Flash/flash_layout.c APPEND PROPERTY COMPILE_DEFINITIONS

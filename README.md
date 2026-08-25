@@ -24,6 +24,17 @@ D2 SRAM, so no cache clean/invalidate calls are permitted.
 B1 has no temperature-control or forwarding role. PC controls the B2 MCU
 directly; B1 SPI2 is reserved only for B1-B2 keepalive.
 
+The PC-MCU transport parser accepted on Apollo V2 is now compiled in B1 as an
+independent module: an 18-byte big-endian header followed by a UTF-8 JSON
+object. cJSON v1.7.19 is pinned locally and uses the FreeRTOS heap with nesting
+limited to 16. The 32-bit Length field is capped at a confirmed 4096-byte full
+PDU on the MCU. TCP business dispatch is intentionally not enabled in B1 yet;
+it will be connected with the dual-protocol gateway tasks.
+The first typed business helper accepts `CMD_START_TEST (0x0103)` with
+`algorithmName/algorithmIndex` and creates `CMD_TEST_RESULT_REPORT (0x0105)`
+with `testResults[{siteId,mirrorIndex,testStatus}]`. ServiceID and field value
+semantics remain pending; strict JSON does not allow trailing commas.
+
 `b1.ioc` is the CubeMX pin/clock baseline and was generated with
 `D:\stm32cubemx\STM32CubeMX.exe`. PH4/PH5 deliberately stay open-drain GPIOs:
 the schematic calls this bus I2C4, but those pins are not an STM32 I2C4 AF pair.
@@ -53,7 +64,8 @@ B1. Add only the smallest B1 check that proves the migrated module.
 
 Not copied by design: V2 board glue, unaccepted `App`/`BSP` modules, board demos,
 stress tests, extracted schematics and temporary files. The next milestone is
-the TCP/TLV gateway task layer; PHY reset, MAC and RK UART routing remain B1-local.
+the TCP dual-protocol gateway task layer; PHY reset, MAC and RK UART routing
+remain B1-local.
 
 ## Result LED board check
 

@@ -2,6 +2,7 @@
 """Small static contract for the independent B1 bring-up project."""
 
 from pathlib import Path
+import hashlib
 import json
 import re
 import sys
@@ -33,6 +34,10 @@ EXPECTED = {
 def require(ok: bool, message: str) -> None:
     if not ok:
         raise AssertionError(message)
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest().upper()
 
 
 def main() -> int:
@@ -263,6 +268,40 @@ def main() -> int:
         "HAL_Drv/memory_monitor.c")),
             "B1 build does not compile the accepted power/monitor modules")
 
+    # PC-MCU框架已在V2真实TCP上验收；B1此阶段只编译通用模块，不提前接业务任务。
+    pc_header = (ROOT / "App/protocol/pc/pc_protocol.h").read_text(encoding="utf-8")
+    pc_source = (ROOT / "App/protocol/pc/pc_protocol.c").read_text(encoding="utf-8")
+    pc_test_source = (ROOT / "App/protocol/pc/pc_test_message.c").read_text(encoding="utf-8")
+    pc_command = (ROOT / "App/protocol/pc/pc_command.h").read_text(encoding="utf-8")
+    cjson_dir = ROOT / "Middlewares/Third_Party/cJSON"
+    require(all(value in pc_header for value in (
+        "PC_PROTOCOL_HEADER_SIZE   18U", "PC_PROTOCOL_VERSION       1U",
+        "PC_PROTOCOL_FLAG_JSON     8U", "PC_PROTOCOL_MAX_PDU       4096U")),
+            "B1 PC协议固定头或4KiB工程上限错误")
+    require("cJSON_ParseWithLengthOpts" in pc_source and
+            "PC_JSON_ERROR_DUPLICATE_KEY" in pc_source and
+            "utf8_is_valid" in pc_source,
+            "B1 PC协议严格JSON入口不完整")
+    require("pc_json_configure_allocator(pvPortMalloc, vPortFree)" in rtos_source,
+            "B1 cJSON未在任务创建前绑定FreeRTOS堆")
+    require("App/protocol/pc/pc_protocol.c" in cmake and
+            "App/protocol/pc/pc_test_message.c" in cmake and
+            "Middlewares/Third_Party/cJSON/cJSON.c" in cmake and
+            "CJSON_NESTING_LIMIT=16" in cmake,
+            "B1构建未纳入PC协议/cJSON或深度限制")
+    require(sha256(cjson_dir / "cJSON.c") ==
+            "298581A04A36C0165DA4B0AADE235C23088CB2FAA58651D720EA2F3706ED0B0D" and
+            sha256(cjson_dir / "cJSON.h") ==
+            "25B0145150D500498E4D209CEC69C18C42CF818BFFCC54690BE3B895A2A16DEE",
+            "B1 cJSON不是V2验收的v1.7.19固定源码")
+    require(all(field in pc_test_source for field in (
+        '"algorithmName"', '"algorithmIndex"', '"testResults"',
+        '"siteId"', '"mirrorIndex"', '"testStatus"')),
+            "B1未同步第一组算法/测试结果JSON结构")
+    require("PC_COMMAND_SERVER_HEARTBEAT   0x0001U" in pc_command and
+            "PC_COMMAND_CLIENT_HEARTBEAT   0x0002U" in pc_command,
+            "B1 PC心跳命令合同未同步")
+
     manifest_path = ROOT / "build_debug/b1.manifest.json"
     image_path = ROOT / "build_debug/b1.bin"
     payload_path = ROOT / "build_debug/b1.version.bin"
@@ -281,6 +320,7 @@ def main() -> int:
     print("AD7124-4 driver, SPI4-only binding and conservative mode-3 clock PASS")
     print("MCP4725 Boot map, Fast Write and I2C2-only binding contract PASS")
     print("TPS/PAC/AD monitor, pwr_ctrl and all 20mV DDR steps contract PASS")
+    print("PC header, strict cJSON, algorithm/test-result JSON and allocator contract PASS")
     return 0
 
 

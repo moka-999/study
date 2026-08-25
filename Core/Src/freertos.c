@@ -2,6 +2,7 @@
 #include "cmsis_os2.h"
 #include "lwip.h"
 #include "main.h"
+#include "pc_protocol.h"
 #include "result_led.h"
 #include "task.h"
 
@@ -30,6 +31,9 @@ static void StartDefaultTask(void *argument)
 
 void MX_FREERTOS_Init(void)
 {
+    /* cJSON全局分配器必须在任何任务创建前切换到AXI SRAM中的FreeRTOS堆。 */
+    pc_json_configure_allocator(pvPortMalloc, vPortFree);
+
     if (osThreadNew(StartDefaultTask, NULL, &s_default_task_attributes) == NULL) {
         Error_Handler();
     }

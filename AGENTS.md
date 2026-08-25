@@ -34,7 +34,19 @@
   initializes QSPI; it must never auto-write the production metadata sectors.
 - FreeRTOS 10.6.2 and LwIP 2.2.1 have been migrated for the final gateway using
   B1's YT8512H, UID-derived MAC and PG12 PHY reset. The next migration is the
-  TCP/TLV task layer with UART4/USART2 RK routing; never copy V2 board glue.
+  TCP dual-protocol task layer with UART4/USART2 RK routing; never copy V2 board glue.
+- The V2-accepted PC transport parser and cJSON v1.7.19 are compiled in B1 but
+  not yet attached to a TCP business task. The wire header is 18-byte big-endian
+  plus a UTF-8 JSON object; the u32 Length field has a confirmed 4096-byte MCU
+  PDU limit. cJSON uses pvPortMalloc/vPortFree and nesting depth 16. PC responses
+  must echo the request Seq exactly; this u32 namespace is independent of RK Seq.
+- The first typed JSON helper covers START_TEST 0x0103
+  (`algorithmName/algorithmIndex`) and TEST_RESULT_REPORT 0x0105
+  (`testResults[{siteId,mirrorIndex,testStatus}]`). ServiceID and field semantics
+  remain pending; do not invent their ranges.
+- PC heartbeat is frozen as client request 0x0002 with `{}` and server response
+  0x0001 with `{}` using the same PC Seq. B1 only carries the command contract
+  until its TCP task layer is migrated.
 - B1 and V2 both keep D-Cache disabled. ETH DMA memory belongs in D2 SRAM and
   the FreeRTOS heap belongs in AXI SRAM; never add SCB cache maintenance calls.
 - Result LED color semantics have passed Apollo V2 and are now ported to PG0-PG5.
