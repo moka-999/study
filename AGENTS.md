@@ -7,7 +7,7 @@
 
 ## 一、项目是什么
 
-STM32H743 **阿波罗 V2** 板，作为 **TCP server + TLV 协议中继**，把 PC 命令经串口透传给 RK3588（内存测试/电源监控从板）。
+STM32H743 **阿波罗 V2** 板，作为 **TCP server + 双协议网关**：PC–MCU 使用固定18字节头+JSON的新协议，MCU–RK 保留现有0x5A/0xA5 TLV协议；MCU负责业务转换，不做原始帧透传。
 
 **拓扑**：
 ```
@@ -19,11 +19,27 @@ B2 MCU（共享SPI主机）──SCK/MOSI/MISO + CS0..7──► B1 MCU ×8（�
 
 B2 MCU由其他同事开发并由PC直接管理温控；B1不控制、代理或转发温控。B2以一组SPI主机共享SCK/MOSI/MISO，并用8个独立CS选择8块B1，SPI只用于保活。B1暂按从机、Mode 0、8位MSB、硬件NSS低有效配置，B2初始时钟暂按1MHz；保活载荷、周期、超时判定留待B2双方评审冻结。
 
-**软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (YT8512C, RMII) + TLV 协议。B1是同级独立工程 `../b1`，不在本V2源码树内混合构建。
+**软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (YT8512C, RMII) + PC–MCU JSON协议 + MCU–RK TLV协议。B1是同级独立工程 `../b1`，不在本V2源码树内混合构建。
 
 ---
 
-## 二、TLV 协议（0x5A/0xA5 帧）
+## 二、PC–MCU 与 MCU–RK 协议边界
+
+### PC–MCU（目标协议，框架已确认、尚未移植）
+
+MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网络字节序为大端，固定头部18字节：
+
+```
+[Length:u32] [Version:u16] [Flag:u16] [ServiceID:u16]
+[CommandID:u16] [Seq:u32] [Reserved:u16] [UTF-8 JSON Body]
+```
+
+- `Length`是头部与JSON包体的总长度，必须同时校验最小18字节和最大PDU上限；具体上限待实现评审冻结。
+- 初版固定`Version=1`、`Flag=8`；长度、版本或Flag非法时关闭连接并清空接收状态。
+- PC请求Seq由PC生成，MCU响应回显相同Seq；该Seq与MCU–RK Seq属于两个独立命名空间。
+- TCP解析必须支持半包、粘包和连续多包；命令枚举与JSON字段尚未冻结。
+
+### MCU–RK（现行协议，继续保留）
 
 ```
 [0x5A] [Len:2B BE] [HCRC:2B] [Seq:8B] [TLV...] [FCRC:2B] [0xA5]
@@ -32,9 +48,9 @@ B2 MCU由其他同事开发并由PC直接管理温控；B1不控制、代理或�
 - TLV 单元：`[Type:2B][TLV_Len:2B][Value]`
 - 命令容器 `Type=0x5000`（Value = `[CmdID:2B][Params]`）；心跳 `Type=0x0000`
 - 帧内 TLV 数量：**至少 1 个，最多 16 个**（`TLV_MAX_PER_FRAME`）
-- 状态机 6 态：IDLE→HEADER→DATA→CRC→FOOTER，TCP 和 USART1 **共用**（`App/protocol/state_machine.c`）
+- 状态机 6 态：IDLE→HEADER→DATA→CRC→FOOTER；迁移后仅用于MCU–RK串口链路。
 
-> ⚠️ **type 语义未定**：现状是枚举常量（0x5000/0x0000），plan 文档里的「高4位类型+低12位Tag」结构化是另一套互斥设计，已搁置，等驱动写完拿真实数据再定。详见「七、待定事项」。
+> ⚠️ 当前固件仍让TCP与串口共用本TLV状态机，这是待替换的历史实现，不代表PC–MCU目标协议。MCU–RK的type语义仍按现行枚举常量回归，旧文档的其他候选设计继续搁置。
 
 ---
 
@@ -42,7 +58,7 @@ B2 MCU由其他同事开发并由PC直接管理温控；B1不控制、代理或�
 
 | 目录 | 内容 |
 |------|------|
-| `App/protocol/` | TLV 协议栈：frame.c / state_machine.c / dispatch.c / crc.c |
+| `App/protocol/` | 当前MCU–RK TLV协议栈；后续增加独立PC–MCU帧解析与业务转换 |
 | `App/tasks/` | FreeRTOS 任务：tcp_task / rk_task / hb_task / monitor_task 等 |
 | `BSP/` | 板级驱动：AD7124 / Flash / IIC / LED / PCF8574 / WDT |
 | `HAL_Drv/` | 硬件抽象：uart_router.c（串口路由）等 |
@@ -143,15 +159,16 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
 - ✅ B1已拆分为同级独立工程`../b1`：46/46静态合同通过，V2验收通过的模块才逐个移植
 - ✅ W25Q256已定义32MiB分区、版本/FRU双副本、网络配置/站点标签、CRC32和构建清单；ARM构建、逐字节掉电模型及V2板载Flash真测通过（JEDEC/QE/跨页/RMW/四字节地址/CRC回退/复位保持）
+- ✅ 2026-08-25：协议职责边界已确认：PC–MCU改用固定18字节头+UTF-8 JSON，MCU–RK继续使用现有TLV；仅框架确认，命令枚举、JSON字段和最大PDU具体值尚未冻结，代码迁移尚未开始
 - ✅ 2026-08-24：结果灯业务逻辑已移植B1 PG0-PG5（B1提交`f24473f`），构建通过；红绿/对象顺序和上电毛刺待真板
 - ✅ 2026-08-24：B1取消温控职责，温控改为PC直连B2；B1–B2 SPI仅保活，B1基线为从机Mode 0/硬件NSS
 - 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`CONTEXT.md`
 
 **下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B1/B2真板验证）
 > **两阶段策略**：阶段一 = 阿波罗 V2 开发（驱动代码 + Mock + 逻辑分析仪波形验证，当前无外接模块）；阶段二 = B1/B2 真板（到货后：引脚重映射 + 实测标定 + RK/B2 MCU 联调）
-1. 冻结 PC/MCU/RK 黄金协议样例（当前实现“响应同 CmdID”，旧协议文档仍有互斥设计）
+1. **双协议迁移**：实现PC–MCU 18字节头+JSON解析，保留MCU–RK现有TLV及pending/重传；建立两套独立Seq和业务转换层，再分别冻结PC与RK黄金帧
 2. LED状态语义、颜色转换、V2六路功能波形及B1 PG0-PG5软件移植已完成：B1到板后复测实际2N7002网络的上电瞬态并确认红绿/对象顺序；两颗单色状态灯语义仍待确认
-3. **pwr_ctrl硬件闭环**（软件状态机与V2 GPIO波形验证已完成；待PC6/PC7顺序/延时冻结、B1真板标定和TLV接入）— 仍阻塞电源类功能验收
+3. **pwr_ctrl硬件闭环**（软件状态机与V2 GPIO波形验证已完成；待PC6/PC7顺序/延时冻结、B1真板标定和PC–MCU命令接入）— 仍阻塞电源类功能验收
 4. **TPS62868/69**（A版VSET配置：VDD1/VDD2/VDDQ地址0x49/0x41/0x4F；与pwr_on联动）
 5. **PAC1934T**（I2C4, 0x2C）+ **AD7124**（SPI4 PE11-14，完成Mock/波形验证后待真板标定）
 6. **B1–B2 MCU SPI保活**（B2共享总线主机+8个独立CS，8块B1均为SPI2从机；Mode 0/8位MSB/初始1MHz；保活载荷/周期/超时待冻结）
@@ -203,7 +220,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 
 | 事项 | 状态 | 何时定 |
 |------|------|--------|
-| TLV type 语义（枚举 0x5000 vs 结构化高4位+低12位） | 搁置 | 驱动写完拿真实数据后 |
+| MCU–RK TLV type 语义（枚举 0x5000 vs 结构化高4位+低12位） | 搁置 | RK协议评审时 |
 | 0x5000→0x5002 的语义（命令请求 vs 结果响应？） | 待确认 | 同上 |
 | 打包侧一帧一 TLV vs 解包侧一帧多 TLV 不对称 | 待改 | 同上（多TLV打包三段式 builder） |
 | `tlv_dispatch` 多单元响应互相覆盖 | 待改 | 同上 |
