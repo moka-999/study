@@ -43,7 +43,7 @@ def verify_semantics() -> None:
 def verify_source_contract() -> None:
     led = (ROOT / "BSP/LED/led.c").read_text(encoding="utf-8")
     header = (ROOT / "BSP/LED/led.h").read_text(encoding="utf-8")
-    task = (ROOT / "App/tasks/result_led_wave_task.c").read_text(encoding="utf-8")
+    task = (ROOT / "App/tasks/test/result_led_wave_task.c").read_text(encoding="utf-8")
     main_c = (ROOT / "Core/Src/main.c").read_text(encoding="utf-8")
     freertos = (ROOT / "Core/Src/freertos.c").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")

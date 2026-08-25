@@ -15,6 +15,8 @@
 #include "mcp4725.h"
 #include "memory_monitor.h"
 #include "pac1934.h"
+#include "pc_protocol.h"
+#include "pc_test_message.h"
 #include "pwr_ctrl.h"
 #include "tps62868.h"
 #include <stdarg.h>
@@ -621,6 +623,223 @@ static void test_lpddr_power_idd_bias_flow(void)
     i2c4_if = saved_i2c4;
 }
 
+static void mock_write_be16(uint8_t *target, uint16_t value)
+{
+    target[0] = (uint8_t)(value >> 8);
+    target[1] = (uint8_t)value;
+}
+
+static void mock_write_be32(uint8_t *target, uint32_t value)
+{
+    target[0] = (uint8_t)(value >> 24);
+    target[1] = (uint8_t)(value >> 16);
+    target[2] = (uint8_t)(value >> 8);
+    target[3] = (uint8_t)value;
+}
+
+/*
+ * 直接运行正式 PC-MCU 组帧器和 cJSON，不使用 Python 模型代替 C 代码。
+ * 本函数验证框架合同与恶意输入边界，业务字段另由专用结构测试覆盖。
+ */
+static void test_pc_protocol_and_json(void)
+{
+    static const char valid_json[] =
+        "{\"board\":\"B1\",\"ip\":\"192.168.1.201\"}";
+    static const char duplicate_json[] =
+        "{\"board\":\"B1\",\"nested\":{\"id\":1,\"id\":2}}";
+    static const char trailing_json[] = "{\"ok\":true}x";
+    static const char array_json[] = "[1,2,3]";
+    static const uint8_t invalid_utf8[] = {
+        '{', '"', 'x', '"', ':', '"', 0xEDU, 0xA0U, 0x80U, '"', '}'
+    };
+    uint8_t packet[PC_PROTOCOL_HEADER_SIZE + sizeof(valid_json) - 1U] = {0};
+    pc_protocol_stream_t stream;
+    pc_protocol_frame_t frame;
+    cJSON *root = NULL;
+    size_t error_offset = 0U;
+    pc_protocol_feed_result_t feed_result = PC_PROTOCOL_FEED_MORE;
+    const uint32_t packet_length = (uint32_t)sizeof(packet);
+
+    mock_write_be32(&packet[0], packet_length);
+    mock_write_be16(&packet[4], PC_PROTOCOL_VERSION);
+    mock_write_be16(&packet[6], PC_PROTOCOL_FLAG_JSON);
+    mock_write_be16(&packet[8], 0x0102U);
+    mock_write_be16(&packet[10], 0x0304U);
+    mock_write_be32(&packet[12], 0x11223344UL);
+    mock_write_be16(&packet[16], 0U);
+    memcpy(&packet[PC_PROTOCOL_HEADER_SIZE], valid_json,
+           sizeof(valid_json) - 1U);
+
+    pc_protocol_stream_reset(&stream);
+    for (size_t i = 0U; i < sizeof(packet); i++) {
+        feed_result = pc_protocol_stream_push_byte(&stream, packet[i]);
+        if (i + 1U < sizeof(packet) && feed_result != PC_PROTOCOL_FEED_MORE) {
+            break;
+        }
+    }
+    mock_check(feed_result == PC_PROTOCOL_FEED_FRAME_READY,
+               "PC协议逐字节半包组帧");
+    mock_check(pc_protocol_stream_get_frame(&stream, &frame) == 0 &&
+               frame.length == packet_length && frame.version == 1U &&
+               frame.flag == 8U && frame.service_id == 0x0102U &&
+               frame.command_id == 0x0304U &&
+               frame.sequence == 0x11223344UL && frame.reserved == 0U,
+               "PC协议18字节大端头解码");
+    mock_check(pc_json_parse_object(frame.json, frame.json_length,
+                                    &root, &error_offset) == PC_JSON_OK &&
+               root != NULL &&
+               cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root, "board")),
+               "PC协议JSON对象由cJSON解析");
+    cJSON_Delete(root);
+    root = NULL;
+
+    mock_check(pc_protocol_stream_push_byte(&stream, 0U) ==
+                   PC_PROTOCOL_FEED_ERROR &&
+               pc_protocol_stream_error(&stream) == PC_PROTOCOL_ERROR_STATE,
+               "完整帧处理前拒绝覆盖接收状态");
+
+    pc_protocol_stream_reset(&stream);
+    static const uint8_t short_length[4] = {0U, 0U, 0U, 17U};
+    for (size_t i = 0U; i < sizeof(short_length); i++) {
+        feed_result = pc_protocol_stream_push_byte(&stream, short_length[i]);
+    }
+    mock_check(feed_result == PC_PROTOCOL_FEED_ERROR &&
+               pc_protocol_stream_error(&stream) == PC_PROTOCOL_ERROR_LENGTH,
+               "PC协议拒绝小于18字节的Length");
+
+    pc_protocol_stream_reset(&stream);
+    static const uint8_t oversized_length[4] = {0U, 0U, 0x10U, 1U};
+    for (size_t i = 0U; i < sizeof(oversized_length); i++) {
+        feed_result = pc_protocol_stream_push_byte(&stream, oversized_length[i]);
+    }
+    mock_check(feed_result == PC_PROTOCOL_FEED_ERROR &&
+               pc_protocol_stream_error(&stream) == PC_PROTOCOL_ERROR_LENGTH,
+               "PC协议拒绝超过4KiB的Length");
+
+    memcpy(packet, (uint8_t[]){0U, 0U, 0U, PC_PROTOCOL_HEADER_SIZE,
+                               0U, 2U}, 6U);
+    pc_protocol_stream_reset(&stream);
+    for (size_t i = 0U; i < 6U; i++) {
+        feed_result = pc_protocol_stream_push_byte(&stream, packet[i]);
+    }
+    mock_check(feed_result == PC_PROTOCOL_FEED_ERROR &&
+               pc_protocol_stream_error(&stream) == PC_PROTOCOL_ERROR_VERSION,
+               "PC协议尽早拒绝错误Version");
+
+    memcpy(packet, (uint8_t[]){0U, 0U, 0U, PC_PROTOCOL_HEADER_SIZE,
+                               0U, 1U, 0U, 7U}, 8U);
+    pc_protocol_stream_reset(&stream);
+    for (size_t i = 0U; i < 8U; i++) {
+        feed_result = pc_protocol_stream_push_byte(&stream, packet[i]);
+    }
+    mock_check(feed_result == PC_PROTOCOL_FEED_ERROR &&
+               pc_protocol_stream_error(&stream) == PC_PROTOCOL_ERROR_FLAG,
+               "PC协议尽早拒绝错误Flag");
+
+    mock_check(pc_json_parse_object((const uint8_t *)duplicate_json,
+                                    strlen(duplicate_json), &root,
+                                    &error_offset) == PC_JSON_ERROR_DUPLICATE_KEY,
+               "cJSON递归拒绝重复键");
+    mock_check(pc_json_parse_object((const uint8_t *)trailing_json,
+                                    strlen(trailing_json), &root,
+                                    &error_offset) == PC_JSON_ERROR_TRAILING_DATA,
+               "cJSON拒绝根对象后的尾随数据");
+    mock_check(pc_json_parse_object((const uint8_t *)array_json,
+                                    strlen(array_json), &root,
+                                    &error_offset) == PC_JSON_ERROR_ROOT_TYPE,
+               "cJSON要求PC包体根节点为对象");
+    mock_check(pc_json_parse_object(invalid_utf8, sizeof(invalid_utf8),
+                                    &root, &error_offset) == PC_JSON_ERROR_UTF8 &&
+               error_offset == 6U,
+               "PC协议拒绝UTF-8代理区编码");
+}
+
+static void test_pc_test_json_contract(void)
+{
+    static const char request_json[] =
+        "{\"algorithmName\":\"algorithmName\",\"algorithmIndex\":1}";
+    static const char trailing_comma_json[] =
+        "{\"algorithmName\":\"algorithmName\",\"algorithmIndex\":1,}";
+    static const pc_chip_test_result_t results[] = {
+        {.site_id = "", .mirror_index = 1U, .test_status = 1},
+        {.site_id = "", .mirror_index = 1U, .test_status = 1},
+        {.site_id = "", .mirror_index = 1U, .test_status = 1},
+    };
+    static const char expected_result_json[] =
+        "{\"algorithmName\":\"algorithmName\",\"algorithmIndex\":1,"
+        "\"testResults\":[{\"siteId\":\"\",\"mirrorIndex\":1,\"testStatus\":1},"
+        "{\"siteId\":\"\",\"mirrorIndex\":1,\"testStatus\":1},"
+        "{\"siteId\":\"\",\"mirrorIndex\":1,\"testStatus\":1}]}";
+    cJSON *root = NULL;
+    pc_test_start_view_t request;
+    /* cJSON文档要求PrintPreallocated容量比实际JSON至少多5字节。 */
+    char result_json[sizeof(expected_result_json) + 5U] = {0};
+    uint8_t response_packet[PC_PROTOCOL_HEADER_SIZE +
+                            sizeof(expected_result_json) - 1U];
+    uint32_t response_length = 0U;
+
+    mock_check(pc_json_parse_object((const uint8_t *)request_json,
+                                    strlen(request_json), &root, NULL) ==
+                   PC_JSON_OK &&
+               pc_test_start_parse(root, &request) == PC_TEST_JSON_OK &&
+               strcmp(request.algorithm_name, "algorithmName") == 0 &&
+               request.algorithm_index == 1U,
+               "START_TEST算法JSON字段解析");
+    cJSON_Delete(root);
+    root = NULL;
+
+    mock_check(pc_json_parse_object((const uint8_t *)trailing_comma_json,
+                                    strlen(trailing_comma_json), &root, NULL) ==
+                   PC_JSON_ERROR_SYNTAX,
+               "算法JSON严格拒绝尾随逗号");
+
+    root = pc_test_result_create("algorithmName", 1U, results,
+                                 sizeof(results) / sizeof(results[0]));
+    const cJSON *array = root ? cJSON_GetObjectItemCaseSensitive(
+                                    root, "testResults") : NULL;
+    const cJSON *first = array ? cJSON_GetArrayItem(array, 0) : NULL;
+    const cJSON *mirror = first ? cJSON_GetObjectItemCaseSensitive(
+                                      first, "mirrorIndex") : NULL;
+    const cJSON *status = first ? cJSON_GetObjectItemCaseSensitive(
+                                      first, "testStatus") : NULL;
+    mock_check(root != NULL && cJSON_IsArray(array) &&
+               cJSON_GetArraySize(array) == 3 && first != NULL &&
+               cJSON_IsString(cJSON_GetObjectItemCaseSensitive(first, "siteId")) &&
+               cJSON_IsNumber(mirror) && mirror->valueint == 1 &&
+               cJSON_IsNumber(status) && status->valueint == 1 &&
+               cJSON_PrintPreallocated(root, result_json,
+                                       sizeof(result_json), 0) != 0 &&
+               strcmp(result_json, expected_result_json) == 0,
+               "TEST_RESULT_REPORT三项结果JSON生成");
+
+    const pc_protocol_frame_t pc_request = {
+        .service_id = 0x0100U,
+        .sequence = 0x12345678UL,
+    };
+    pc_protocol_stream_t response_stream;
+    pc_protocol_frame_t response_frame;
+    pc_protocol_feed_result_t response_feed = PC_PROTOCOL_FEED_MORE;
+    mock_check(pc_protocol_build_response(
+                   &pc_request, PC_COMMAND_TEST_RESULT_REPORT,
+                   (const uint8_t *)result_json, strlen(result_json),
+                   response_packet, sizeof(response_packet),
+                   &response_length) == 0,
+               "PC响应组帧器接受测试结果JSON");
+    pc_protocol_stream_reset(&response_stream);
+    for (uint32_t i = 0U; i < response_length; i++) {
+        response_feed = pc_protocol_stream_push_byte(&response_stream,
+                                                     response_packet[i]);
+    }
+    mock_check(response_feed == PC_PROTOCOL_FEED_FRAME_READY &&
+               pc_protocol_stream_get_frame(&response_stream,
+                                            &response_frame) == 0 &&
+               response_frame.service_id == pc_request.service_id &&
+               response_frame.command_id == PC_COMMAND_TEST_RESULT_REPORT &&
+               response_frame.sequence == pc_request.sequence,
+               "PC响应原样回显请求Seq且不使用RK Seq");
+    cJSON_Delete(root);
+}
+
 void StartDriverMockTestTask(void *argument)
 {
     (void)argument;
@@ -633,6 +852,8 @@ void StartDriverMockTestTask(void *argument)
     test_ad7124();
     test_memory_monitor();
     test_lpddr_power_idd_bias_flow();
+    test_pc_protocol_and_json();
+    test_pc_test_json_contract();
 
     mock_uart_printf("RESULT: %lu PASS, %lu FAIL\r\n",
                      (unsigned long)s_pass_count, (unsigned long)s_fail_count);

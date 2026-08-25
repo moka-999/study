@@ -13,8 +13,9 @@
 - PC通过独立接口直接管理B2 MCU的温控；B2 MCU统一负责全部加热逻辑及其他底板级控制，B1不控制、代理或转发温控。
 - PC–B1 MCU与B1 MCU–RK使用两套独立协议：PC–MCU采用固定18字节大端头部和UTF-8 JSON包体，MCU–RK继续使用现有0x5A/0xA5 TLV帧。
 - B1 MCU负责两套业务协议之间的语义转换，不直接透传对侧原始帧；PC Seq与RK Seq相互独立，MCU在内部维护请求映射。
-- PC–MCU固定头字段依次为`Length:u32/Version:u16/Flag:u16/ServiceID:u16/CommandID:u16/Seq:u32/Reserved:u16`。`Length`为完整PDU长度，初版`Version=1`、`Flag=8`；必须设置最大PDU上限，具体值待实现评审。
+- PC–MCU固定头字段依次为`Length:u32/Version:u16/Flag:u16/ServiceID:u16/CommandID:u16/Seq:u32/Reserved:u16`。`Length`为完整PDU长度，初版`Version=1`、`Flag=8`；Length字段为u32，MCU完整PDU上限为4096字节。
 - MCU仍是TCP:8888单客户端server。PC协议解析必须处理半包、粘包和连续多帧；非法长度、版本或Flag直接关闭连接。命令枚举和JSON字段当前不冻结。
+- 当前实现使用cJSON v1.7.19、FreeRTOS堆和16层嵌套限制；正式TCP传输入口已切到PC帧/cJSON，业务dispatch尚未接入。PC响应必须原样回显请求Seq，内部RK Seq由业务适配层独立生成和关联。
 - PC–B2温控协议由B2工程维护；B1–B2仅定义SPI保活，不承载温控或其他业务控制。
 - 初版不实现 OTA；只保留 W25Q256 驱动、固件版本信息和不阻塞后续 OTA 的启动布局。
 - RK 的 Boot 模式由 MCP4725 设置；RK 重启走 MCU 电源控制形成硬断电复位，不使用 PG12 直拉复位脚。
@@ -83,7 +84,7 @@
 3. RK硬复位应迁移到`pwr_ctrl`电源循环；PC6/PC7顺序必须按RK3588/RK806和原理图要求实现，PG11使能TPS62868后再通过I2C配置LPDDR三轨；精确延时待真板验证。
 4. TPS料号已确认为U4025=TPS628692A、U4026/U4027=TPS628681A；地址按0x49/0x41/0x4F实现。U4026的86.8kΩ按TI标称86.6kΩ档处理。
 5. B1–B2 MCU SPI只用于保活，已定为B2共享总线主机、B1 SPI2从机；Mode 0、8位MSB、硬件NSS低有效和B2初始1MHz作为联调基线。保活载荷、周期、超时判定和启动行为待B2 MCU负责人共同定义，不建立温控业务命令集。
-6. PC–MCU与MCU–RK分离的框架已确认；待定项仅为PC命令枚举、JSON字段、最大PDU具体值，以及两套业务命令的转换表和黄金样例。
+6. PC–MCU帧/cJSON模块已与MCU–RK TLV代码按目录分离并通过真实TCP验收；待定项为正式TCP切换、PC命令枚举、其余JSON字段，以及两套业务命令的转换表和黄金样例。PC响应Seq规则已确认：原样回显请求Seq。
 7. FRU v1已暂定产品名、料号、序列号、硬件版本、日期、可选MAC、网络模式、IPv4/掩码/网关/端口和站点标签，并实现双副本/CRC；字段最终评审及生产写入流程待定。B1静态/DHCP启用策略及异常安全策略待定。
 
 ## 6. LED状态定义

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('build', 'rebuild', 'protocol-test', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build')]
+    [ValidateSet('build', 'rebuild', 'protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build')]
     [string]$Task = 'build'
 )
 
@@ -15,6 +15,8 @@ $buildDirName = if ($Task -eq 'pwr-wave-build') {
     'build_driver_mock'
 } elseif ($Task -eq 'ad-wave-build') {
     'build_ad_wave'
+} elseif ($Task -eq 'pc-net-test-build') {
+    'build_pc_net_test'
 } else {
     'build_debug'
 }
@@ -48,10 +50,12 @@ function Find-Python {
     throw 'Python not found. Install Python 3 or add python.exe to PATH.'
 }
 
-if ($Task -eq 'protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'lpddr-test' -or $Task -eq 'boot-test' -or
+if ($Task -eq 'protocol-test' -or $Task -eq 'pc-protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'lpddr-test' -or $Task -eq 'boot-test' -or
     $Task -eq 'led-test' -or $Task -eq 'flash-test') {
     $python = Find-Python
-    $script = if ($Task -eq 'boot-test') {
+    $script = if ($Task -eq 'pc-protocol-test') {
+        'tests\verify_pc_protocol.py'
+    } elseif ($Task -eq 'boot-test') {
         'tests\test_boot_mode.py'
     } elseif ($Task -eq 'lpddr-test') {
         'tests\verify_lpddr_power.py'
@@ -106,6 +110,7 @@ $ledWaveOption = if ($Task -eq 'led-wave-build') { '-DENABLE_RESULT_LED_WAVE_TES
 $flashSelfTestOption = if ($Task -eq 'flash-self-test-build') { '-DENABLE_FLASH_SELF_TEST=ON' } else { '-DENABLE_FLASH_SELF_TEST=OFF' }
 $driverMockOption = if ($Task -eq 'driver-mock-build') { '-DENABLE_DRIVER_MOCK_TEST=ON' } else { '-DENABLE_DRIVER_MOCK_TEST=OFF' }
 $adWaveOption = if ($Task -eq 'ad-wave-build') { '-DENABLE_AD7124_WAVE_TEST=ON' } else { '-DENABLE_AD7124_WAVE_TEST=OFF' }
+$pcNetTestOption = if ($Task -eq 'pc-net-test-build') { '-DENABLE_PC_PROTOCOL_NET_TEST=ON' } else { '-DENABLE_PC_PROTOCOL_NET_TEST=OFF' }
 $cmakeArgs = @(
     '-S', $repo, '-B', $buildDir, '-G', 'Ninja',
     '-DCMAKE_BUILD_TYPE=Debug',
@@ -115,6 +120,7 @@ $cmakeArgs = @(
     $flashSelfTestOption
     $driverMockOption
     $adWaveOption
+    $pcNetTestOption
 )
 if (-not (Test-Path -LiteralPath $cache)) {
     $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake"

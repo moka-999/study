@@ -25,7 +25,7 @@ B2 MCU由其他同事开发并由PC直接管理温控；B1不控制、代理或�
 
 ## 二、PC–MCU 与 MCU–RK 协议边界
 
-### PC–MCU（目标协议，框架已确认、尚未移植）
+### PC–MCU（目标协议，正式TCP传输入口已切换、业务适配尚未接入）
 
 MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网络字节序为大端，固定头部18字节：
 
@@ -34,10 +34,12 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 [CommandID:u16] [Seq:u32] [Reserved:u16] [UTF-8 JSON Body]
 ```
 
-- `Length`是头部与JSON包体的总长度，必须同时校验最小18字节和最大PDU上限；具体上限待实现评审冻结。
+- `Length`是头部与JSON包体的总长度，字段宽度为u32；MCU完整PDU上限已确认为4096字节。
 - 初版固定`Version=1`、`Flag=8`；长度、版本或Flag非法时关闭连接并清空接收状态。
-- PC请求Seq由PC生成，MCU响应回显相同Seq；该Seq与MCU–RK Seq属于两个独立命名空间。
-- TCP解析必须支持半包、粘包和连续多包；命令枚举与JSON字段尚未冻结。
+- PC与MCU–RK Seq属于两个独立命名空间；MCU响应必须原样回显PC请求Seq，绝不能把内部RK Seq写入PC响应头。
+- 心跳固定为PC主动发送`CMD_CLIENT_HEART_BEAT(0x0002)+{}`，MCU返回`CMD_SERVER_HEART_BEAT(0x0001)+{}`并回显同一Seq；心跳不承载其他状态。
+- TCP解析必须支持半包、粘包和连续多包；第一组测试JSON已确认，其余命令与字段分批冻结。
+- 已固定引入cJSON v1.7.19，使用FreeRTOS堆、递归深度16；完整PDU上限4096字节。
 
 ### MCU–RK（现行协议，继续保留）
 
@@ -50,7 +52,7 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 - 帧内 TLV 数量：**至少 1 个，最多 16 个**（`TLV_MAX_PER_FRAME`）
 - 状态机 6 态：IDLE→HEADER→DATA→CRC→FOOTER；迁移后仅用于MCU–RK串口链路。
 
-> ⚠️ 当前固件仍让TCP与串口共用本TLV状态机，这是待替换的历史实现，不代表PC–MCU目标协议。MCU–RK的type语义仍按现行枚举常量回归，旧文档的其他候选设计继续搁置。
+> ✅ 正式TCP任务已停止使用本TLV状态机和原始帧回传；本协议仅保留在MCU–RK串口任务。MCU–RK的type语义仍按现行枚举常量回归，旧文档的其他候选设计继续搁置。
 
 ---
 
@@ -58,8 +60,12 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 
 | 目录 | 内容 |
 |------|------|
-| `App/protocol/` | 当前MCU–RK TLV协议栈；后续增加独立PC–MCU帧解析与业务转换 |
-| `App/tasks/` | FreeRTOS 任务：tcp_task / rk_task / hb_task / monitor_task 等 |
+| `App/protocol/pc/` | PC–MCU固定18字节头、cJSON严格解析和PC业务JSON辅助层 |
+| `App/protocol/rk/` | MCU–RK 0x5A/0xA5、CRC16、TLV状态机和历史分发层 |
+| `App/tasks/pc/` | PC侧TCP server任务；已使用PC固定头/cJSON，业务适配和响应待接入 |
+| `App/tasks/rk/` | RK串口、pending/重传和RK心跳任务 |
+| `App/tasks/common/` | LED、采样监控等不隶属单一通信对象的正式任务 |
+| `App/tasks/test/` | Mock、自检和逻辑分析仪波形任务；不代表生产业务 |
 | `BSP/` | 板级驱动：AD7124 / Flash / IIC / LED / PCF8574 / WDT |
 | `HAL_Drv/` | 硬件抽象：uart_router.c（串口路由）等 |
 | `Core/` `Drivers/` `Middlewares/` | CubeMX 生成（HAL/CMSIS/FreeRTOS/LWIP），**勿手改** |
@@ -110,6 +116,7 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 ### 运行测试
 ```bash
 powershell -ExecutionPolicy Bypass -File tools/dev.ps1 protocol-test  # 离线帧/CRC/状态机模型
+powershell -ExecutionPolicy Bypass -File tools/dev.ps1 pc-protocol-test # PC固定头/cJSON离线合同
 python -X utf8 tests/stability_test.py                                # 需板卡/网络/COM3
 python -X utf8 tests/full_chain_stress.py                             # 需板卡/网络/COM3
 ```
@@ -137,7 +144,7 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 2. **背压链闭环**：`pcToRk_Queue`(8槽) + rk pending(4槽) = 最多 12 条在途。队列满→回 BUSY(0x04)，pending 满→命令滞留队列。**uart_send 可能失败（TX环满），每处调用都要想「失败怎么办」**。
 3. **RK 响应匹配不到 pending 一律静默丢弃，绝不回 ACK**（否则 RK 把 ACK 当命令再回响应 → 死循环，曾观测单 seq 重传 1207 次）。
 4. **重传**：500ms 超时 + 指数退避 500/1000/2000ms，封顶 3 次（`RK_MAX_RETRIES`）。
-5. **dispatch 在 tcp_task 上下文同步执行**，handler 里**禁止 vTaskDelay 阻塞**（reboot 用软件定时器，非阻塞）。
+5. 历史`tlv_dispatch`不再由正式`tcp_task`调用；若后续RK业务层复用其同步handler，仍禁止在handler中`vTaskDelay`阻塞。
 6. **D-Cache 已关** → 无 cache 一致性顾虑，**勿再加 `SCB_InvalidateDCache_by_Addr`**（否则 UsageFault 升级 HardFault）。
 7. **DMA 够不到 DTCMRAM**（DMA 在 D2 域），DMA 缓冲放 AXI SRAM (RAM, 0x24000000)。
 8. **FreeRTOS 堆(128KB)手动挪到 AXI SRAM**（`heap_4.c` 的 `.heap` section + linker），不是 CubeMX 默认位置。
@@ -168,14 +175,16 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
 - ✅ B1已拆分为同级独立工程`../b1`：46/46静态合同通过，V2验收通过的模块才逐个移植
 - ✅ W25Q256已定义32MiB分区、版本/FRU双副本、网络配置/站点标签、CRC32和构建清单；ARM构建、逐字节掉电模型及V2板载Flash真测通过（JEDEC/QE/跨页/RMW/四字节地址/CRC回退/复位保持）
-- ✅ 2026-08-25：协议职责边界已确认：PC–MCU改用固定18字节头+UTF-8 JSON，MCU–RK继续使用现有TLV；仅框架确认，命令枚举、JSON字段和最大PDU具体值尚未冻结，代码迁移尚未开始
+- ✅ 2026-08-25：PC传输层已实现并接入正式TCP任务：固定18字节大端头、半包/粘包/连续帧、Version/Flag/Length校验、UTF-8对象与重复键/尾随数据拒绝；cJSON v1.7.19固定接入FreeRTOS堆，深度16。正式TCP已停止解析/回传RK TLV；PC主动心跳合同已实现，专用网络镜像真板17/17且正式镜像心跳响应通过；业务dispatch和PC/RK Seq映射尚未接入
+- ✅ 2026-08-25：上述通用PC帧/cJSON模块已同步到独立B1工程并通过46/46静态合同及ARM构建；B1尚未创建TCP业务任务
+- ✅ 2026-08-25：第一组业务JSON结构已进入类型化辅助层：START_TEST(0x0103)解析algorithmName/algorithmIndex，TEST_RESULT_REPORT(0x0105)生成testResults数组；ServiceID、site/mirror/status业务值域和最大结果数仍待冻结
 - ✅ 2026-08-24：结果灯业务逻辑已移植B1 PG0-PG5（B1提交`f24473f`），构建通过；红绿/对象顺序和上电毛刺待真板
 - ✅ 2026-08-24：B1取消温控职责，温控改为PC直连B2；B1–B2 SPI仅保活，B1基线为从机Mode 0/硬件NSS
 - 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`CONTEXT.md`
 
 **下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B1/B2真板验证）
 > **两阶段策略**：阶段一 = 阿波罗 V2 开发（驱动代码 + Mock + 逻辑分析仪波形验证，当前无外接模块）；阶段二 = B1/B2 真板（到货后：引脚重映射 + 实测标定 + RK/B2 MCU 联调）
-1. **双协议迁移**：实现PC–MCU 18字节头+JSON解析，保留MCU–RK现有TLV及pending/重传；建立两套独立Seq和业务转换层，再分别冻结PC与RK黄金帧
+1. **双协议迁移**：PC帧/cJSON解析和正式TCP入口切换已完成；下一步以PC草案枚举为输入冻结最小业务JSON/响应合同，建立业务请求到独立RK Seq的内部映射；PC响应原样回显请求Seq，MCU–RK现有TLV/pending/重传保持不变
 2. LED状态语义、颜色转换、V2六路功能波形及B1 PG0-PG5软件移植已完成：B1到板后复测实际2N7002网络的上电瞬态并确认红绿/对象顺序；两颗单色状态灯语义仍待确认
 3. **pwr_ctrl硬件闭环**（软件状态机与V2 GPIO波形验证已完成；待PC6/PC7顺序/延时冻结、B1真板标定和PC–MCU命令接入）— 仍阻塞电源类功能验收
 4. **TPS62868/69**（A版VSET配置：VDD1/VDD2/VDDQ地址0x49/0x41/0x4F；与pwr_on联动）

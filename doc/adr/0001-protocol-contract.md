@@ -17,17 +17,19 @@
 
 1. PC–MCU采用固定18字节大端头部和UTF-8 JSON包体，不再复用现有TLV帧。
 2. MCU–RK继续使用当前0x5A/0xA5 TLV、CRC、pending、重传和心跳机制。
-3. MCU负责业务语义转换，不在TCP与串口之间透传原始帧；PC Seq与RK Seq相互独立。
+3. MCU负责业务语义转换，不在TCP与串口之间透传原始帧；PC Seq与RK Seq相互独立，PC响应必须原样回显请求Seq。
 4. PC–MCU仍由MCU作为TCP:8888单客户端server。固定头为`Length/Version/Flag/ServiceID/CommandID/Seq/Reserved`；初版`Version=1`、`Flag=8`。
-5. PC协议必须限制PDU长度并正确处理TCP半包、粘包和连续多帧；具体上限、命令枚举和JSON字段后续冻结。
+5. PC协议必须限制PDU长度并正确处理TCP半包、粘包和连续多帧；Length字段为u32，MCU完整PDU上限为4096字节，命令枚举和JSON字段分批冻结。
 6. B1–B2 MCU SPI仍只冻结保活电气基线，不承载温控或其他业务命令。
 
-当前代码仍让TCP和RK串口共用TLV状态机，这是待迁移的历史实现，不是新的PC–MCU合同。
+PC固定头流式组帧和cJSON严格入口已作为独立模块实现，并已接入正式TCP任务；PC输入不再进入RK TLV状态机，RK原始TLV和监测文本也不再直接发给PC。专用回显镜像仍只验证传输边界，不是业务响应合同。下一阶段增加PC Seq到独立RK Seq的业务映射。
+
+PC工程师提供的`Packet/TcpServer/CommandEnum`草案作为线格式输入：18字节字段顺序、完整PDU Length、大端、Version=1和Flag=8与本ADR一致。其Windows示例中的9000端口、16MiB上限及多客户端线程不直接约束MCU；本项目采用TCP:8888单客户端和4096字节完整PDU上限，响应必须原样回显请求Seq。
 
 ## 后续冻结项
 
 - PC命令枚举、中文职责注释和各命令JSON字段。
-- PC协议最大PDU具体值及请求、响应、非法帧黄金样例。
+- PC请求、响应和非法帧黄金样例；PC响应Seq已确定为原样回显请求Seq。
 - PC业务命令到RK业务命令的转换表。
 - RK请求、ACK、BUSY、PASS、FAIL、异步上报、心跳和重启黄金帧。
 - MCU–RK多TLV响应规则、错误处理和CmdID/Type兼容策略。

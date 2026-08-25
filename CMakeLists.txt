@@ -36,6 +36,9 @@ option(ENABLE_DRIVER_MOCK_TEST "Build isolated TPS/PAC/AD/MCP mock self-test ima
 # 仅用于阿波罗 V2 实脚 SPI2 波形验收；循环输出 AD7124 典型事务。
 option(ENABLE_AD7124_WAVE_TEST "Build isolated Apollo V2 AD7124 SPI waveform image" OFF)
 
+# 仅用于阿波罗 V2 真实以太网验收PC固定头+cJSON；合法帧原样回显，不定义业务语义。
+option(ENABLE_PC_PROTOCOL_NET_TEST "Build isolated PC protocol TCP echo test image" OFF)
+
 # 固件身份由构建系统统一提供，禁止在 C 源文件中散落手写版本字符串。
 set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
 set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
@@ -105,19 +108,23 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/pwm_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/qspi_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/spi_hw.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/crc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/dispatch.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/frame.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/state_machine.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/hb_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/led_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/monitor_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pwr_wave_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/result_led_wave_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/qspi_test.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/tcp_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test_task.c
+    # PC-MCU 与 MCU-RK 是两套独立协议，源码目录必须保持物理隔离。
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_protocol.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_test_message.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/crc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/dispatch.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/frame.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/state_machine.c
+    # 正式任务按通信对象分区，纯验证任务统一放test目录。
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pc/tcp_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/hb_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/led_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/monitor_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/pwr_wave_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/result_led_wave_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/qspi_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/test_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/AD7124/ad7124.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_bsp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_layout.c
@@ -128,19 +135,20 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PAC1934/pac1934.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/TPS62868/tps62868.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/WDT/wdt.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/cJSON/cJSON.c
 )
 
 # Mock任务体只进入隔离测试镜像，正式固件不编译测试代码。
 if(ENABLE_DRIVER_MOCK_TEST)
     target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/driver_mock_test.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/driver_mock_test.c
     )
 endif()
 
 # 实脚SPI波形任务同样只进入专用镜像，正式固件不携带测试入口。
 if(ENABLE_AD7124_WAVE_TEST)
     target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/ad7124_wave_task.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/ad7124_wave_task.c
     )
 endif()
 
@@ -148,8 +156,12 @@ endif()
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pc
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/AD7124
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/IIC
@@ -159,6 +171,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PAC1934
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/TPS62868
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/WDT
+    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/cJSON
 )
 
 # Add project symbols (macros)
@@ -169,6 +182,9 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     $<$<BOOL:${ENABLE_FLASH_SELF_TEST}>:ENABLE_FLASH_SELF_TEST=1>
     $<$<BOOL:${ENABLE_DRIVER_MOCK_TEST}>:ENABLE_DRIVER_MOCK_TEST=1>
     $<$<BOOL:${ENABLE_AD7124_WAVE_TEST}>:ENABLE_AD7124_WAVE_TEST=1>
+    $<$<BOOL:${ENABLE_PC_PROTOCOL_NET_TEST}>:ENABLE_PC_PROTOCOL_NET_TEST=1>
+    # MCU 接收的 JSON 只承载扁平业务对象，限制递归深度可抵御畸形嵌套输入。
+    CJSON_NESTING_LIMIT=16
 )
 
 # 版本宏只影响 flash_layout.c，刷新构建时间时无需重编译整个固件。

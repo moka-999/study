@@ -72,8 +72,8 @@ def verify_source_contract() -> None:
     state = (ROOT / "HAL_Drv/pwr_ctrl.c").read_text(encoding="utf-8")
     pac = (ROOT / "BSP/PAC1934/pac1934.c").read_text(encoding="utf-8")
     monitor = (ROOT / "HAL_Drv/memory_monitor.c").read_text(encoding="utf-8")
-    monitor_task = (ROOT / "App/tasks/monitor_task.c").read_text(encoding="utf-8")
-    mock = (ROOT / "App/tasks/driver_mock_test.c").read_text(encoding="utf-8")
+    monitor_task = (ROOT / "App/tasks/common/monitor_task.c").read_text(encoding="utf-8")
+    mock = (ROOT / "App/tasks/test/driver_mock_test.c").read_text(encoding="utf-8")
 
     assert "memcpy(_mv, nominal" in power, "每次上电必须恢复器件标称三轨"
     assert "steps[rail] * DDR_VOLTAGE_STEP_MV" in power, "拉偏必须以标称值为基准20mV步进"

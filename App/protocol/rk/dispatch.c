@@ -1,7 +1,10 @@
 /*
  * ===================================================================
- * TLV 命令分发 — 查表路由实现
+ * MCU-RK TLV 命令分发 — 查表路由实现
  * ===================================================================
+ *
+ * 注意：这里仍保留PC旧TLV入口以维持历史固件可运行。正式PC-MCU JSON业务层
+ * 接入后，本文件只接收业务适配层生成的RK命令，不能直接解析PC帧。
  *
  *   测试命令(0x0001-0x0024) → pcToRk_Queue → rk_task → RK3588
  *     MCU 先回 ACK(Params[0]=0x03), 结果同 CmdID 异步回报
@@ -148,10 +151,9 @@ static int _h_test_cmd(const tlv_frame_t *frame, const tlv_unit_t *unit,
 /*
  * 重启 RK3588: MCU GPIO 拉低 RK3588 NPOR
  *
- * 注意: dispatch 在 tcp_task 上下文同步执行, 这里不能用 vTaskDelay 阻塞 —
- *       6s 阻塞会让 TCP server 停止收帧/转发队列 (rkToPc_Queue 8 槽溢出丢 RK 上报),
- *       与 rk_task 曾有的"阻塞重传"是同一类 bug。
- *       改用一次性软件定时器: 立即回 ACK, 拉低复位脚, 由定时器到期后拉高释放。
+ * 历史TLV入口曾在tcp_task上下文同步调用本handler；正式TCP现已切到PC JSON，
+ * 但同步handler本身仍不能用vTaskDelay阻塞。保留一次性软件定时器实现，避免
+ * 未来由其他任务复用时阻塞调用者。
  */
 static TimerHandle_t _rk_rst_timer = NULL;
 

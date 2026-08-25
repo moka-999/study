@@ -6,6 +6,7 @@ build_led_wave/
 build_flash_self_test/
 build_driver_mock/
 build_ad_wave/
+build_pc_net_test/
 *.o
 *.a
 *.elf

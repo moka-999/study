@@ -1,15 +1,19 @@
 /*
  * ===================================================================
- * TLV 命令分发 — 查表路由
+ * MCU-RK TLV 命令分发 — 查表路由
  * ===================================================================
  *
- * 路由:
- *   PC→MCU:  帧 unpack → tlv_dispatch()
+ * 协议边界:
+ *   本目录只定义 MCU-RK 的 0x5A/0xA5 TLV。PC-MCU 使用 ../pc/ 下的
+ *   18字节固定头+JSON，不得直接调用本分发器，也不得透传对侧原始帧。
+ *
+ * 历史路由（待PC正式业务层迁移后收敛）:
+ *   PC→MCU:  旧TLV帧 unpack → tlv_dispatch()
  *            ├─ 本地命令 (reboot 等) → MCU 直接执行 + ACK
  *            └─ 测试命令 (0x0001-0x0024) → pcToRk_Queue → rk_task → RK3588
  *                                          MCU 先回 ACK → PC
  *
- *   RK→MCU:  响应帧 (与请求相同 CmdID) → rkToPc_Queue → TCP → PC
+ *   RK→MCU:  响应帧 (与请求相同 CmdID) → rkToPc_Queue → 旧TCP路径
  *
  * CmdID 空间 (2字节, Value[0:2]):
  *   0x0001-0x0010  测试命令 (gtest-*)
@@ -58,7 +62,10 @@ enum {
     TLV_ST_BUSY = 0x04,  /* 转发队列满, 命令被丢弃 (背压) */
 };
 
-/* ── PC→RK 队列消息 ── */
+/*
+ * 历史PC→RK内部队列消息。pc_seq仅用于旧路径关联；新业务适配层必须维护
+ * PC u32 Seq与RK u64 Seq的独立映射，不能将任一侧Seq直接当作另一侧Seq。
+ */
 typedef struct {
     uint16_t cmd;
     uint8_t  data[TLV_CMD_DATA_MAX];

@@ -798,7 +798,7 @@ def test_edge_cases():
 
 def test_serial_sim():
     """串口模拟 — 双向通信时序"""
-    hdr("8. 串口模拟: MCU ↔ RK3588 双向通信")
+    hdr("8. MCU-RK串口与内部Seq映射模型")
 
     mcu_seq = 0
 
@@ -820,7 +820,7 @@ def test_serial_sim():
             print(f"  │  RK: 心跳 seq=1 ✓")
 
     print("  │")
-    print("  ├─ PC→TCP→MCU: gtest_start (0x0001), pc_seq=100")
+    print("  ├─ PC业务适配层生成RK命令: gtest_start (0x0001), pc_seq=100")
     pc_cmd = pack_cmd(0x0001, bytes([0x01, 0x00, 0x00, 0x80]), seq=100)
     print(f"  │  MCU 收到: {pc_cmd.hex()[:60]}...")
 
@@ -859,10 +859,8 @@ def test_serial_sim():
                 print(f"  │  MCU: _pending_take(seq={f['sequence']}) → pc_seq=100")
 
     print("  │")
-    pc_resp = pack_cmd(0x0001, result_data, seq=100)
-    print("  ├─ MCU → TCP → PC: result seq=100, cmd=0x0001")
-    print(f"  │  MCU TX: {pc_resp.hex()}")
-    print(f"  │  PC 收到: cmd=0x0001, status=pass ✓")
+    print("  ├─ 业务适配层取回pc_seq=100（PC响应须另用固定头+JSON组帧）")
+    print("  │  本模型到此结束，不再伪造PC侧TLV响应")
     print("  │")
     print("  └─ 通信正常 ✓")
 

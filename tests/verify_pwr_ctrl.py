@@ -119,7 +119,7 @@ def verify_wave_image_contract() -> None:
 
     source = (ROOT / "HAL_Drv/pwr_ctrl.c").read_text(encoding="utf-8")
     gpio_map = (ROOT / "HAL_Drv/bsp_gpio.c").read_text(encoding="utf-8")
-    task = (ROOT / "App/tasks/pwr_wave_task.c").read_text(encoding="utf-8")
+    task = (ROOT / "App/tasks/test/pwr_wave_task.c").read_text(encoding="utf-8")
     freertos = (ROOT / "Core/Src/freertos.c").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     dev_script = (ROOT / "tools/dev.ps1").read_text(encoding="utf-8")

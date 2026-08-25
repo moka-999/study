@@ -6,7 +6,7 @@
 
 | 模块 | 代码状态 | 当前验证证据 | 结论 |
 |---|---|---|---|
-| TCP server + 双协议网关 | 当前TCP与RK仍共用TLV；目标PC–MCU 18字节头+JSON框架已确认，尚未迁移 | 现有TLV离线协议测试仅作为MCU–RK回归基线 | PC新协议待实现 |
+| TCP server + 双协议网关 | 正式TCP已切到PC固定18字节头、cJSON和PC主动心跳，不再解析或回传RK TLV | V2真实TCP网络17/0；正式镜像心跳响应实测；MCU–RK旧TLV模型65/0 | 传输/心跳闭环；业务dispatch/内部RK Seq映射待接入 |
 | Bootloader + App 偏移 | 已实现 | 本次全量编译生成 `boot.elf` / `test.elf` | 可构建，未在本次重新烧录 |
 | TPS62868 / DDR 电源 API | 已实现三路独立20mV步进全可写范围；初始化仍回标称 | V2离线/Mock通过；B1已绑定I2C1/I2C2/PH4-PH5软件I2C并通过ARM构建 | 软件基线完成，真板VOUT未闭环 |
 | PAC1934T | 已实现驱动骨架 | 可编译；无本次模块/真板实测 | 未闭环 |
@@ -14,7 +14,7 @@
 | pwr_ctrl | 已实现安全默认关闭、可配置顺序和轮询式上/下电状态机；另有隔离的V2波形镜像 | 正式镜像与`build_pwr_wave/test.elf`均构建通过；离线源码合同+3组状态迁移通过；V2断电重上电50s GPIO波形实测通过 | 软件及V2 GPIO模拟闭环；B1真板待标定 |
 | LED结果显示 | 已实现PASS/FAIL/常温测试/高温测试颜色映射及500ms调度；已移植B1 PG0-PG5 | V2断电重上电50s六路功能波形通过；B1 46/46合同及ARM构建通过 | 软件/V2模拟闭环；B1真板待确认红绿/对象顺序和上电毛刺 |
 | Boot 模式控制 | 已实现MCP4725 Fast Write、掉电模式和7种Boot电压映射；不写EEPROM | `boot-test` 7/7；V2隔离Mock实机52 PASS/0 FAIL；B1 I2C2移植构建通过 | 软件驱动闭环；reboot/PC命令和真板VOUT/RK启动待完成 |
-| 电压/电流监测上报 | `memory_monitor` + `monitor_task`已生成TPS/PAC/AD结构化快照，仅电源ON时采集，支持部分有效标志 | V2 MCU纯内存Mock 59 PASS/0 FAIL；B1监测库已编译接入；无真实器件 | 正式软件接入完成；PC JSON查询和真板标定待办 |
+| 电压/电流监测上报 | `memory_monitor` + `monitor_task`已生成TPS/PAC/AD结构化快照，仅电源ON时采集，支持部分有效标志 | V2隔离Mock总计74 PASS/0 FAIL（含PC传输与首组业务JSON）；B1监测库已编译接入；无真实器件 | 正式软件接入完成；PC JSON查询和真板标定待办 |
 | 驱动 TLV 命令 | 仅 reboot/frame_error 为本地命令 | PWR、DDR 调压、采样、Boot 命令均未接入 | 未实现 |
 | B1–B2 MCU SPI | B1引脚工程已配置SPI2从机；保活任务未实现 | 仅用于保活，不承载温控；B2共享SPI主机并用8个独立CS选择8块B1 | 硬件基线完成，保活定义待定 |
 | W25Q256版本/FRU | 32MiB分区、版本/FRU双副本、CRC32、网络配置/站点标签和构建清单已实现 | ARM构建+逐字节断电模型通过；V2板载Flash实测JEDEC/QE、跨页/RMW、四字节地址、CRC回退及复位保持全部通过 | V2软硬件闭环；PC查询待协议冻结 |
@@ -28,6 +28,7 @@
 .\tools\dev.ps1 build
 .\tools\dev.ps1 rebuild
 .\tools\dev.ps1 protocol-test
+.\tools\dev.ps1 pc-protocol-test
 .\tools\dev.ps1 boot-test
 ```
 
@@ -38,6 +39,7 @@
 ```powershell
 python -X utf8 tests\stability_test.py
 python -X utf8 tests\full_chain_stress.py
+python -X utf8 tests\pc_protocol_network_test.py
 ```
 
 ## 文档可信度顺序
@@ -51,7 +53,7 @@ python -X utf8 tests\full_chain_stress.py
 
 ## 当前 P0 问题
 
-- PC–MCU与MCU–RK的协议边界已确认但代码尚未迁移：PC侧使用18字节大端头+JSON，RK侧保留现有TLV，MCU做业务转换并使用两套独立Seq。PC命令枚举、JSON字段、最大PDU具体值和双向黄金样例仍待冻结。PC–B2温控协议属于B2工程，B1–B2只定义保活。
+- PC–MCU传输层与MCU–RK已在`App/protocol/pc/`和`App/protocol/rk/`物理分离，正式TCP也已切到PC固定头/cJSON并停止RK TLV原始帧回传；业务dispatch、其余JSON字段和双向黄金样例仍待冻结。Length字段为u32，MCU完整PDU上限已确认为4096字节；MCU响应必须原样回显PC请求Seq，内部RK Seq与其独立。PC–B2温控协议属于B2工程，B1–B2只定义保活。
 - `pwr_ctrl`软件状态机已建立，但启动时刻意不加载PC6/PC7量产顺序和毫秒参数，未确认配置时拒绝上电；V2同名实脚PC6/PC7/PG11的500ms测试波形已闭环，B1真板顺序/延时和最小掉电时间仍未闭环。
 - RK硬复位应通过PC6对`VCC4V0_SYS`做电源循环；B1的PG12连接PHY `ETH_nRST`，当前PG12 `reboot`实现只能保留在Apollo V2，完整PC7/PC6/PG11时序待真板验证。
 - 三颗双色灯对应2组LPDDR4/4X和1组eMCP；物理灯号顺序及两颗单色上电/状态灯语义待定。
@@ -64,11 +66,11 @@ python -X utf8 tests\full_chain_stress.py
 - 驱动自检已默认关闭；开发镜像可显式定义`ENABLE_DRIVER_SELF_TEST=1`启用。
 - TPS/PAC目前完成事务Mock；AD7124还完成V2 SPI2发送侧实脚波形验收。没有外接器件，三者均不能写成“真实器件或B1/B2已验证”。
 
-暂定需求见 [`requirements_baseline.md`](requirements_baseline.md)，协议问题记录在 [`adr/0001-protocol-contract.md`](adr/0001-protocol-contract.md)，规范术语见 [`../CONTEXT.md`](../CONTEXT.md)。
+暂定需求见 [`requirements_baseline.md`](requirements_baseline.md)，协议问题记录在 [`adr/0001-protocol-contract.md`](adr/0001-protocol-contract.md)，已确认的业务JSON见 [`pc_json_contract.md`](pc_json_contract.md)，规范术语见 [`../CONTEXT.md`](../CONTEXT.md)。
 
 ## 建议开发顺序
 
-1. 先实现PC–MCU独立帧解析和与MCU–RK TLV隔离的转换层，再分别冻结PC与RK黄金帧；与B2负责人只冻结SPI保活载荷、周期和超时。PC–B2温控协议由B2工程独立维护。
+1. PC–MCU独立帧/cJSON和真实TCP传输已闭环；下一步依据PC草案冻结最小业务响应合同与命令归属，接入正式TCP dispatch和请求到RK Seq的内部映射，再分别冻结PC与RK黄金帧；PC响应必须原样回显请求Seq。与B2负责人只冻结SPI保活载荷、周期和超时，PC–B2温控协议由B2工程独立维护。
 2. B1到板后在实际PG0-PG5→2N7002网络上复测结果灯波形和上电毛刺，并确认红绿顺序及三颗灯对应的测试对象；两颗单色状态灯语义仍待确认。
 3. 与硬件/RK负责人冻结PC6/PC7顺序和延时后再加载配置；B1真板复测PC6/PC7/PG11、TPS62868初始化窗口及三路实际电压建立过程。
 4. MCP4725驱动与B1软件移植已完成；按当前优先级继续完成TPS62868/PAC1934/AD7124正式任务接入，随后完成LPDDR上下电、拉偏与IDD业务闭环；真实器件回读留到真板。

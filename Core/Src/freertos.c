@@ -39,6 +39,7 @@
 #include "hb_task.h"
 #include "uart_router.h"
 #include "pwr_ctrl.h"
+#include "pc_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -97,6 +98,13 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
+  /*
+   * cJSON 的分配器是全局配置，必须在创建任务前一次性切换到 FreeRTOS 堆。
+   * 若使用默认 libc malloc，内存不会计入 xPortGetFreeHeapSize()，也不符合
+   * 当前固件统一放置在 AXI SRAM 的堆规划。
+   */
+  pc_json_configure_allocator(pvPortMalloc, vPortFree);
+
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -124,6 +132,7 @@ void MX_FREERTOS_Init(void) {
   /* Create the thread(s) */
   /* creation of defaultTask */
 #if (!defined(ENABLE_FLASH_SELF_TEST) || !ENABLE_FLASH_SELF_TEST) && \
+    (!defined(ENABLE_DRIVER_MOCK_TEST) || !ENABLE_DRIVER_MOCK_TEST) && \
     (!defined(ENABLE_AD7124_WAVE_TEST) || !ENABLE_AD7124_WAVE_TEST)
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 #endif
@@ -152,6 +161,14 @@ void MX_FREERTOS_Init(void) {
    */
   extern void StartAd7124WaveTask(void *argument);
   xTaskCreate(StartAd7124WaveTask, "adWave", 512, NULL, 3, NULL);
+  xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
+#elif defined(ENABLE_PC_PROTOCOL_NET_TEST) && ENABLE_PC_PROTOCOL_NET_TEST
+  /*
+   * PC协议网络验收镜像只保留LWIP、TCP回显任务和喂狗任务，不启动RK、
+   * 监测及心跳业务，确保抓到的流量只属于18字节头+cJSON测试。
+   */
+  xTaskCreate(StartTcpServerTask, "pcNetTest", 4096, NULL, 5,
+              &tcpClientTaskHandle);
   xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
 #else
   /* creation of ledBlinkTask */
@@ -230,7 +247,7 @@ void StartDefaultTask(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
-/* 任务实现在 App/tasks/ 下 */
+/* 正式任务位于App/tasks/{pc,rk,common}，隔离验证任务位于App/tasks/test。 */
 
 /* 看门狗喂狗任务: 最高优先级, 2s 周期 */
 void StartWdtFeedTask(void *argument)

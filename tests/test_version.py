@@ -168,7 +168,7 @@ def verify_source_contract() -> None:
     layout_c = (ROOT / "BSP/Flash/flash_layout.c").read_text(encoding="utf-8")
     flash_bsp = (ROOT / "BSP/Flash/flash_bsp.c").read_text(encoding="utf-8")
     qspi = (ROOT / "HAL_Drv/qspi_hw.c").read_text(encoding="utf-8")
-    qspi_test = (ROOT / "App/tasks/qspi_test.c").read_text(encoding="utf-8")
+    qspi_test = (ROOT / "App/tasks/test/qspi_test.c").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     linker = (ROOT / "STM32H743xx_FLASH.ld").read_text(encoding="utf-8")
 
