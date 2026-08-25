@@ -156,10 +156,11 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ⚠️ TPS62868、PAC1934、AD7124 已有事务级Mock、正式快照层和隔离自检镜像；AD7124另已完成V2 SPI2实脚Mode 3发送波形验收。手头没有外接模块，真实ID/电压/电流与标定仍待B1真板
 - ✅ 2026-08-25：TPS/PAC/AD事务级Mock镜像与LPDDR离线模型建立；覆盖LPDDR4/4X标称与±偏压、反序下电、跨电源周期回标称、PAC三轨IDD换算和AD7124-4 ID白名单。ARM正式/Mock构建与离线合同通过，V2实机串口结果41 PASS/0 FAIL并已恢复正式镜像；B1真值/标定仍未闭环
 - ✅ 2026-08-25：固定百分比拉偏已替换为VDD1/VDD2/VDDQ独立20mV步进，覆盖TPS寄存器可写范围（VDD1 800..3340mV，VDD2/VDDQ 400..1660mV）；高压档位可能损坏DDR，仅开放显式调压接口，上电仍强制回标称。离线穷举和Mock失败回滚已覆盖，真实VOUT待B1。
+- ✅ 2026-08-25：上述TPS/PAC/DDR/pwr_ctrl/memory_monitor已移植B1；VDD1/VDD2/VDDQ分别绑定I2C1/I2C2/PH4-PH5软件开漏I2C，后者支持超时、9脉冲总线恢复、PAC多字节和Send Byte操作。B1 46/46静态合同与ARM全量构建通过；启动只执行`pwr_ctrl_init(NULL)`强制全关，不访问真实器件。
 - ✅ 2026-08-25：新增独立`build_ad_wave/test.elf`，V2 SPI2实脚验证AD7124复位、STATUS/ID读取、ADC_CTRL/CH0写入及DATA读取，物理时序为Mode 3、MSB、约504kHz。ATK-Logic V1.1.2.0的CPHA标签/首位对齐存在歧义：CPHA=1整字节右移，CPHA=0会在下降切换沿偶发读旧位；须查看原始波形并以上升采样沿判断，禁止据此把固件改为Mode 2。真实MISO回读仍待B1真板
 - ✅ 2026-08-25：AD7124-4驱动已同步到B1 `SPI4`（PE11-PE14），仅导出`spi4_if`，首板保守时钟390.625kHz；B1静态合同46/46与ARM构建通过（B1提交`9cebabc`），未在启动期自动访问芯片，真实ID/MISO/电压与标定待B1真板
 - ✅ 2026-08-25：MCP4725 Fast Write、掉电模式及7种RK Boot电压映射已实现；离线合同7/7、V2隔离Mock实机52 PASS/0 FAIL，已恢复正式镜像。B1已绑定硬件I2C2并通过46/46合同与ARM构建（B1提交`3ed8784`）；上电不自动写DAC，真实VOUT/RK启动待B1真板
-- ✅ 2026-08-25：TPS/PAC/AD已接入正式`memory_monitor`结构化快照；仅在`pwr_ctrl=ON`时初始化，下电清除就绪态，单器件失败通过`valid_mask`保留其他有效数据。纯内存Mock已于V2 MCU运行56 PASS/0 FAIL并恢复正式镜像；当前无真实器件，不代表真实ID/电压/电流或标定通过
+- ✅ 2026-08-25：TPS/PAC/AD已接入正式`memory_monitor`结构化快照；仅在`pwr_ctrl=ON`时初始化，下电清除就绪态，单器件失败通过`valid_mask`保留其他有效数据。纯内存Mock已于V2 MCU运行59 PASS/0 FAIL并恢复正式镜像；当前无真实器件，不代表真实ID/电压/电流或标定通过
 - ✅ 2026-08-24：新增`pwr_ctrl`安全状态机（默认全关、未配置拒绝上电、顺序可配置、失败全关）；ARM全量构建、3组离线状态迁移及V2 GPIO波形通过，B1真板时序与TLV仍待完成
 - ✅ 2026-08-24：新增独立`build_pwr_wave/test.elf`波形镜像；经正点原子官方原理图确认，V2直接使用与B1一致的P2-31/PC6、P2-32/PC7、P3-31/PG11；断电重上电50s逻辑分析仪实测通过，三路初始低电平、首边沿无可见毛刺、正反顺序及500ms测试间隔均正常；默认正式构建关闭且B1编译期禁止
 - ✅ 2026-08-24：完成结果灯纯颜色映射（PASS绿常亮/FAIL红常亮/常温橙闪/高温红闪）和独立`build_led_wave/test.elf`波形镜像；离线合同、正式镜像及波形镜像构建通过，波形镜像已烧录V2；六路实测待接线

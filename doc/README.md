@@ -8,13 +8,13 @@
 |---|---|---|---|
 | TCP server + 双协议网关 | 当前TCP与RK仍共用TLV；目标PC–MCU 18字节头+JSON框架已确认，尚未迁移 | 现有TLV离线协议测试仅作为MCU–RK回归基线 | PC新协议待实现 |
 | Bootloader + App 偏移 | 已实现 | 本次全量编译生成 `boot.elf` / `test.elf` | 可构建，未在本次重新烧录 |
-| TPS62868 / DDR 电源 API | 已实现三路独立20mV步进全可写范围；初始化仍回标称 | 离线穷举通过；I2C2仍为`NULL`占位；无真实电压实测 | 软件基线完成，真板未闭环 |
+| TPS62868 / DDR 电源 API | 已实现三路独立20mV步进全可写范围；初始化仍回标称 | V2离线/Mock通过；B1已绑定I2C1/I2C2/PH4-PH5软件I2C并通过ARM构建 | 软件基线完成，真板VOUT未闭环 |
 | PAC1934T | 已实现驱动骨架 | 可编译；无本次模块/真板实测 | 未闭环 |
 | AD7124 | 已实现AD7124-4驱动、事务Mock和隔离SPI波形镜像 | V2 SPI2实脚Mode 3发送事务已验收；无外接器件，MISO真实ID/电压及标定待B1 | V2发送侧闭环；B1器件侧未闭环 |
 | pwr_ctrl | 已实现安全默认关闭、可配置顺序和轮询式上/下电状态机；另有隔离的V2波形镜像 | 正式镜像与`build_pwr_wave/test.elf`均构建通过；离线源码合同+3组状态迁移通过；V2断电重上电50s GPIO波形实测通过 | 软件及V2 GPIO模拟闭环；B1真板待标定 |
 | LED结果显示 | 已实现PASS/FAIL/常温测试/高温测试颜色映射及500ms调度；已移植B1 PG0-PG5 | V2断电重上电50s六路功能波形通过；B1 46/46合同及ARM构建通过 | 软件/V2模拟闭环；B1真板待确认红绿/对象顺序和上电毛刺 |
 | Boot 模式控制 | 已实现MCP4725 Fast Write、掉电模式和7种Boot电压映射；不写EEPROM | `boot-test` 7/7；V2隔离Mock实机52 PASS/0 FAIL；B1 I2C2移植构建通过 | 软件驱动闭环；reboot/PC命令和真板VOUT/RK启动待完成 |
-| 电压/电流监测上报 | `memory_monitor` + `monitor_task`已生成TPS/PAC/AD结构化快照，仅电源ON时采集，支持部分有效标志 | V2 MCU纯内存Mock 56 PASS/0 FAIL；无真实器件 | 正式软件接入完成；PC JSON查询和真板标定待办 |
+| 电压/电流监测上报 | `memory_monitor` + `monitor_task`已生成TPS/PAC/AD结构化快照，仅电源ON时采集，支持部分有效标志 | V2 MCU纯内存Mock 59 PASS/0 FAIL；B1监测库已编译接入；无真实器件 | 正式软件接入完成；PC JSON查询和真板标定待办 |
 | 驱动 TLV 命令 | 仅 reboot/frame_error 为本地命令 | PWR、DDR 调压、采样、Boot 命令均未接入 | 未实现 |
 | B1–B2 MCU SPI | B1引脚工程已配置SPI2从机；保活任务未实现 | 仅用于保活，不承载温控；B2共享SPI主机并用8个独立CS选择8块B1 | 硬件基线完成，保活定义待定 |
 | W25Q256版本/FRU | 32MiB分区、版本/FRU双副本、CRC32、网络配置/站点标签和构建清单已实现 | ARM构建+逐字节断电模型通过；V2板载Flash实测JEDEC/QE、跨页/RMW、四字节地址、CRC回退及复位保持全部通过 | V2软硬件闭环；PC查询待协议冻结 |

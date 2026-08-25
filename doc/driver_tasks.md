@@ -111,9 +111,9 @@ V2 不可验证、留给 B1 真板的：
 
 | # | 任务 | 输出 | V2 验证 | B1 验证 |
 |---|------|------|---------|---------|
-| 3.1 | I2C 寄存器读写 + 地址扫描（0x40-0x4F） | ✅ 代码：`tps62868.c/h` + scan | ✅ 事务级Mock覆盖地址与空指针；最新V2纯内存Mock总计56 PASS/0 FAIL | 待 |
-| 3.2 | 初始化：VOUT 设置（因子换算）、ramp speed、discharge | ✅ 底层精确5/10mV编码；测试层三路独立20mV步进 | ✅ 离线穷举全部步数；Mock覆盖独立调压、越界和失败回滚 | 待电压实测 |
-| 3.3 | STATUS 读（热预警/HICCUP/UVLO） | ✅ 代码 API | ✅ Mock覆盖0x19状态读取 | 待 |
+| 3.1 | I2C 寄存器读写 + 地址扫描（0x40-0x4F） | ✅ 代码：`tps62868.c/h` + scan | ✅ 事务级Mock覆盖地址与空指针；最新V2纯内存Mock总计59 PASS/0 FAIL | ✅ I2C1/I2C2/PH4-PH5软件I2C绑定，46/46合同与ARM构建通过；真器件待板 |
+| 3.2 | 初始化：VOUT 设置（因子换算）、ramp speed、discharge | ✅ 底层精确5/10mV编码；测试层三路独立20mV步进 | ✅ 离线穷举全部步数；Mock覆盖独立调压、越界和失败回滚 | ✅ 软件移植/构建通过；真实VOUT待板 |
+| 3.3 | STATUS 读（热预警/HICCUP/UVLO） | ✅ 代码 API | ✅ Mock覆盖0x19状态读取 | ✅ 已编译接入`memory_monitor`；真回读待板 |
 | 3.4 | PC–MCU命令：DDR_VOLTAGE_SET（老化调压） | 待办 | 新协议dispatch | 真机 |
 
 ### 上电/拉偏时序设计（20260819 定稿）
@@ -185,7 +185,7 @@ V2 不可验证、留给 B1 真板的：
 | 5.1 | 现有 ad7124.c 移植到 spi2_if（V2）+ 后续切 spi4_if（B1），CS 抽象 | ✅ 按AD7124-4补齐错误传播和参数检查 | ✅ Mock覆盖64个1复位、ID=0x07及浮空0x00拒绝；V2隔离Mock镜像41 PASS/0 FAIL，SPI2实脚发送波形通过 | ✅ 已移植到SPI4且构建/静态合同通过（`9cebabc`）；真实ID/MISO/电压待真板 |
 | 5.2 | 通道配置：AIN0/2/4, REFIN1=2.5V, FS/滤波 | ✅ 逐次检查寄存器写结果 | ✅ Mock覆盖ADC_CTRL与三通道映射 | 待 |
 | 5.3 | 电压换算 + 分压系数 | ✅ 代码 API | ✅ Mock覆盖1.01分压满量程 | 待恒压源标定 |
-| 5.4 | PC–MCU命令：电压采样查询/上报 | ✅ `memory_monitor`/`monitor_task`结构化快照；PC JSON命令待新协议 | ✅ 纯内存Mock覆盖全部/部分有效与下电失效 | 待真实ID/电压与标定 |
+| 5.4 | PC–MCU命令：电压采样查询/上报 | ✅ `memory_monitor`/`monitor_task`结构化快照；PC JSON命令待新协议 | ✅ 纯内存Mock覆盖全部/部分有效与下电失效 | ✅ `memory_monitor`库已移植并构建；真实ID/电压/电流与标定待板 |
 
 **V2 SPI2波形验收（2026-08-25）**：执行`powershell -ExecutionPolicy Bypass -File tools/dev.ps1 ad-wave-build`并烧录`build_ad_wave/test.elf`；PB12=CS、PB13=SCK、PB14=MISO、PB15=MOSI，与分析仪共地。镜像使用Mode 3、8位MSB、约504kHz，循环输出`FF×8`、`40 00`、`45 00`、`01 05 90`、`09 80 11`、`42 00 00 00 00`。20MHz采样的原始波形确认MOSI在下降沿切换、上升沿稳定采样，CS及事务分段正确。ATK-Logic V1.1.2.0设CPHA=1时会把首位错位，设CPHA=0虽可对齐字节但会在下降切换沿偶发读到旧位；因此验收必须看原始上升沿，不得把分析仪标签当作修改固件相位的依据。开发板无AD7124，MISO读回不作为器件验收。
 
