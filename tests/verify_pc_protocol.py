@@ -115,7 +115,10 @@ def main() -> None:
     passed += 1
 
     cmake_text = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    assert "App/protocol/pc/pc_dispatch.c" in cmake_text
     assert "App/protocol/pc/pc_protocol.c" in cmake_text
+    assert "App/protocol/pc/pc_state_machine.c" in cmake_text
+    assert "App/protocol/pc/pc_tester_info.c" in cmake_text
     assert "App/protocol/rk/frame.c" in cmake_text
     assert "Middlewares/Third_Party/cJSON/cJSON.c" in cmake_text
     assert "CJSON_NESTING_LIMIT=16" in cmake_text
@@ -128,12 +131,53 @@ def main() -> None:
     assert "utf8_is_valid" in source
     passed += 1
 
-    # 正式TCP任务必须使用PC解析器，不能再把PC输入送入RK TLV状态机或原样透传。
+    # PC字节流状态机必须独立于JSON/组帧模块，正式任务只调用状态机API。
+    state_source = (ROOT / "App" / "protocol" / "pc" /
+                    "pc_state_machine.c").read_text(encoding="utf-8")
+    state_header = (ROOT / "App" / "protocol" / "pc" /
+                    "pc_state_machine.h").read_text(encoding="utf-8")
+    assert "PC_SM_STATE_HEADER" in state_header
+    assert "PC_SM_STATE_BODY" in state_header
+    assert "PC_SM_STATE_FRAME_READY" in state_header
+    assert "PC_SM_STATE_ERROR" in state_header
+    assert "pc_sm_feed" in state_source
+    assert "pc_json_parse_object" not in state_source
+    assert "PC_COMMAND_" not in state_source
+    passed += 1
+
+    # JSON解析、命令校验和响应组帧统一由dispatch承担，不泄漏到TCP任务。
+    dispatch_source = (ROOT / "App" / "protocol" / "pc" /
+                       "pc_dispatch.c").read_text(encoding="utf-8")
+    assert "pc_json_parse_object" in dispatch_source
+    assert "pc_protocol_build_response" in dispatch_source
+    assert "PC_COMMAND_QUERY_TESTER_INFO" in dispatch_source
+    assert "pc_tester_info_load" in dispatch_source
+    assert '"testerName"' in dispatch_source
+    assert "firmware_version_current" not in dispatch_source
+    passed += 1
+
+    tester_store_source = (ROOT / "App" / "protocol" / "pc" /
+                           "pc_tester_info.c").read_text(encoding="utf-8")
+    assert 'TESTER_PRODUCT_NAME        "LPDDR4/X_200B"' in tester_store_source
+    assert 'TESTER_HARDWARE_REVISION   "D00"' in tester_store_source
+    assert 'TESTER_BOARD_NAME          "RK3588_test"' in tester_store_source
+    assert "fru_info_load" in tester_store_source
+    assert "fru_info_load_legacy_v1" in tester_store_source
+    assert "fru_info_save" in tester_store_source
+    assert "if (load_result == FLASH_STORE_OK) return 0;" in tester_store_source
+    passed += 1
+
+    # 正式TCP任务只保留socket与状态机编排，不能再包含JSON/业务处理细节。
     tcp_source = (ROOT / "App" / "tasks" / "pc" / "tcp_task.c").read_text(
         encoding="utf-8")
-    assert "pc_protocol_stream_push_byte" in tcp_source
-    assert "pc_validate_business_json" in tcp_source
-    assert "pc_send_heartbeat_response" in tcp_source
+    assert "pc_sm_init" in tcp_source
+    assert "pc_sm_feed" in tcp_source
+    assert "pc_sm_get_frame" in tcp_source
+    assert "pc_dispatch_handle" in tcp_source
+    assert "pc_json_parse_object" not in tcp_source
+    assert "pc_protocol_build_response" not in tcp_source
+    assert "pc_test_start_parse" not in tcp_source
+    assert "PC_COMMAND_" not in tcp_source
     assert "tlv_sm_feed" not in tcp_source
     assert "rkToPc_Queue" not in tcp_source
     passed += 1
@@ -142,6 +186,25 @@ def main() -> None:
                       "pc_command.h").read_text(encoding="utf-8")
     assert "PC_COMMAND_SERVER_HEARTBEAT   0x0001U" in command_header
     assert "PC_COMMAND_CLIENT_HEARTBEAT   0x0002U" in command_header
+    assert "PC_COMMAND_QUERY_TESTER_INFO  0x0101U" in command_header
+    assert "PC_COMMAND_TESTER_INFO_RESP   0x0102U" in command_header
+    passed += 1
+
+    # 测试仪信息必须由0x0101查询触发，不允许连接建立后主动推送。
+    tester_info = {
+        "testerName": "LPDDR4/X_200B",
+        "testerVersion": "D00",
+        "testBoard": "RK3588_test",
+    }
+    tester_response = build_frame(
+        json.dumps(tester_info, separators=(",", ":")).encode(),
+        service=0x1234, command=0x0102, sequence=0x55667788)
+    tester_fields = struct.unpack(">IHHHHIH", tester_response[:HEADER_SIZE])
+    assert tester_fields[3:] == (0x1234, 0x0102, 0x55667788, 0)
+    assert json.loads(tester_response[HEADER_SIZE:]) == tester_info
+    accept_block = tcp_source.split("accept(listenfd, NULL, NULL);", 1)[1]
+    before_recv = accept_block.split("recv(connfd, rx, sizeof(rx), 0);", 1)[0]
+    assert "pc_dispatch_handle" not in before_recv
     passed += 1
 
     request = json.loads('{"algorithmName":"algorithmName","algorithmIndex":1}')

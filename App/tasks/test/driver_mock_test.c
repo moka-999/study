@@ -15,7 +15,9 @@
 #include "mcp4725.h"
 #include "memory_monitor.h"
 #include "pac1934.h"
+#include "pc_dispatch.h"
 #include "pc_protocol.h"
+#include "pc_state_machine.h"
 #include "pc_test_message.h"
 #include "pwr_ctrl.h"
 #include "tps62868.h"
@@ -653,11 +655,11 @@ static void test_pc_protocol_and_json(void)
         '{', '"', 'x', '"', ':', '"', 0xEDU, 0xA0U, 0x80U, '"', '}'
     };
     uint8_t packet[PC_PROTOCOL_HEADER_SIZE + sizeof(valid_json) - 1U] = {0};
-    pc_protocol_stream_t stream;
+    pc_sm_t stream;
     pc_protocol_frame_t frame;
     cJSON *root = NULL;
     size_t error_offset = 0U;
-    pc_protocol_feed_result_t feed_result = PC_PROTOCOL_FEED_MORE;
+    pc_sm_feed_result_t feed_result = PC_SM_FEED_MORE;
     const uint32_t packet_length = (uint32_t)sizeof(packet);
 
     mock_write_be32(&packet[0], packet_length);
@@ -670,16 +672,24 @@ static void test_pc_protocol_and_json(void)
     memcpy(&packet[PC_PROTOCOL_HEADER_SIZE], valid_json,
            sizeof(valid_json) - 1U);
 
-    pc_protocol_stream_reset(&stream);
+    pc_sm_init(&stream);
+    mock_check(stream.state == PC_SM_STATE_HEADER,
+               "PC状态机初始化进入HEADER");
     for (size_t i = 0U; i < sizeof(packet); i++) {
-        feed_result = pc_protocol_stream_push_byte(&stream, packet[i]);
-        if (i + 1U < sizeof(packet) && feed_result != PC_PROTOCOL_FEED_MORE) {
+        feed_result = pc_sm_feed(&stream, packet[i]);
+        if (i + 1U == PC_PROTOCOL_HEADER_SIZE) {
+            mock_check(stream.state == PC_SM_STATE_BODY,
+                       "PC状态机固定头收齐后进入BODY");
+        }
+        if (i + 1U < sizeof(packet) && feed_result != PC_SM_FEED_MORE) {
             break;
         }
     }
-    mock_check(feed_result == PC_PROTOCOL_FEED_FRAME_READY,
+    mock_check(feed_result == PC_SM_FEED_FRAME_READY,
                "PC协议逐字节半包组帧");
-    mock_check(pc_protocol_stream_get_frame(&stream, &frame) == 0 &&
+    mock_check(stream.state == PC_SM_STATE_FRAME_READY,
+               "PC状态机正文收齐后进入FRAME_READY");
+    mock_check(pc_sm_get_frame(&stream, &frame) == 0 &&
                frame.length == packet_length && frame.version == 1U &&
                frame.flag == 8U && frame.service_id == 0x0102U &&
                frame.command_id == 0x0304U &&
@@ -693,47 +703,49 @@ static void test_pc_protocol_and_json(void)
     cJSON_Delete(root);
     root = NULL;
 
-    mock_check(pc_protocol_stream_push_byte(&stream, 0U) ==
-                   PC_PROTOCOL_FEED_ERROR &&
-               pc_protocol_stream_error(&stream) == PC_PROTOCOL_ERROR_STATE,
+    mock_check(pc_sm_feed(&stream, 0U) == PC_SM_FEED_ERROR &&
+               stream.state == PC_SM_STATE_ERROR &&
+               pc_sm_error(&stream) == PC_SM_ERROR_STATE,
                "完整帧处理前拒绝覆盖接收状态");
 
-    pc_protocol_stream_reset(&stream);
+    pc_sm_reset(&stream);
+    mock_check(stream.state == PC_SM_STATE_HEADER,
+               "PC状态机复位后返回HEADER");
     static const uint8_t short_length[4] = {0U, 0U, 0U, 17U};
     for (size_t i = 0U; i < sizeof(short_length); i++) {
-        feed_result = pc_protocol_stream_push_byte(&stream, short_length[i]);
+        feed_result = pc_sm_feed(&stream, short_length[i]);
     }
-    mock_check(feed_result == PC_PROTOCOL_FEED_ERROR &&
-               pc_protocol_stream_error(&stream) == PC_PROTOCOL_ERROR_LENGTH,
+    mock_check(feed_result == PC_SM_FEED_ERROR &&
+               pc_sm_error(&stream) == PC_SM_ERROR_LENGTH,
                "PC协议拒绝小于18字节的Length");
 
-    pc_protocol_stream_reset(&stream);
+    pc_sm_reset(&stream);
     static const uint8_t oversized_length[4] = {0U, 0U, 0x10U, 1U};
     for (size_t i = 0U; i < sizeof(oversized_length); i++) {
-        feed_result = pc_protocol_stream_push_byte(&stream, oversized_length[i]);
+        feed_result = pc_sm_feed(&stream, oversized_length[i]);
     }
-    mock_check(feed_result == PC_PROTOCOL_FEED_ERROR &&
-               pc_protocol_stream_error(&stream) == PC_PROTOCOL_ERROR_LENGTH,
+    mock_check(feed_result == PC_SM_FEED_ERROR &&
+               pc_sm_error(&stream) == PC_SM_ERROR_LENGTH,
                "PC协议拒绝超过4KiB的Length");
 
     memcpy(packet, (uint8_t[]){0U, 0U, 0U, PC_PROTOCOL_HEADER_SIZE,
                                0U, 2U}, 6U);
-    pc_protocol_stream_reset(&stream);
+    pc_sm_reset(&stream);
     for (size_t i = 0U; i < 6U; i++) {
-        feed_result = pc_protocol_stream_push_byte(&stream, packet[i]);
+        feed_result = pc_sm_feed(&stream, packet[i]);
     }
-    mock_check(feed_result == PC_PROTOCOL_FEED_ERROR &&
-               pc_protocol_stream_error(&stream) == PC_PROTOCOL_ERROR_VERSION,
+    mock_check(feed_result == PC_SM_FEED_ERROR &&
+               pc_sm_error(&stream) == PC_SM_ERROR_VERSION,
                "PC协议尽早拒绝错误Version");
 
     memcpy(packet, (uint8_t[]){0U, 0U, 0U, PC_PROTOCOL_HEADER_SIZE,
                                0U, 1U, 0U, 7U}, 8U);
-    pc_protocol_stream_reset(&stream);
+    pc_sm_reset(&stream);
     for (size_t i = 0U; i < 8U; i++) {
-        feed_result = pc_protocol_stream_push_byte(&stream, packet[i]);
+        feed_result = pc_sm_feed(&stream, packet[i]);
     }
-    mock_check(feed_result == PC_PROTOCOL_FEED_ERROR &&
-               pc_protocol_stream_error(&stream) == PC_PROTOCOL_ERROR_FLAG,
+    mock_check(feed_result == PC_SM_FEED_ERROR &&
+               pc_sm_error(&stream) == PC_SM_ERROR_FLAG,
                "PC协议尽早拒绝错误Flag");
 
     mock_check(pc_json_parse_object((const uint8_t *)duplicate_json,
@@ -816,28 +828,59 @@ static void test_pc_test_json_contract(void)
         .service_id = 0x0100U,
         .sequence = 0x12345678UL,
     };
-    pc_protocol_stream_t response_stream;
+    pc_sm_t response_stream;
     pc_protocol_frame_t response_frame;
-    pc_protocol_feed_result_t response_feed = PC_PROTOCOL_FEED_MORE;
+    pc_sm_feed_result_t response_feed = PC_SM_FEED_MORE;
     mock_check(pc_protocol_build_response(
                    &pc_request, PC_COMMAND_TEST_RESULT_REPORT,
                    (const uint8_t *)result_json, strlen(result_json),
                    response_packet, sizeof(response_packet),
                    &response_length) == 0,
                "PC响应组帧器接受测试结果JSON");
-    pc_protocol_stream_reset(&response_stream);
+    pc_sm_init(&response_stream);
     for (uint32_t i = 0U; i < response_length; i++) {
-        response_feed = pc_protocol_stream_push_byte(&response_stream,
-                                                     response_packet[i]);
+        response_feed = pc_sm_feed(&response_stream, response_packet[i]);
     }
-    mock_check(response_feed == PC_PROTOCOL_FEED_FRAME_READY &&
-               pc_protocol_stream_get_frame(&response_stream,
-                                            &response_frame) == 0 &&
+    mock_check(response_feed == PC_SM_FEED_FRAME_READY &&
+               pc_sm_get_frame(&response_stream, &response_frame) == 0 &&
                response_frame.service_id == pc_request.service_id &&
                response_frame.command_id == PC_COMMAND_TEST_RESULT_REPORT &&
                response_frame.sequence == pc_request.sequence,
                "PC响应原样回显请求Seq且不使用RK Seq");
     cJSON_Delete(root);
+}
+
+/* 直接执行正式dispatch；使用心跳避免Mock镜像改写W25Q256正式FRU扇区。 */
+static void test_pc_dispatch(void)
+{
+    static const uint8_t empty_json[] = {'{', '}'};
+    const pc_protocol_frame_t request = {
+        .service_id = 0x1234U,
+        .command_id = PC_COMMAND_CLIENT_HEARTBEAT,
+        .sequence = 0x55667788UL,
+        .json = empty_json,
+        .json_length = sizeof(empty_json),
+    };
+    pc_dispatch_response_t response;
+    pc_sm_t response_sm;
+    pc_protocol_frame_t response_frame;
+    pc_sm_feed_result_t feed = PC_SM_FEED_MORE;
+
+    mock_check(pc_dispatch_handle(&request, &response) ==
+                   PC_DISPATCH_RESPONSE_READY &&
+               response.length != 0U,
+               "PC dispatch生成心跳响应");
+
+    pc_sm_init(&response_sm);
+    for (uint32_t i = 0U; i < response.length; i++) {
+        feed = pc_sm_feed(&response_sm, response.data[i]);
+    }
+    mock_check(feed == PC_SM_FEED_FRAME_READY &&
+               pc_sm_get_frame(&response_sm, &response_frame) == 0 &&
+               response_frame.service_id == request.service_id &&
+               response_frame.command_id == PC_COMMAND_SERVER_HEARTBEAT &&
+               response_frame.sequence == request.sequence,
+               "PC dispatch响应命令并回显ServiceID/Seq");
 }
 
 void StartDriverMockTestTask(void *argument)
@@ -854,6 +897,7 @@ void StartDriverMockTestTask(void *argument)
     test_lpddr_power_idd_bias_flow();
     test_pc_protocol_and_json();
     test_pc_test_json_contract();
+    test_pc_dispatch();
 
     mock_uart_printf("RESULT: %lu PASS, %lu FAIL\r\n",
                      (unsigned long)s_pass_count, (unsigned long)s_fail_count);

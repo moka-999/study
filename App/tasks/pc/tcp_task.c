@@ -5,14 +5,14 @@
  * 协议边界：本任务只拥有PC TCP连接和PC u32 Seq。不得把RK u64 Seq直接写入
  * PC响应；业务响应必须回显相应PC请求Seq，跨协议关联由后续适配层维护。
  *
- * 正式镜像: LWIP就绪 → bind 8888 → accept → PC固定头组帧 → cJSON严格解析。
- * 当前只校验已确认的START_TEST字段；PC-RK业务转换和正式响应格式尚未冻结，
- * 因此本任务不会编造ACK，也不会把RK TLV或监测文本原样发给PC。
- * PC网络验收镜像: 固定18字节头+cJSON解析后原样回显，仅验证传输框架，
+ * 正式镜像: LWIP就绪 → bind 8888 → accept → PC状态机 → 请求分发层。
+ * JSON解析、命令校验和本地响应均由pc_dispatch负责；本任务不理解业务字段，
+ * 也不会把RK TLV或监测文本原样发给PC。
+ * PC网络验收镜像: 固定18字节头+dispatch校验后原样回显，仅验证传输框架，
  * 不定义业务响应；由ENABLE_PC_PROTOCOL_NET_TEST隔离。
  *
  * 数据流:
- *   PC → TCP 8888 → pc_protocol_stream → cJSON → 后续PC业务适配层
+ *   PC → TCP 8888 → pc_state_machine → pc_dispatch → 后续业务适配层
  *   后续适配层 → 独立RK Seq/TLV → RK3588；响应再映射回原PC Seq
  * ===================================================================
  */
@@ -22,16 +22,18 @@
 #include "led.h"
 #include "lwip/sockets.h"
 #include "lwip/netif.h"
-#include "pc_protocol.h"
-#include "pc_command.h"
-#include "pc_test_message.h"
+#include "pc_dispatch.h"
+#include "pc_state_machine.h"
 #include <string.h>
 #include <errno.h>
 
 #define TCP_PORT    8888
 #define RX_BUF_SIZE 1024
 
-/* send()允许短写；任何PC响应都必须循环发送完整PDU。 */
+/*
+ * send()返回值是“本次实际送入TCP发送缓冲的字节数”，可能小于length，
+ * 这不是协议错误。因此从sent偏移继续发送，直到完整PDU提交或socket报错。
+ */
 static int pc_send_all(int socket_fd, const uint8_t *data, size_t length)
 {
     size_t sent = 0U;
@@ -45,50 +47,11 @@ static int pc_send_all(int socket_fd, const uint8_t *data, size_t length)
 
 extern struct netif gnetif;
 
-/*
- * 业务字段尚未全部冻结。这里只校验已经由PC给出结构的START_TEST，其他命令
- * 先保留严格JSON对象检查，后续在独立业务适配层增加字段合同和响应。
- */
-static int pc_validate_business_json(const pc_protocol_frame_t *frame,
-                                     const cJSON *root)
-{
-    if (frame->command_id == PC_COMMAND_CLIENT_HEARTBEAT) {
-        /* 心跳合同固定为空对象，不允许借心跳隐式扩展状态字段。 */
-        return root->child == NULL ? 0 : -1;
-    }
-    if (frame->command_id == PC_COMMAND_SERVER_HEARTBEAT) {
-        /* 0x0001只允许MCU发给PC，PC反向发送属于方向错误。 */
-        return -1;
-    }
-    if (frame->command_id == PC_COMMAND_START_TEST) {
-        pc_test_start_view_t request;
-        return pc_test_start_parse(root, &request) == PC_TEST_JSON_OK ? 0 : -1;
-    }
-    return 0;
-}
-
-/* 返回20字节心跳响应：18字节头+空JSON对象，Seq由组帧器原样回显。 */
-static int pc_send_heartbeat_response(int socket_fd,
-                                      const pc_protocol_frame_t *request)
-{
-    static const uint8_t empty_json[] = {'{', '}'};
-    uint8_t response[PC_PROTOCOL_HEADER_SIZE + sizeof(empty_json)];
-    uint32_t response_length = 0U;
-
-    if (pc_protocol_build_response(request,
-                                   PC_COMMAND_SERVER_HEARTBEAT,
-                                   empty_json,
-                                   sizeof(empty_json),
-                                   response,
-                                   sizeof(response),
-                                   &response_length) != 0) {
-        return -1;
-    }
-    return pc_send_all(socket_fd, response, response_length);
-}
-
 /* ═══════════════════════════════════════════════════════════════════
- * 诊断跟踪: 放在 .crash_log 节, SWD 可读
+ * 诊断跟踪：放在NOLOAD的.crash_log节，异常/复位后仍可通过SWD读取。
+ * [0]任务启动；[1]LWIP/IP；[2]监听socket；[3]连接生命周期；
+ * [4]断线原因；[5]正式镜像最近收到的合法CommandID；[6..7]预留。
+ * 数值使用0xBEEF前缀，便于和未初始化内存、普通业务数据区分。
  * ═══════════════════════════════════════════════════════════════════ */
 __attribute__((section(".crash_log"), used)) volatile uint32_t tcp_diag[8];
 #define TCP_DIAG(n, v) do { tcp_diag[n] = (uint32_t)(v); } while(0)
@@ -98,7 +61,10 @@ void StartTcpServerTask(void *argument)
     (void)argument;
     TCP_DIAG(0, 0xBEEF0001);
 
-    /* 阶段1: 等待 LWIP 拿到 IP */
+    /*
+     * 阶段1：等待defaultTask完成MX_LWIP_Init并写入本机IP。
+     * 最长约20秒（100次*200ms），失败后删除本任务，避免无IP时反复建socket。
+     */
     int retry = 0;
     while (gnetif.ip_addr.addr == 0) {
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -110,7 +76,7 @@ void StartTcpServerTask(void *argument)
     }
     TCP_DIAG(1, 0xBEEF0002);
 
-    /* 阶段2: 建监听 socket */
+    /* 阶段2：建立整个任务生命周期内唯一的监听socket。 */
     int listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if (listenfd < 0) {
         TCP_DIAG(2, 0xBEEF00E2);       /* socket 失败 */
@@ -118,6 +84,7 @@ void StartTcpServerTask(void *argument)
         return;
     }
 
+    /* 允许固件重启后快速重新bind 8888，减少旧TCP连接TIME_WAIT的影响。 */
     int one = 1;
     setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
@@ -142,7 +109,10 @@ void StartTcpServerTask(void *argument)
     }
     TCP_DIAG(2, 0xBEEF0003);
 
-    /* 阶段3: accept 循环 */
+    /*
+     * 阶段3：单客户端accept循环。listen积压为1，每次只服务当前connfd；
+     * 连接退出后才回到accept，因此不会并发修改同一个协议状态或业务上下文。
+     */
     for (;;) {
         TCP_DIAG(3, 0xBEEF0004);       /* 等待连接 */
         int connfd = accept(listenfd, NULL, NULL);
@@ -153,67 +123,81 @@ void StartTcpServerTask(void *argument)
         TCP_DIAG(3, 0xBEEF0005);       /* 已连接 */
         led_on(LED_CONNECT);
 
-        /* 接收超时100ms，让任务能检查被截断的半帧是否超时。 */
+        /*
+         * recv每100ms返回一次EWOULDBLOCK/EAGAIN，使任务有机会执行下面的
+         * 500ms半帧超时检查；这不是PC心跳周期，也不会主动断开空闲连接。
+         */
         struct timeval rxto;
         rxto.tv_sec  = 0;
         rxto.tv_usec = 100000;
         setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, &rxto, sizeof(rxto));
 
-        /* 每个TCP连接使用独立PC协议状态，断线后不继承半帧。 */
-        pc_protocol_stream_t pc_stream;
-        pc_protocol_stream_reset(&pc_stream);
+        /*
+         * 每个TCP连接使用独立PC协议状态，断线后不继承半帧。rx只承接一次
+         * recv的临时数据；pc_sm内部缓冲才保存跨多次recv仍未收齐的PDU。
+         */
+        pc_sm_t pc_sm;
+        pc_sm_init(&pc_sm);
         TickType_t pc_last_byte_tick = xTaskGetTickCount();
         uint8_t rx[RX_BUF_SIZE];
 
-        /* 阶段4: 服务连接 */
+        /* 阶段4：服务当前连接，任何致命协议错误都跳出并关闭connfd。 */
         for (;;) {
             int n = recv(connfd, rx, sizeof(rx), 0);
 
             if (n > 0) {
                 int close_for_protocol_error = 0;
                 pc_last_byte_tick = xTaskGetTickCount();
+                /*
+                 * 逐字节喂流解析器是为了处理任意TCP切分。完成一帧并reset后，
+                 * 循环会继续消费rx剩余字节，所以一次recv中的多个粘包不会丢失。
+                 */
                 for (int i = 0; i < n; i++) {
-                    pc_protocol_feed_result_t result =
-                        pc_protocol_stream_push_byte(&pc_stream, rx[i]);
-                    if (result == PC_PROTOCOL_FEED_ERROR) {
+                    pc_sm_feed_result_t result = pc_sm_feed(&pc_sm, rx[i]);
+                    if (result == PC_SM_FEED_ERROR) {
                         close_for_protocol_error = 1;
                         break;
                     }
-                    if (result == PC_PROTOCOL_FEED_FRAME_READY) {
+                    if (result == PC_SM_FEED_FRAME_READY) {
                         pc_protocol_frame_t frame;
-                        cJSON *root = NULL;
-                        if (pc_protocol_stream_get_frame(&pc_stream, &frame) != 0 ||
-                            pc_json_parse_object(frame.json, frame.json_length,
-                                                 &root, NULL) != PC_JSON_OK ||
-                            pc_validate_business_json(&frame, root) != 0) {
-                            cJSON_Delete(root);
+                        pc_dispatch_response_t response;
+                        pc_dispatch_result_t dispatch_result;
+                        /*
+                         * 状态机只负责组帧；JSON语法、命令方向、业务字段以及
+                         * 本地同步响应统一交给dispatch，TCP任务不再理解这些细节。
+                         */
+                        if (pc_sm_get_frame(&pc_sm, &frame) != 0) {
                             close_for_protocol_error = 1;
                             break;
                         }
-                        cJSON_Delete(root);
-
-                        if (frame.command_id == PC_COMMAND_CLIENT_HEARTBEAT) {
-                            if (pc_send_heartbeat_response(connfd, &frame) != 0) {
-                                close_for_protocol_error = 1;
-                                break;
-                            }
+                        dispatch_result = pc_dispatch_handle(&frame, &response);
+                        if (dispatch_result == PC_DISPATCH_ERROR ||
+                            (dispatch_result == PC_DISPATCH_RESPONSE_READY &&
+                             pc_send_all(connfd, response.data,
+                                         response.length) != 0)) {
+                            close_for_protocol_error = 1;
+                            break;
                         }
 #if defined(ENABLE_PC_PROTOCOL_NET_TEST) && ENABLE_PC_PROTOCOL_NET_TEST
                         /*
-                         * 除已冻结心跳外，测试镜像只回显完整PDU：验证Length、Seq、
-                         * UTF-8和TCP边界，不把回显伪装成正式业务响应。
+                         * 没有正式同步响应的命令在测试镜像中才原样回显，以验证
+                         * TCP边界；dispatch已生成的心跳/查询响应绝不能再回显一次。
                          */
-                        if (frame.command_id != PC_COMMAND_CLIENT_HEARTBEAT &&
-                            pc_send_all(connfd, pc_stream.buffer,
+                        if (dispatch_result == PC_DISPATCH_NO_RESPONSE &&
+                            pc_send_all(connfd, pc_sm_frame_data(&pc_sm),
                                         frame.length) != 0) {
                             close_for_protocol_error = 1;
                             break;
                         }
 #else
-                        /* 记录最近收到的合法PC命令，便于SWD确认正式入口已经生效。 */
+                        /*
+                         * 其他命令目前只验证并记录，不回临时ACK，避免PC工程师把
+                         * 尚未冻结的行为当成正式合同；业务适配层接入后在这里投递。
+                         */
                         TCP_DIAG(5, frame.command_id);
 #endif
-                        pc_protocol_stream_reset(&pc_stream);
+                        /* frame.json借用状态机缓冲，必须在处理完成后再reset。 */
+                        pc_sm_reset(&pc_sm);
                     }
                 }
                 if (close_for_protocol_error) {
@@ -221,17 +205,20 @@ void StartTcpServerTask(void *argument)
                     break;
                 }
             } else if (n == 0) {
-                /* 对端关闭 */
+                /* TCP有序关闭：PC调用close/shutdown，当前连接生命周期结束。 */
                 TCP_DIAG(4, 0xBEEF00E5);
                 break;
             } else if (errno != EWOULDBLOCK && errno != EAGAIN) {
-                /* 连接错误 (非超时) */
+                /* 负数且不是SO_RCVTIMEO产生的暂时无数据，属于真实socket错误。 */
                 TCP_DIAG(4, 0xBEEF00E6);
                 break;
             }
 
-            /* 半帧超时复位: 防止截断帧长期占住单客户端服务器。 */
-            if (pc_stream.received != 0U &&
+            /*
+             * 半帧超时直接关闭而非仅reset：截断正文后已无法可靠确认下一字节
+             * 是旧正文还是新帧头。关闭可让PC以一个干净的新连接重试。
+             */
+            if (pc_sm_is_receiving(&pc_sm) &&
                 (xTaskGetTickCount() - pc_last_byte_tick) > pdMS_TO_TICKS(500U)) {
                 TCP_DIAG(4, 0xBEEF00E8);
                 break;

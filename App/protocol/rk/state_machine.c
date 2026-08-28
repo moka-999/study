@@ -3,7 +3,7 @@
  * MCU-RK TLV 帧解析状态机 — 逐字节实现
  * ===================================================================
  *
- * 仅用于MCU-RK串口链路；PC-MCU TCP必须使用pc_protocol_stream_t。
+ * 仅用于MCU-RK串口链路；PC-MCU TCP使用独立的pc_state_machine模块。
  *
  * 帧布局:
  *   [0] 0x5A            Sync

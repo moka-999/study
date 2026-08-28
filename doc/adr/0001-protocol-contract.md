@@ -22,7 +22,7 @@
 5. PC协议必须限制PDU长度并正确处理TCP半包、粘包和连续多帧；Length字段为u32，MCU完整PDU上限为4096字节，命令枚举和JSON字段分批冻结。
 6. B1–B2 MCU SPI仍只冻结保活电气基线，不承载温控或其他业务命令。
 
-PC固定头流式组帧和cJSON严格入口已作为独立模块实现，并已接入正式TCP任务；PC输入不再进入RK TLV状态机，RK原始TLV和监测文本也不再直接发给PC。专用回显镜像仍只验证传输边界，不是业务响应合同。下一阶段增加PC Seq到独立RK Seq的业务映射。
+PC固定头流式组帧由独立`pc_state_machine`显式状态机承担；cJSON解析、CommandID校验和本地响应生成集中在`pc_dispatch`；`pc_protocol`只保留通用JSON安全入口和固定头响应组帧器。TCP任务仅负责socket生命周期、状态机编排、发送和超时。PC输入不再进入RK TLV状态机，RK原始TLV和监测文本也不再直接发给PC。专用回显镜像仍只验证传输边界，不是业务响应合同。下一阶段增加PC Seq到独立RK Seq的业务映射。
 
 PC工程师提供的`Packet/TcpServer/CommandEnum`草案作为线格式输入：18字节字段顺序、完整PDU Length、大端、Version=1和Flag=8与本ADR一致。其Windows示例中的9000端口、16MiB上限及多客户端线程不直接约束MCU；本项目采用TCP:8888单客户端和4096字节完整PDU上限，响应必须原样回显请求Seq。
 

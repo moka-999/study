@@ -23,7 +23,10 @@ FORMAT_VERSION = 1
 SECTOR_SIZE = 0x1000
 HEADER_FORMAT = "<IHHIIII8s"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-FRU_FORMAT = "<HH32s32s32s16s16s6sBB4s4s4sH16s22s"
+# configured_gateway后补1字节，与C结构中service_port的uint16_t对齐一致。
+# v2在v1站点标签后追加tester_name和test_board，保留旧字段偏移。
+FRU_FORMAT = "<HH32s32s16s16s6sB4s4s4sxH16s32s32s22s"
+FRU_SIZE = 224
 
 
 def header_define(name: str) -> int:
@@ -133,14 +136,15 @@ def verify_partition_map() -> None:
 def verify_crc_and_payload_layout() -> None:
     assert zlib.crc32(b"123456789") & 0xFFFFFFFF == 0xCBF43926
     assert HEADER_SIZE == 32
-    assert struct.calcsize(PAYLOAD_FORMAT) == STRUCT_SIZE == 96
-    assert struct.calcsize(FRU_FORMAT) == 192
+    assert struct.calcsize(PAYLOAD_FORMAT) == STRUCT_SIZE == 76
+    assert struct.calcsize(FRU_FORMAT) == FRU_SIZE
+    assert header_define("FRU_INFO_SCHEMA_VERSION") == 2
 
 
 def verify_dual_copy_and_power_loss() -> None:
     record_type = 2
-    old_payload = bytes(range(192))
-    new_payload = bytes(reversed(range(192)))
+    old_payload = bytes(range(FRU_SIZE))
+    new_payload = bytes(reversed(range(FRU_SIZE)))
     old_record = make_record(record_type, 7, old_payload)
     new_record = make_record(record_type, 8, new_payload)
 
@@ -158,21 +162,42 @@ def verify_dual_copy_and_power_loss() -> None:
     # 最新副本损坏时回退旧副本；generation 回绕时 0 比 0xFFFFFFFF 新。
     corrupt = bytearray(new_record.ljust(SECTOR_SIZE, b"\xFF"))
     corrupt[HEADER_SIZE + 3] ^= 0x01
-    assert load_latest([slot_a, bytes(corrupt)], record_type, 192).payload == old_payload
+    assert load_latest([slot_a, bytes(corrupt)], record_type, FRU_SIZE).payload == old_payload
     wrapped_old = make_record(record_type, 0xFFFFFFFF, old_payload).ljust(SECTOR_SIZE, b"\xFF")
     wrapped_new = make_record(record_type, 0, new_payload).ljust(SECTOR_SIZE, b"\xFF")
-    assert load_latest([wrapped_old, wrapped_new], record_type, 192).payload == new_payload
+    assert load_latest([wrapped_old, wrapped_new], record_type, FRU_SIZE).payload == new_payload
+
+    # v1的160字节载荷不得被v2当成224字节结构误读。
+    old_v1 = make_record(record_type, 9, bytes(range(160))).ljust(SECTOR_SIZE, b"\xFF")
+    assert load_latest([old_v1, erased], record_type, FRU_SIZE) is None
+
+    # 迁移首写覆盖较旧v1副本；较新v1在新v2完整前一直保留。
+    v1_a = make_record(record_type, 10, bytes(160)).ljust(SECTOR_SIZE, b"\xFF")
+    v1_b = make_record(record_type, 11, bytes([1]) * 160).ljust(SECTOR_SIZE, b"\xFF")
+    migrated_v2 = make_record(record_type, 12, bytes([2]) * FRU_SIZE).ljust(
+        SECTOR_SIZE, b"\xFF")
+    assert load_latest([v1_a, v1_b], record_type, 160).generation == 11
+    assert load_latest([migrated_v2, v1_b], record_type, FRU_SIZE).generation == 12
+    assert load_latest([migrated_v2, v1_b], record_type, 160).generation == 11
 
 
 def verify_source_contract() -> None:
     layout_c = (ROOT / "BSP/Flash/flash_layout.c").read_text(encoding="utf-8")
+    layout_h = (ROOT / "BSP/Flash/flash_layout.h").read_text(encoding="utf-8")
     flash_bsp = (ROOT / "BSP/Flash/flash_bsp.c").read_text(encoding="utf-8")
     qspi = (ROOT / "HAL_Drv/qspi_hw.c").read_text(encoding="utf-8")
     qspi_test = (ROOT / "App/tasks/test/qspi_test.c").read_text(encoding="utf-8")
+    tester_info = (ROOT / "App/protocol/pc/pc_tester_info.c").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     linker = (ROOT / "STM32H743xx_FLASH.ld").read_text(encoding="utf-8")
 
     assert "generation_is_newer" in layout_c and "payload_crc32" in layout_c
+    assert "offsetof(fru_info_t, tester_name) == 138U" in layout_h
+    assert "offsetof(fru_info_t, test_board) == 170U" in layout_h
+    assert "fru_info_load_legacy_v1" in layout_c
+    assert "select_legacy_fru_target" in layout_c
+    for removed_field in ("flags", "build_number", "git_commit", "part_number", "mac_valid"):
+        assert removed_field not in layout_h, f"精简布局不应再包含字段: {removed_field}"
     assert "fixed_string_is_terminated" in layout_c, "定长FRU字符串必须校验NUL结尾"
     assert "ipv4_is_zero" in layout_c, "静态模式必须拒绝全零IP和掩码"
     for field in (
@@ -181,6 +206,8 @@ def verify_source_contract() -> None:
         "configured_gateway",
         "service_port",
         "site_label",
+        "tester_name",
+        "test_board",
     ):
         assert field in layout_c or field in (
             ROOT / "BSP/Flash/flash_layout.h"
@@ -192,6 +219,10 @@ def verify_source_contract() -> None:
     assert "0x01FFE000UL" in qspi_test, "真板测试必须覆盖16MiB以上四字节地址"
     assert "SELF_TEST_ALIAS_ADDRESS" in qspi_test, "高地址测试必须检查24位地址回卷"
     assert "firmware_version_save" in qspi_test and "fru_info_save" in qspi_test
+    assert 'TESTER_PRODUCT_NAME        "LPDDR4/X_200B"' in tester_info
+    assert 'TESTER_HARDWARE_REVISION   "D00"' in tester_info
+    assert 'TESTER_BOARD_NAME          "RK3588_test"' in tester_info
+    assert "fru_info_load" in tester_info and "fru_info_save" in tester_info
     assert "NVIC_SystemReset" in qspi_test, "真板测试必须验证复位后的数据保持"
     assert "W25Q_CAPACITY - W25Q_SECTOR_SIZE" not in qspi_test
     assert "ENABLE_FLASH_SELF_TEST" in cmake
@@ -211,7 +242,7 @@ def verify_current_build_outputs() -> None:
     image = image_path.read_bytes()
     assert manifest["image_length"] == len(image)
     assert manifest["image_crc32"] == f"0x{zlib.crc32(image) & 0xFFFFFFFF:08X}"
-    assert len(payload_path.read_bytes()) == 96
+    assert len(payload_path.read_bytes()) == STRUCT_SIZE
 
 
 def main() -> None:
@@ -220,7 +251,7 @@ def main() -> None:
     verify_dual_copy_and_power_loss()
     verify_source_contract()
     verify_current_build_outputs()
-    print("flash_layout: 32MiB partition, CRC32, version payload and dual-copy FRU PASS")
+    print("flash_layout: 32MiB partition, CRC32, version payload and dual-copy FRU v2 PASS")
     print("power-loss model: every byte interruption point recovered old or complete new record")
 
 

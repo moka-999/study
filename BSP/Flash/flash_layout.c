@@ -17,14 +17,8 @@
 #ifndef FIRMWARE_VERSION_PATCH
 #define FIRMWARE_VERSION_PATCH 0
 #endif
-#ifndef FIRMWARE_BUILD_NUMBER
-#define FIRMWARE_BUILD_NUMBER 0
-#endif
 #ifndef FIRMWARE_BUILD_TIME_UTC
 #define FIRMWARE_BUILD_TIME_UTC "unknown"
-#endif
-#ifndef FIRMWARE_GIT_COMMIT
-#define FIRMWARE_GIT_COMMIT "unknown"
 #endif
 #ifndef FIRMWARE_BUILD_ID
 #define FIRMWARE_BUILD_ID "unknown"
@@ -32,10 +26,6 @@
 #ifndef FIRMWARE_TARGET
 #define FIRMWARE_TARGET "apollo-v2"
 #endif
-#ifndef FIRMWARE_GIT_DIRTY
-#define FIRMWARE_GIT_DIRTY 0
-#endif
-
 /*
  * 当前运行镜像的编译期身份。独立段由链接脚本 KEEP，即使 PC 查询命令尚未
  * 接入，也能在 ELF/量产镜像中定位。长度和 CRC 不能自引用，交由清单填写。
@@ -47,12 +37,9 @@ static const firmware_version_info_t s_current_firmware_version
     .version_major  = FIRMWARE_VERSION_MAJOR,
     .version_minor  = FIRMWARE_VERSION_MINOR,
     .version_patch  = FIRMWARE_VERSION_PATCH,
-    .flags          = FIRMWARE_GIT_DIRTY ? FIRMWARE_VERSION_FLAG_GIT_DIRTY : 0U,
-    .build_number   = FIRMWARE_BUILD_NUMBER,
     .image_length   = 0U,
     .image_crc32    = 0U,
     .build_time_utc = FIRMWARE_BUILD_TIME_UTC,
-    .git_commit     = FIRMWARE_GIT_COMMIT,
     .build_id       = FIRMWARE_BUILD_ID,
     .target         = FIRMWARE_TARGET,
 };
@@ -71,6 +58,31 @@ typedef struct {
     uint32_t payload_size;
 } record_area_t;
 
+/*
+ * FRU v1只用于从已量产/已调试的Flash平滑迁移。它与当前v2的
+ * 前138字节字段顺序相同，但在site_label后直接进入22字节保留区。
+ */
+typedef struct {
+    uint16_t schema_version;
+    uint16_t struct_size;
+    char     product_name[32];
+    char     serial_number[32];
+    char     hardware_revision[16];
+    char     manufacturing_date[16];
+    uint8_t  mac_address[6];
+    uint8_t  network_mode;
+    uint8_t  configured_ipv4[4];
+    uint8_t  configured_netmask[4];
+    uint8_t  configured_gateway[4];
+    uint16_t service_port;
+    char     site_label[16];
+    uint8_t  reserved[22];
+} fru_info_v1_t;
+
+_Static_assert(sizeof(fru_info_v1_t) == 160U, "legacy FRU v1 layout changed");
+_Static_assert(offsetof(fru_info_v1_t, site_label) == 122U,
+               "legacy FRU v1 field offset changed");
+
 static const record_area_t s_version_area = {
     FLASH_LAYOUT_VERSION_SLOT_A,
     FLASH_LAYOUT_VERSION_SLOT_B,
@@ -83,6 +95,13 @@ static const record_area_t s_fru_area = {
     FLASH_LAYOUT_FRU_SLOT_B,
     FLASH_RECORD_TYPE_FRU,
     sizeof(fru_info_t),
+};
+
+static const record_area_t s_fru_v1_area = {
+    FLASH_LAYOUT_FRU_SLOT_A,
+    FLASH_LAYOUT_FRU_SLOT_B,
+    FLASH_RECORD_TYPE_FRU,
+    sizeof(fru_info_v1_t),
 };
 
 uint32_t flash_crc32(const uint8_t *data, uint32_t length)
@@ -142,8 +161,6 @@ static int firmware_info_is_valid(const firmware_version_info_t *info)
            info->struct_size == sizeof(*info) &&
            fixed_string_is_terminated(info->build_time_utc,
                                       sizeof(info->build_time_utc)) &&
-           fixed_string_is_terminated(info->git_commit,
-                                      sizeof(info->git_commit)) &&
            fixed_string_is_terminated(info->build_id, sizeof(info->build_id)) &&
            fixed_string_is_terminated(info->target, sizeof(info->target));
 }
@@ -153,12 +170,36 @@ static int fru_is_valid(const fru_info_t *fru)
     return fru != NULL &&
            fru->schema_version == FRU_INFO_SCHEMA_VERSION &&
            fru->struct_size == sizeof(*fru) &&
-           fru->mac_valid <= 1U &&
            fru->network_mode <= FRU_NETWORK_MODE_DHCP &&
            fixed_string_is_terminated(fru->product_name,
                                       sizeof(fru->product_name)) &&
-           fixed_string_is_terminated(fru->part_number,
-                                      sizeof(fru->part_number)) &&
+           fixed_string_is_terminated(fru->serial_number,
+                                      sizeof(fru->serial_number)) &&
+           fixed_string_is_terminated(fru->hardware_revision,
+                                      sizeof(fru->hardware_revision)) &&
+           fixed_string_is_terminated(fru->manufacturing_date,
+                                      sizeof(fru->manufacturing_date)) &&
+           fixed_string_is_terminated(fru->site_label,
+                                      sizeof(fru->site_label)) &&
+           fixed_string_is_terminated(fru->tester_name,
+                                      sizeof(fru->tester_name)) &&
+           fixed_string_is_terminated(fru->test_board,
+                                      sizeof(fru->test_board)) &&
+           (fru->network_mode == FRU_NETWORK_MODE_UNSET ||
+            fru->service_port != 0U) &&
+           (fru->network_mode != FRU_NETWORK_MODE_STATIC ||
+            (!ipv4_is_zero(fru->configured_ipv4) &&
+             !ipv4_is_zero(fru->configured_netmask)));
+}
+
+static int fru_v1_is_valid(const fru_info_v1_t *fru)
+{
+    return fru != NULL &&
+           fru->schema_version == 1U &&
+           fru->struct_size == sizeof(*fru) &&
+           fru->network_mode <= FRU_NETWORK_MODE_DHCP &&
+           fixed_string_is_terminated(fru->product_name,
+                                      sizeof(fru->product_name)) &&
            fixed_string_is_terminated(fru->serial_number,
                                       sizeof(fru->serial_number)) &&
            fixed_string_is_terminated(fru->hardware_revision,
@@ -218,6 +259,49 @@ static slot_state_t read_slot(flash_if_t *flash, const record_area_t *area,
         *header = local_header;
     }
     return SLOT_VALID;
+}
+
+/*
+ * 首次把v1写成v2时，必须先覆盖较旧的v1副本，保留最新v1副本。
+ * 这样即使升级写入中途掉电，下次仍能从最新的旧记录重试迁移。
+ */
+static int select_legacy_fru_target(flash_if_t *flash,
+                                    uint32_t *target_address,
+                                    uint32_t *next_generation)
+{
+    uint8_t probe[sizeof(fru_info_v1_t)];
+    flash_record_header_t header_a;
+    flash_record_header_t header_b;
+    slot_state_t state_a;
+    slot_state_t state_b;
+
+    state_a = read_slot(flash, &s_fru_v1_area,
+                        s_fru_v1_area.slot_a, probe, &header_a);
+    state_b = read_slot(flash, &s_fru_v1_area,
+                        s_fru_v1_area.slot_b, probe, &header_b);
+    if (state_a == SLOT_IO_ERROR || state_b == SLOT_IO_ERROR) return -1;
+
+    if (state_a == SLOT_VALID && state_b == SLOT_VALID) {
+        if (generation_is_newer(header_b.generation, header_a.generation)) {
+            *target_address = s_fru_v1_area.slot_a;
+            *next_generation = header_b.generation + 1U;
+        } else {
+            *target_address = s_fru_v1_area.slot_b;
+            *next_generation = header_a.generation + 1U;
+        }
+        return 1;
+    }
+    if (state_a == SLOT_VALID) {
+        *target_address = s_fru_v1_area.slot_b;
+        *next_generation = header_a.generation + 1U;
+        return 1;
+    }
+    if (state_b == SLOT_VALID) {
+        *target_address = s_fru_v1_area.slot_a;
+        *next_generation = header_b.generation + 1U;
+        return 1;
+    }
+    return 0;
 }
 
 static int load_record(flash_if_t *flash, const record_area_t *area,
@@ -311,8 +395,17 @@ static int save_record(flash_if_t *flash, const record_area_t *area,
         target_address = area->slot_a;
         next_generation = header_b.generation + 1U;
     } else {
-        target_address = area->slot_a;
-        next_generation = 1U;
+        int legacy_result = 0;
+
+        if (area == &s_fru_area) {
+            legacy_result = select_legacy_fru_target(
+                flash, &target_address, &next_generation);
+            if (legacy_result < 0) return FLASH_STORE_ERR_IO;
+        }
+        if (legacy_result == 0) {
+            target_address = area->slot_a;
+            next_generation = 1U;
+        }
     }
 
     memset(&new_header, 0xFF, sizeof(new_header));
@@ -386,4 +479,41 @@ int fru_info_save(flash_if_t *flash, const fru_info_t *fru,
         return FLASH_STORE_ERR_PARAM;
     }
     return save_record(flash, &s_fru_area, fru, generation);
+}
+
+int fru_info_load_legacy_v1(flash_if_t *flash, fru_info_t *fru,
+                            uint32_t *generation)
+{
+    fru_info_v1_t legacy;
+    int result;
+
+    if (fru == NULL) return FLASH_STORE_ERR_PARAM;
+
+    result = load_record(flash, &s_fru_v1_area, &legacy, generation);
+    if (result != FLASH_STORE_OK) return result;
+    if (!fru_v1_is_valid(&legacy)) return FLASH_STORE_ERR_CORRUPT;
+
+    fru_info_init(fru);
+    memcpy(fru->product_name, legacy.product_name,
+           sizeof(fru->product_name));
+    memcpy(fru->serial_number, legacy.serial_number,
+           sizeof(fru->serial_number));
+    memcpy(fru->hardware_revision, legacy.hardware_revision,
+           sizeof(fru->hardware_revision));
+    memcpy(fru->manufacturing_date, legacy.manufacturing_date,
+           sizeof(fru->manufacturing_date));
+    memcpy(fru->mac_address, legacy.mac_address,
+           sizeof(fru->mac_address));
+    fru->network_mode = legacy.network_mode;
+    memcpy(fru->configured_ipv4, legacy.configured_ipv4,
+           sizeof(fru->configured_ipv4));
+    memcpy(fru->configured_netmask, legacy.configured_netmask,
+           sizeof(fru->configured_netmask));
+    memcpy(fru->configured_gateway, legacy.configured_gateway,
+           sizeof(fru->configured_gateway));
+    fru->service_port = legacy.service_port;
+    memcpy(fru->site_label, legacy.site_label,
+           sizeof(fru->site_label));
+    memcpy(fru->reserved, legacy.reserved, sizeof(fru->reserved));
+    return FLASH_STORE_OK;
 }

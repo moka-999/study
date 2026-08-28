@@ -4,8 +4,7 @@
  * ===================================================================
  *
  * 目标用途: 仅解析 MCU-RK 串口上的 0x5A/0xA5 TLV 字节流。
- * 当前正式TCP仍复用本状态机是待迁移的历史实现；PC-MCU TCP切换完成后必须移除，
- * PC协议应使用 ../pc/pc_protocol.h，禁止把JSON帧送入本状态机。
+ * PC-MCU TCP使用../pc/pc_state_machine.h，禁止把JSON帧送入本状态机。
  *
  * 状态转移:
  *   IDLE → HEADER → DATA → CRC → FOOTER → (complete) → IDLE

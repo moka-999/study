@@ -56,6 +56,24 @@ def expect_disconnect(host: str, port: int, payload: bytes, label: str) -> None:
 def run(host: str, port: int) -> int:
     passed = 0
 
+    # PC查询测试仪信息：请求包体必须为{}，响应命令改为0x0102并回显Seq。
+    query_tester = frame(b"{}", service=0x1234, command=0x0101,
+                         sequence=0x55667788)
+    with connect(host, port) as connection:
+        connection.sendall(query_tester)
+        header = recv_exact(connection, HEADER_SIZE)
+        fields = struct.unpack(">IHHHHIH", header)
+        assert fields[1:] == (VERSION, FLAG_JSON, 0x1234, 0x0102,
+                              0x55667788, 0)
+        body = recv_exact(connection, fields[0] - HEADER_SIZE)
+    assert json.loads(body.decode("utf-8")) == {
+        "testerName": "LPDDR4/X_200B",
+        "testerVersion": "D00",
+        "testBoard": "RK3588_test",
+    }
+    print("[PASS] 0x0101查询测试仪信息、0x0102响应与Seq回显")
+    passed += 1
+
     # PC主动心跳：MCU使用响应命令0x0001并原样回显PC请求Seq。
     heartbeat = frame(b"{}", command=0x0002, sequence=0x89ABCDEF)
     with connect(host, port) as connection:
@@ -126,7 +144,9 @@ def run(host: str, port: int) -> int:
         (frame(b'{"algorithmName":"algorithmName"}', command=0x0103),
          "START_TEST缺少algorithmIndex"),
         (frame(b'{"extra":1}', command=0x0002), "心跳JSON不是空对象"),
+        (frame(b'{"extra":1}', command=0x0101), "测试仪信息查询JSON不是空对象"),
         (frame(b'{}', command=0x0001), "PC发送MCU方向心跳命令"),
+        (frame(b'{}', command=0x0102), "PC发送MCU方向测试仪信息响应命令"),
     )
     for payload, label in invalid_cases:
         expect_disconnect(host, port, payload, label)

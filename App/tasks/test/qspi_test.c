@@ -262,7 +262,6 @@ static int verify_version_records(void)
     }
 
     expected = *firmware_version_current();
-    expected.flags |= FIRMWARE_VERSION_FLAG_IMAGE_VALID;
     expected.image_length = 0x00123456UL;
     expected.image_crc32 = 0x89ABCDEFUL;
 
@@ -306,18 +305,18 @@ static void fill_test_fru(fru_info_t *fru, const char *site_label)
 
     fru_info_init(fru);
     snprintf(fru->product_name, sizeof(fru->product_name), "LPDDR4-B1");
-    snprintf(fru->part_number, sizeof(fru->part_number), "B1-APOLLO-TEST");
     snprintf(fru->serial_number, sizeof(fru->serial_number), "SELFTEST-0001");
     snprintf(fru->hardware_revision, sizeof(fru->hardware_revision), "V2");
     snprintf(fru->manufacturing_date, sizeof(fru->manufacturing_date), "2026-08-24");
     memcpy(fru->mac_address, mac, sizeof(mac));
-    fru->mac_valid = 1U;
     fru->network_mode = FRU_NETWORK_MODE_STATIC;
     memcpy(fru->configured_ipv4, ipv4, sizeof(ipv4));
     memcpy(fru->configured_netmask, netmask, sizeof(netmask));
     memcpy(fru->configured_gateway, gateway, sizeof(gateway));
     fru->service_port = 8888U;
     snprintf(fru->site_label, sizeof(fru->site_label), "%s", site_label);
+    snprintf(fru->tester_name, sizeof(fru->tester_name), "LPDDR4/X_200B");
+    snprintf(fru->test_board, sizeof(fru->test_board), "RK3588_test");
 }
 
 static int verify_fru_records(void)

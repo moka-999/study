@@ -23,6 +23,7 @@
 #define FLASH_LAYOUT_H
 
 #include "hal_if.h"
+#include <stddef.h>
 #include <stdint.h>
 
 /* W25Q256 固定容量与最小擦除单位。这里重复声明是为了让布局可独立审查。 */
@@ -85,13 +86,11 @@ typedef struct {
 } flash_record_header_t;
 
 #define FIRMWARE_VERSION_SCHEMA_VERSION     1U
-#define FIRMWARE_VERSION_FLAG_IMAGE_VALID   (1U << 0)
-#define FIRMWARE_VERSION_FLAG_GIT_DIRTY     (1U << 1)
 
 /*
- * 固件版本载荷（固定 96 字节）。
- * image_length/image_crc32 由固件打包步骤填写；若尚未打包，二者为 0 且
- * FIRMWARE_VERSION_FLAG_IMAGE_VALID 不置位，避免把占位值误当成校验结果。
+ * 固件版本载荷（固定 76 字节）。字段严格保持精简，不保存构建编号、
+ * Git提交号或工作区状态。image_length/image_crc32由链接后的打包步骤填写；
+ * 运行固件内建结构中的这两个字段为0，表示尚未打包写入W25Q256。
  */
 typedef struct {
     uint16_t schema_version;
@@ -99,17 +98,14 @@ typedef struct {
     uint16_t version_major;
     uint16_t version_minor;
     uint16_t version_patch;
-    uint16_t flags;
-    uint32_t build_number;
     uint32_t image_length;
     uint32_t image_crc32;
     char     build_time_utc[24];
-    char     git_commit[16];
     char     build_id[16];
     char     target[16];
 } firmware_version_info_t;
 
-#define FRU_INFO_SCHEMA_VERSION             1U
+#define FRU_INFO_SCHEMA_VERSION             2U
 
 typedef enum {
     FRU_NETWORK_MODE_UNSET  = 0,  /* 未写入网络配置，使用板型固件默认值 */
@@ -118,29 +114,30 @@ typedef enum {
 } fru_network_mode_t;
 
 /*
- * FRU v1 基础字段（固定 192 字节）。
- * 当前字段覆盖产品名、料号、序列号、硬件版本、生产日期、网络配置、
- * 可选 MAC 和站点标签。网络字段是持久化配置，不等同于运行时实际地址；
+ * FRU v2 基础字段（固定 224 字节）。
+ * 当前字段覆盖产品名、序列号、硬件版本、生产日期、MAC、网络配置和
+ * 站点标签，并新增PC协议明确需要的测试仪名称和测试板名称。网络字段是
+ * 持久化配置，不等同于运行时实际地址；
  * PC 查询时必须同时读取 lwIP 当前地址。
- * 产品字段尚未最终冻结；以后新增字段只能占用 reserved 或提升 schema，
- * 不能改变 v1 已有字段的偏移。
+ * MAC全0表示未配置。以后新增字段只能占用reserved或提升schema，不能改变
+ * v2已有字段的偏移。
  */
 typedef struct {
     uint16_t schema_version;
     uint16_t struct_size;
     char     product_name[32];
-    char     part_number[32];
     char     serial_number[32];
     char     hardware_revision[16];
     char     manufacturing_date[16];
     uint8_t  mac_address[6];
-    uint8_t  mac_valid;
     uint8_t  network_mode;
     uint8_t  configured_ipv4[4];
     uint8_t  configured_netmask[4];
     uint8_t  configured_gateway[4];
     uint16_t service_port;
     char     site_label[16];
+    char     tester_name[32];
+    char     test_board[32];
     uint8_t  reserved[22];
 } fru_info_t;
 
@@ -153,7 +150,10 @@ typedef enum {
     FLASH_STORE_ERR_VERIFY        = -5,
 } flash_store_status_t;
 
-/* 当前固件内建版本。镜像长度/CRC 在生成打包清单后才有效。 */
+/*
+ * 当前固件的编译期身份，仅供打包/初始写入/自检使用。
+ * PC的信息类响应禁止直接使用它，必须读取W25Q256中的持久化记录。
+ */
 const firmware_version_info_t *firmware_version_current(void);
 
 /* 初始化一个空白但格式有效的 FRU，供生产写入工具逐项填写。 */
@@ -168,12 +168,26 @@ int fru_info_load(flash_if_t *flash, fru_info_t *fru, uint32_t *generation);
 int fru_info_save(flash_if_t *flash, const fru_info_t *fru,
                   uint32_t *generation);
 
+/*
+ * 仅供持久化格式升级使用：读取旧160字节FRU v1，并转换为
+ * RAM中的v2结构。本函数不写Flash，转换后由调用者补齐新字段并保存。
+ */
+int fru_info_load_legacy_v1(flash_if_t *flash, fru_info_t *fru,
+                            uint32_t *generation);
+
 /* IEEE CRC-32，供离线打包工具和后续 OTA 镜像校验共用。 */
 uint32_t flash_crc32(const uint8_t *data, uint32_t length);
 
 _Static_assert(sizeof(flash_record_header_t) == 32U, "flash record header size changed");
-_Static_assert(sizeof(firmware_version_info_t) == 96U, "firmware version layout changed");
-_Static_assert(sizeof(fru_info_t) == 192U, "FRU v1 layout changed");
+_Static_assert(sizeof(firmware_version_info_t) == 76U, "firmware version layout changed");
+_Static_assert(sizeof(fru_info_t) == 224U, "FRU v2 layout changed");
+/* 持久化ABI不能只看总长；锁定新字段与保留区的实际偏移。 */
+_Static_assert(offsetof(fru_info_t, tester_name) == 138U,
+               "FRU tester_name offset changed");
+_Static_assert(offsetof(fru_info_t, test_board) == 170U,
+               "FRU test_board offset changed");
+_Static_assert(offsetof(fru_info_t, reserved) == 202U,
+               "FRU reserved offset changed");
 _Static_assert(FLASH_LAYOUT_OTA_SLOT_A_BASE + FLASH_LAYOUT_OTA_SLOT_SIZE ==
                FLASH_LAYOUT_OTA_SLOT_B_BASE, "OTA slots must be adjacent");
 _Static_assert(FLASH_LAYOUT_RESERVED_DATA_BASE + FLASH_LAYOUT_RESERVED_DATA_SIZE ==

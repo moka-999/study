@@ -1,6 +1,6 @@
 # W25Q256 空间与记录格式
 
-- 状态：v1 基础布局已实现，产品字段仍可通过提升 schema 版本扩展
+- 状态：v2 基础布局已实现，PC查询需要的测试仪名称和测试板名称已持久化
 - 容量：W25Q256JV，256 Mbit = 32 MiB
 - 擦除单位：4 KiB 扇区；写入单位：最多 256 B 页
 - 当前范围：版本信息、FRU、构建清单和自检隔离
@@ -51,40 +51,62 @@
 
 ## 4. 固件版本 v1
 
-固件版本载荷固定 96 字节，包括：
+固件版本载荷固定76字节，只包括：
 
-- major.minor.patch 语义版本；
-- 构建编号、UTC 构建时间；
-- 12 位 Git 提交号和工作区 dirty 标志；
-- 构建类型、目标板；
-- 裸镜像长度和 IEEE CRC-32。
+- `schema_version`和`struct_size`；
+- `major.minor.patch`语义版本；
+- 裸镜像长度和IEEE CRC-32；
+- UTC构建时间；
+- 构建类型和目标板。
 
-运行固件内的 firmware_version_current() 提供编译期身份。镜像长度和 CRC 存在自引用问题，因此内建结构中保持 0 且不置 IMAGE_VALID；链接完成后，构建系统生成：
+不保存构建编号、Git提交号、dirty标志或其他扩展身份。运行固件内的
+`firmware_version_current()`提供编译期身份。镜像长度和CRC存在自引用问题，
+因此内建结构中保持0；链接完成后，构建系统生成：
 
 - build_debug/test.bin：裸 App 镜像；
 - build_debug/test.manifest.json：可读构建清单；
-- build_debug/test.version.bin：与 C 结构完全一致的 96 字节版本载荷。
+- build_debug/test.version.bin：与C结构完全一致的76字节版本载荷。
 
 以后生产工具或 OTA 流程可以把 test.version.bin 交给 firmware_version_save()，不需要修改记录格式。
 项目规定通过 tools/dev.ps1 build/rebuild 构建；脚本每次先快速刷新 CMake，
 确保 UTC 时间和 Git 状态属于本次镜像，而不是首次配置目录的旧值。
 
-## 5. FRU v1
+## 5. FRU v2
 
-FRU 固定 192 字节，当前定义通用基础字段：
+FRU固定224字节，定义以下字段：
 
 - 产品名称；
-- 产品料号；
 - 板卡序列号；
 - 硬件版本；
-- 生产日期（建议 YYYY-MM-DD）；
-- 可选 6 字节 MAC 及有效标志；
+- 生产日期（建议YYYY-MM-DD）；
+- 6字节MAC（全0表示未配置）；
 - 网络模式（未配置/静态/DHCP）；
 - 配置 IPv4、子网掩码、网关和 TCP 服务端口；
-- 最长 15 字节站点标签，例如 B1-03；
-- 22 字节保留区。
+- 最长15字节站点标签，例如`B1-03`；
+- 测试仪名称`tester_name`；
+- 测试板名称`test_board`；
+- 22字节保留区。
 
-字符串是带 NUL 结尾的 UTF-8/ASCII 定长数组。字段尚未经过产品/生产最终评审，因此现阶段只冻结偏移，不自动写入默认内容；扩展优先使用保留区，无法兼容时提升 schema_version，不得悄悄改变 v1 偏移。
+字符串是带NUL结尾的UTF-8/ASCII定长数组。v2只在v1的
+`site_label`后追加两个32字节字段，不改变旧字段偏移。以后扩展优先
+使用保留区，无法兼容时提升`schema_version`。
+
+PC首次查询测试仪信息时，若W25Q256中没有有效v2 FRU，固件会写入
+A/B两个副本。一旦存在有效v2，每次0x0101请求只重新从W25Q256读取，
+不缓存上次信息，也不用编译期常量覆盖。空白或旧格式初始化值为：
+
+| FRU字段 | 当前值 | PC查询映射 |
+|---|---|---|
+| `tester_name` | `LPDDR4/X_200B` | `testerName` |
+| `product_name` | `LPDDR4/X_200B` | 产品名称，与当前测试仪名称一致 |
+| `hardware_revision` | `D00` | `testerVersion` |
+| `test_board` | `RK3588_test` | `testBoard` |
+
+初始写入后会重新从W25Q256读取并校验，TCP响应始终使用实际持久化数据。
+旧v1记录因`schema_version/struct_size`不符合v2而不会被误读。首次查询
+会显式读取160字节v1，保留序列号、MAC、网络配置、生产日期和站点
+标签，再补齐上述四个值并写成v2 A/B副本。迁移首次写入优先覆盖
+较旧v1副本，使最新v1在新v2校验通过前仍可回退。
 
 FRU中的地址表示“期望的持久化配置”，不能冒充运行时地址。后续PC本地管理响应应至少同时返回：lwIP当前IPv4、服务端口、实际MAC、FRU序列号和site_label。这样静态地址、DHCP租约或板卡更换时，PC都能定位到同一逻辑设备。
 

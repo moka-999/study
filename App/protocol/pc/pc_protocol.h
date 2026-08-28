@@ -1,8 +1,8 @@
 /*
- * PC-MCU 协议的传输层与 JSON 入口。
+ * PC-MCU 固定头定义、响应组帧与JSON入口。
  *
- * 本模块只负责固定 18 字节头、TCP 字节流组帧和 JSON 语法安全校验，
- * 不定义 CommandID 含义，也不参与 MCU-RK 的 0x5A/0xA5 TLV 协议。
+ * TCP字节流解析状态已独立到pc_state_machine.h；本模块不定义CommandID
+ * 业务含义，也不参与MCU-RK的0x5A/0xA5 TLV协议。
  */
 #ifndef PC_PROTOCOL_H
 #define PC_PROTOCOL_H
@@ -26,63 +26,31 @@ extern "C" {
 #define PC_PROTOCOL_MAX_PDU       4096U
 #define PC_PROTOCOL_MAX_JSON_SIZE (PC_PROTOCOL_MAX_PDU - PC_PROTOCOL_HEADER_SIZE)
 
-typedef enum {
-    PC_PROTOCOL_ERROR_NONE = 0,
-    PC_PROTOCOL_ERROR_STATE,
-    PC_PROTOCOL_ERROR_LENGTH,
-    PC_PROTOCOL_ERROR_VERSION,
-    PC_PROTOCOL_ERROR_FLAG,
-} pc_protocol_error_t;
-
-typedef enum {
-    PC_PROTOCOL_FEED_ERROR = -1,
-    PC_PROTOCOL_FEED_MORE = 0,
-    PC_PROTOCOL_FEED_FRAME_READY = 1,
-} pc_protocol_feed_result_t;
-
+/*
+ * 已解析的PC帧视图，不拥有任何动态内存。
+ * 除json/json_length外的字段均由18字节头按网络大端序转换为MCU本机整数。
+ */
 typedef struct {
-    uint32_t length;
-    uint16_t version;
-    uint16_t flag;
-    uint16_t service_id;
-    uint16_t command_id;
-    uint32_t sequence; /* PC侧Seq；MCU响应必须原样回显，禁止混用RK侧Seq。 */
-    uint16_t reserved;
-    const uint8_t *json;
-    uint32_t json_length;
+    uint32_t length;       /* 完整PDU字节数：18字节头+JSON正文。 */
+    uint16_t version;      /* 当前必须为PC_PROTOCOL_VERSION。 */
+    uint16_t flag;         /* 当前必须为PC_PROTOCOL_FLAG_JSON。 */
+    uint16_t service_id;   /* 业务服务分类；响应沿用请求值。 */
+    uint16_t command_id;   /* 当前PDU的请求或响应命令号。 */
+    uint32_t sequence;     /* PC侧Seq；响应原样回显，禁止混用RK侧Seq。 */
+    uint16_t reserved;     /* 预留字段；当前发送响应时固定写0。 */
+    const uint8_t *json;   /* 借用PC状态机内部缓冲中的正文，不需要free。 */
+    uint32_t json_length;  /* 正文字节数，不包含额外的'\0'结束符。 */
 } pc_protocol_frame_t;
 
-typedef struct {
-    uint8_t buffer[PC_PROTOCOL_MAX_PDU];
-    uint32_t received;
-    uint32_t expected_length;
-    pc_protocol_error_t error;
-    uint8_t frame_ready;
-} pc_protocol_stream_t;
-
 typedef enum {
-    PC_JSON_OK = 0,
-    PC_JSON_ERROR_ARGUMENT,
-    PC_JSON_ERROR_UTF8,
-    PC_JSON_ERROR_SYNTAX,
-    PC_JSON_ERROR_TRAILING_DATA,
-    PC_JSON_ERROR_ROOT_TYPE,
-    PC_JSON_ERROR_DUPLICATE_KEY,
+    PC_JSON_OK = 0,               /* 严格JSON对象校验通过。 */
+    PC_JSON_ERROR_ARGUMENT,       /* 空指针、空正文或正文长度越界。 */
+    PC_JSON_ERROR_UTF8,           /* 正文不是合法UTF-8字节序列。 */
+    PC_JSON_ERROR_SYNTAX,         /* cJSON报告JSON语法错误。 */
+    PC_JSON_ERROR_TRAILING_DATA,  /* 根对象后仍存在非空白字符。 */
+    PC_JSON_ERROR_ROOT_TYPE,      /* 根节点不是{...}对象。 */
+    PC_JSON_ERROR_DUPLICATE_KEY,  /* 任意层对象包含同名字段。 */
 } pc_json_result_t;
-
-/* 初始化或清空单个 TCP 连接的接收状态；断线和协议错误后都必须调用。 */
-void pc_protocol_stream_reset(pc_protocol_stream_t *stream);
-
-/*
- * 每次送入一个 TCP 字节。返回 FRAME_READY 后，调用者应先取帧和处理 JSON，
- * 再 reset 并继续送入同一 recv() 缓冲中的后续字节，从而自然支持粘包。
- */
-pc_protocol_feed_result_t pc_protocol_stream_push_byte(
-    pc_protocol_stream_t *stream, uint8_t byte);
-
-/* frame 内的 json 指针由 stream 持有，仅在下一次 reset/push 前有效。 */
-int pc_protocol_stream_get_frame(const pc_protocol_stream_t *stream,
-                                 pc_protocol_frame_t *frame);
 
 /*
  * 构造对PC请求的响应头：沿用请求ServiceID并原样回显请求Seq，CommandID由
@@ -95,9 +63,6 @@ int pc_protocol_build_response(const pc_protocol_frame_t *request,
                                uint8_t *output,
                                size_t output_capacity,
                                uint32_t *output_length);
-
-/* 返回最近一次致命组帧错误，供 TCP 层记录诊断后关闭连接。 */
-pc_protocol_error_t pc_protocol_stream_error(const pc_protocol_stream_t *stream);
 
 /*
  * cJSON 的内存钩子是进程级全局配置，必须在创建任何任务前调用一次。

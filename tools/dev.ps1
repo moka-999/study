@@ -94,7 +94,7 @@ if (-not $ninja) {
 }
 if (-not $ninja) { throw 'STM32Cube Ninja not found.' }
 
-# 每次正式构建都快速重新配置一次，用当前 UTC/Git 状态刷新固件版本元数据。
+# 每次正式构建都快速重新配置一次，用当前UTC时间刷新固件版本元数据。
 # 版本宏只属于 flash_layout.c，因此通常只重编译该文件并重新链接。
 $cmake = Find-BundledExe 'cmake' 'cmake.exe'
 if (-not $cmake) {

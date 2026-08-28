@@ -60,7 +60,7 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 
 | 目录 | 内容 |
 |------|------|
-| `App/protocol/pc/` | PC–MCU固定18字节头、cJSON严格解析和PC业务JSON辅助层 |
+| `App/protocol/pc/` | PC–MCU独立字节流状态机、JSON/命令分发、固定头响应组帧和PC业务JSON辅助层 |
 | `App/protocol/rk/` | MCU–RK 0x5A/0xA5、CRC16、TLV状态机和历史分发层 |
 | `App/tasks/pc/` | PC侧TCP server任务；已使用PC固定头/cJSON，业务适配和响应待接入 |
 | `App/tasks/rk/` | RK串口、pending/重传和RK心跳任务 |
@@ -174,10 +174,13 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ⚠️ MCP4725驱动与Boot电压映射已实现；与`pwr_ctrl` reboot联动、PC命令、真实VOUT及RK启动验证尚未完成
 - ✅ `drvTest`已由`ENABLE_DRIVER_SELF_TEST`隔离，默认不创建；开发镜像显式置1才访问新驱动
 - ✅ B1已拆分为同级独立工程`../b1`：46/46静态合同通过，V2验收通过的模块才逐个移植
-- ✅ W25Q256已定义32MiB分区、版本/FRU双副本、网络配置/站点标签、CRC32和构建清单；ARM构建、逐字节掉电模型及V2板载Flash真测通过（JEDEC/QE/跨页/RMW/四字节地址/CRC回退/复位保持）
+- ✅ W25Q256已定义32MiB分区、精简76字节版本载荷、224字节FRU v2、A/B双副本、CRC32和构建清单；FRU新增`tester_name/test_board`，测试仪查询从W25读取；逐字节掉电模型通过，V2板载Flash旧版真测通过（v2待复测）
 - ✅ 2026-08-25：PC传输层已实现并接入正式TCP任务：固定18字节大端头、半包/粘包/连续帧、Version/Flag/Length校验、UTF-8对象与重复键/尾随数据拒绝；cJSON v1.7.19固定接入FreeRTOS堆，深度16。正式TCP已停止解析/回传RK TLV；PC主动心跳合同已实现，专用网络镜像真板17/17且正式镜像心跳响应通过；业务dispatch和PC/RK Seq映射尚未接入
 - ✅ 2026-08-25：上述通用PC帧/cJSON模块已同步到独立B1工程并通过46/46静态合同及ARM构建；B1尚未创建TCP业务任务
 - ✅ 2026-08-25：第一组业务JSON结构已进入类型化辅助层：START_TEST(0x0103)解析algorithmName/algorithmIndex，TEST_RESULT_REPORT(0x0105)生成testResults数组；ServiceID、site/mirror/status业务值域和最大结果数仍待冻结
+- ✅ 2026-08-27：PC测试仪信息查询已接入正式TCP任务：PC发送`CMD_QUERY_TESTER_INFO(0x0101)+{}`后，MCU返回`CMD_TESTER_INFO_RESP(0x0102)`并回显ServiceID/Seq；三个响应字段从W25Q256 FRU v2读取，空白/损坏/旧版记录首次查询时懒写入A/B副本，不在连接建立时主动推送
+- ✅ 2026-08-27：PC字节流解析已从通用协议/JSON模块拆为独立`pc_state_machine.c/.h`，显式使用HEADER/BODY/FRAME_READY/ERROR状态；TCP任务只调用状态机API，未复用MCU–RK状态机
+- ✅ 2026-08-27：PC JSON解析、命令方向/字段校验及本地响应组帧已从`tcp_task`拆入`pc_dispatch.c/.h`；TCP任务只保留socket生命周期、状态机编排、发送和超时处理
 - ✅ 2026-08-24：结果灯业务逻辑已移植B1 PG0-PG5（B1提交`f24473f`），构建通过；红绿/对象顺序和上电毛刺待真板
 - ✅ 2026-08-24：B1取消温控职责，温控改为PC直连B2；B1–B2 SPI仅保活，B1基线为从机Mode 0/硬件NSS
 - 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`CONTEXT.md`
@@ -192,7 +195,8 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 6. **B1–B2 MCU SPI保活**（B2共享总线主机+8个独立CS，8块B1均为SPI2从机；Mode 0/8位MSB/初始1MHz；保活载荷/周期/超时待冻结）
 7. **Boot 模式控制**（MCP4725驱动/映射/V2 Mock与B1软件移植已完成；待reboot联动、PC命令和真板VOUT/RK启动）
 8. **LED结果显示**（3颗双色灯分别显示2组LPDDR4/4X和1组eMCP；另2颗单色灯显示上电/板卡状态，语义待定）
-9. **W25Q256/版本信息**（V2板载自检已闭环；待协议冻结后接PC查询，初版不实现OTA）
+9. **W25Q256/版本信息**（测试仪信息查询已读FRU v2；固件版本查询和FRU量产写入待实现，初版不实现OTA）
+   - 信息类PC响应必须每次读取W25Q256；禁止直接使用`firmware_version_current()`或编译期常量组帧。
 10. B1 板到货后：UART4/USART2 从 CH340 切到 RS0102→RK3588 真机联调（**注意不是 USART1**）
 11. 高波特率（460800/921600）DMA+IDLE（等真机 RS0102）
 

@@ -253,25 +253,25 @@ P24 Table 1已确定0～1.8V的Boot模式目标。3.3V供电下的DAC码可由�
 | # | 任务 | 初版输出 | V2 验证 |
 |---|---|---|---|
 | 8.1 | W25Q256 基础读/写/擦除及边界检查 | 复用现有 `flash_if`，补可重复自检 | 板载 QSPI 自检 |
-| 8.2 | 固件版本元数据 | 语义版本、构建标识、Git提交号、镜像长度/CRC | 编译期/离线单测 |
+| 8.2 | 固件版本元数据 | 精简76字节载荷：语义版本、镜像长度/CRC、构建时间/类型、目标板 | 编译期/离线单测 |
 | 8.3 | PC 查询版本 | 接入PC–MCU新协议；命令枚举和JSON字段待冻结 | Python 黄金帧 |
-| 8.4 | FRU存储 | W25Q256内的版本化记录、CRC和掉电安全更新；字段待产品定义 | Flash Mock+板载QSPI |
+| 8.4 | FRU存储 | v2固定224字节载荷、CRC和掉电安全更新 | Flash Mock+板载QSPI |
 
 初版不实现 OTA 下载、镜像切换、搬移或回滚；这里只保证接口和元数据布局不妨碍后续增加 OTA。
 
-**当前实现（2026-08-24）**：32 MiB 分区、版本/FRU双副本记录、IEEE CRC-32、generation回绕和构建后镜像清单已完成，详见 [flash_layout.md](flash_layout.md)。版本与FRU各用两个独立4 KiB扇区；两个2 MiB OTA槽仅预留地址。ARM构建和逐字节掉电中断离线模型通过；Apollo V2板载W25Q256真板自检也已通过JEDEC/QE、边界、跨页、RMW、16MiB以上四字节地址、A/B CRC回退和软件复位保持。PC查询命令、生产字段评审、量产写入工具和全部OTA行为仍未实现。
+**当前实现（2026-08-27）**：32 MiB 分区、版本/FRU双副本记录、IEEE CRC-32、generation回绕和构建后镜像清单已完成，详见 [flash_layout.md](flash_layout.md)。版本载荷固定为76字节，FRU v2载荷固定为224字节，新增`tester_name/test_board`；版本与FRU各用两个独立4 KiB扇区，两个2 MiB OTA槽仅预留地址。ARM构建和逐字节掉电中断离线模型通过；Apollo V2板载W25Q256旧版自检已通过JEDEC/QE、边界、跨页/RMW、16MiB以上四字节地址、A/B CRC回退和软件复位保持；FRU v2扩展本轮做离线和构建回归，真板复测待执行。测试仪信息查询0x0101/0x0102已读取W25Q256 FRU；固件版本查询、量产写入工具和全部OTA行为仍未实现。
 
 PC板卡定位响应的最小内容已确定为：运行时实际IPv4、TCP端口、实际MAC、FRU序列号、FRU站点标签和固件语义版本。FRU另保存静态/DHCP模式及配置IP；DHCP场景不得把持久化配置地址当作当前地址。CommandID和JSON字段随PC–MCU命令规范冻结，本轮不抢占候选命令号。
 
 ## 9. PC–MCU / MCU–RK 双协议迁移（P0）
 
-**当前状态（2026-08-25）**：PC–MCU不再沿用TLV，改用固定18字节大端头部+UTF-8 JSON；MCU–RK继续使用现有0x5A/0xA5 TLV。两套源码已按`App/protocol/pc/`和`App/protocol/rk/`物理隔离，正式TCP任务已切到PC解析器并停止RK TLV/监测文本原始回传。PC主动心跳固定为请求0x0002/响应0x0001、双方JSON均为`{}`且响应回显Seq；V2真实TCP网络17/0及正式镜像心跳响应通过。业务dispatch和请求到RK Seq的内部映射尚未接入。Length字段为u32，MCU完整PDU上限已确认为4096字节。
+**当前状态（2026-08-27）**：PC–MCU不再沿用TLV，改用固定18字节大端头部+UTF-8 JSON；MCU–RK继续使用现有0x5A/0xA5 TLV。两套源码已按`App/protocol/pc/`和`App/protocol/rk/`物理隔离，PC字节流状态机、JSON/命令dispatch和TCP socket任务三层分离，正式TCP不再回传RK TLV。PC主动心跳固定为请求0x0002/响应0x0001、双方JSON均为`{}`且响应回显Seq；V2真实TCP网络17/0及正式镜像心跳响应通过。本地测试仪信息dispatch已接入，PC业务请求到RK Seq的内部映射尚未接入。Length字段为u32，MCU完整PDU上限为4096字节。
 
 | # | 任务 | 输出 | 验证 |
 |---|---|---|---|
-| 9.1 | ✅ PC帧层：18字节头部解码、总长度上下限、Version/Flag校验 | `pc_protocol.c/.h`，独立于TLV | 离线10/0 + ARM Mock通过 |
+| 9.1 | ✅ PC帧层：18字节头部解码、总长度上下限、Version/Flag校验 | `pc_state_machine.c/.h`独立管理HEADER/BODY/FRAME_READY/ERROR；`pc_protocol.c/.h`只保留响应组帧和JSON入口 | 离线合同 + ARM Mock通过 |
 | 9.2 | ✅ TCP流解析与心跳：半包、粘包、多帧、非法帧断连、PC主动心跳 | 正式TCP:8888已接PC解析器；心跳请求0x0002/响应0x0001并回显Seq | V2真实网络17/0；正式镜像心跳响应通过 |
-| 9.3 | 🟡 PC命令入口：ServiceID/CommandID分发和有上限的JSON包体 | cJSON v1.7.19严格入口已完成；业务枚举/字段未冻结 | 错误JSON已验收；未知命令待业务合同 |
+| 9.3 | 🟡 PC命令入口：ServiceID/CommandID分发和有上限的JSON包体 | 独立`pc_dispatch.c/.h`负责cJSON严格解析、命令校验及本地响应组帧；0x0101/0x0102已接入，TCP任务不理解业务字段 | 离线合同、正式/网络/Mock构建通过，真实网络待复测；未知命令待业务合同 |
 | 9.4 | ✅ MCU–RK隔离：保留现有TLV、CRC、pending、重传和心跳 | RK链路行为不因新增PC模块变化 | 现有65项模型回归 |
 | 9.5 | 双协议转换：独立RK Seq和内部请求映射；PC响应回显请求Seq | 明确的业务适配层，禁止原始帧透传；PC u32 Seq与RK u64 Seq不得混用 | ACK/BUSY/超时/未匹配响应黄金样例 |
 
@@ -283,6 +283,13 @@ PC板卡定位响应的最小内容已确定为：运行时实际IPv4、TCP端�
 代码和Mock；ServiceID、字段业务值域、状态码含义及最大结果数待冻结，详见
 [`pc_json_contract.md`](pc_json_contract.md)。
 
+测试仪信息采用本地请求/响应：PC发送`CMD_QUERY_TESTER_INFO(0x0101)+{}`，
+MCU返回`CMD_TESTER_INFO_RESP(0x0102)`并回显请求`ServiceID/Seq`。连接建立后
+不会主动推送；`testerName/testerVersion/testBoard`分别从W25Q256 FRU v2的
+`tester_name/hardware_revision/test_board`读取。空白或损坏记录会按确认值创建
+A/B双副本；旧v1记录先保留序列号/MAC/网络/日期/站点字段再迁移为v2，
+且首写优先覆盖较旧副本。响应一律在重读校验后组帧。
+
 ## 10. 测试脚本规划
 
 | 脚本 | 覆盖 | 阶段 |
@@ -293,7 +300,7 @@ PC板卡定位响应的最小内容已确定为：运行时实际IPv4、TCP端�
 | `tests/test_boot_mode.py`（待创建） | DAC码映射和I2C请求 | V2 Mock+波形 / B1 真机 |
 | `tests/test_led.py`（待创建） | 结果灯状态映射和GPIO波形 | V2 Mock / B1 真机 |
 | `tests/test_version.py`、`capture_flash_self_test.py` | 分区、CRC、版本载荷、FRU双副本、掉电模型及板载Flash日志；查询响应待协议冻结 | 离线通过 / V2真板通过 |
-| `tests/verify_pc_protocol.py`、`pc_protocol_network_test.py` | PC固定头、cJSON版本、正式TCP无TLV入口、心跳、半包/粘包/连续帧、4KiB边界和非法输入断连 | 离线14/0 / V2真实TCP 17/0 |
+| `tests/verify_pc_protocol.py`、`pc_protocol_network_test.py` | PC固定头、cJSON版本、正式TCP无TLV入口、心跳、测试仪信息查询、半包/粘包/连续帧、4KiB边界和非法输入断连 | 离线15/0；既有V2真实TCP 17/0，新增查询待重新烧录复测 |
 | `tests/test_b2_spi.py`（保活定义后创建） | B1–B2 MCU SPI保活、超时和错误恢复 | B1/B2联合Mock+逻辑分析仪 |
 
 > 当前没有外接模块；TPS62868/PAC1934/AD7124/MCP4725的真实器件回读、输出和精度验证留到B1真板，SPI保活留到B1/B2联合验证。

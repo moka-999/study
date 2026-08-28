@@ -173,8 +173,11 @@ void MX_FREERTOS_Init(void) {
 #else
   /* creation of ledBlinkTask */
   xTaskCreate(StartLedBlinkTask, "ledBlinkTask", 128, NULL, 1, &ledBlinkTaskHandle);
-  /* TCP server — 完整 socket+TLV 协议需 sm(1056)+rxbuf(1024)+frame(1172)+resp(1040)
-     ≈峰值6KB, 4KB(1024字)不够, 加大到 16KB(4096字) */
+  /*
+   * PC TCP server栈设为16KiB（4096个StackType_t）：任务栈上同时存在4KiB
+   * pc_stream、1KiB recv缓冲以及JSON解析/响应临时对象。正式TCP已不再创建
+   * RK TLV状态机；保留余量用于lwIP socket调用和后续业务适配层。
+   */
   xTaskCreate(StartTcpServerTask, "tcp", 4096, NULL, 5, &tcpClientTaskHandle);
   /* 监测任务包含AD/PAC采集栈帧，保留2KiB栈空间。 */
   xTaskCreate(StartMonitorTask, "monitor", 512, NULL, 2, &monitorTaskHandle);
