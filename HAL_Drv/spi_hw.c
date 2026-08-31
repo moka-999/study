@@ -5,7 +5,7 @@
  * 片选由 AD7124 驱动按事务拉低/释放，本文件只负责阻塞式字节收发。
  * SPI2 属于 B1-B2 保活从机，职责不同，禁止在这里复用或导出为 ADC 总线。
  */
-#include "hal_if.h"
+#include "board_interfaces.h"
 #include "main.h"
 
 extern SPI_HandleTypeDef hspi4;

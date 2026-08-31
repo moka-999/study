@@ -5,38 +5,20 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
+# RK物理口仍待真板确认；只选择一路，避免向两个候选控制台同时发送协议。
+set(B1_RK_UART 4 CACHE STRING "B1 RK UART candidate: 4=UART4, 2=USART2")
+set_property(CACHE B1_RK_UART PROPERTY STRINGS 4 2)
+if(NOT B1_RK_UART STREQUAL "4" AND NOT B1_RK_UART STREQUAL "2")
+    message(FATAL_ERROR "B1_RK_UART must be 4 or 2")
+endif()
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # B1版本身份由构建系统统一生成，保持与V2验收格式完全一致。
 set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
 set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
 set(FIRMWARE_VERSION_PATCH 0 CACHE STRING "Firmware semantic version patch")
-set(FIRMWARE_BUILD_NUMBER 0 CACHE STRING "CI or release build number")
 string(TIMESTAMP FIRMWARE_BUILD_TIME_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
-execute_process(
-    COMMAND git -c safe.directory=${CMAKE_CURRENT_SOURCE_DIR} rev-parse --short=12 HEAD
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    OUTPUT_VARIABLE FIRMWARE_GIT_COMMIT
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE FIRMWARE_GIT_RESULT
-)
-if(NOT FIRMWARE_GIT_RESULT EQUAL 0 OR FIRMWARE_GIT_COMMIT STREQUAL "")
-    set(FIRMWARE_GIT_COMMIT "unknown")
-endif()
-execute_process(
-    COMMAND git -c safe.directory=${CMAKE_CURRENT_SOURCE_DIR} status --porcelain
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    OUTPUT_VARIABLE FIRMWARE_GIT_STATUS
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE FIRMWARE_STATUS_RESULT
-)
-if(FIRMWARE_STATUS_RESULT EQUAL 0 AND FIRMWARE_GIT_STATUS STREQUAL "")
-    set(FIRMWARE_GIT_DIRTY 0)
-else()
-    set(FIRMWARE_GIT_DIRTY 1)
-endif()
 
 set(HAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32H7xx_HAL_Driver)
 set(HAL_SOURCES
@@ -95,9 +77,22 @@ add_executable(b1
     HAL_Drv/ddr_power.c
     HAL_Drv/pwr_ctrl.c
     HAL_Drv/memory_monitor.c
-    # PC-MCU协议独立放置；MCU-RK任务层验收后再增加rk目录。
+    HAL_Drv/uart_hw.c
+    HAL_Drv/uart_router.c
+    # 两套协议/任务独立构建；不加入V2测试任务或旧PG12复位分发器。
     App/protocol/pc/pc_protocol.c
+    App/protocol/pc/pc_state_machine.c
+    App/protocol/pc/pc_dispatch.c
+    App/protocol/pc/pc_tester_info.c
     App/protocol/pc/pc_test_message.c
+    App/protocol/rk/crc.c
+    App/protocol/rk/frame.c
+    App/protocol/rk/state_machine.c
+    App/tasks/pc/tcp_task.c
+    App/tasks/rk/rk_task.c
+    App/tasks/rk/hb_task.c
+    App/tasks/rk/rk_link.c
+    App/tasks/common/monitor_task.c
     BSP/AD7124/ad7124.c
     BSP/TPS62868/tps62868.c
     BSP/PAC1934/pac1934.c
@@ -124,6 +119,10 @@ target_include_directories(b1 PRIVATE
     BSP/PAC1934
     BSP/MCP4725
     App/protocol/pc
+    App/protocol/rk
+    App/tasks
+    App/tasks/rk
+    App/tasks/common
     Middlewares/Third_Party/cJSON
     LWIP/App
     LWIP/Target
@@ -144,6 +143,7 @@ target_compile_definitions(b1 PRIVATE
     USE_PWR_LDO_SUPPLY
     # 与V2真实网络验收保持一致，限制畸形JSON的递归内存占用。
     CJSON_NESTING_LIMIT=16
+    B1_RK_UART=${B1_RK_UART}
 )
 
 # 版本宏只作用于持久化布局实现，避免字符串定义散落到业务代码。
@@ -151,10 +151,7 @@ set_property(SOURCE BSP/Flash/flash_layout.c APPEND PROPERTY COMPILE_DEFINITIONS
     FIRMWARE_VERSION_MAJOR=${FIRMWARE_VERSION_MAJOR}
     FIRMWARE_VERSION_MINOR=${FIRMWARE_VERSION_MINOR}
     FIRMWARE_VERSION_PATCH=${FIRMWARE_VERSION_PATCH}
-    FIRMWARE_BUILD_NUMBER=${FIRMWARE_BUILD_NUMBER}
     FIRMWARE_BUILD_TIME_UTC="${FIRMWARE_BUILD_TIME_UTC}"
-    FIRMWARE_GIT_COMMIT="${FIRMWARE_GIT_COMMIT}"
-    FIRMWARE_GIT_DIRTY=${FIRMWARE_GIT_DIRTY}
     FIRMWARE_BUILD_ID="${CMAKE_BUILD_TYPE}"
     FIRMWARE_TARGET="b1-h743"
 )
@@ -162,7 +159,7 @@ target_link_libraries(b1 m)
 target_link_options(b1 PRIVATE -Wl,-Map=b1.map)
 set_target_properties(b1 PROPERTIES ADDITIONAL_CLEAN_FILES b1.map)
 
-# 产出PC/量产工具可直接写入W25Q256的96字节版本载荷及校验清单。
+# 产出PC/量产工具可直接写入W25Q256的76字节版本载荷及校验清单。
 add_custom_command(TARGET b1 POST_BUILD
     COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:b1> ${CMAKE_BINARY_DIR}/b1.bin
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_firmware_manifest.py
@@ -170,10 +167,7 @@ add_custom_command(TARGET b1 POST_BUILD
             --json ${CMAKE_BINARY_DIR}/b1.manifest.json
             --version-payload ${CMAKE_BINARY_DIR}/b1.version.bin
             --version "${FIRMWARE_VERSION_MAJOR}.${FIRMWARE_VERSION_MINOR}.${FIRMWARE_VERSION_PATCH}"
-            --build-number "${FIRMWARE_BUILD_NUMBER}"
             --build-time "${FIRMWARE_BUILD_TIME_UTC}"
-            --git-commit "${FIRMWARE_GIT_COMMIT}"
-            --git-dirty "${FIRMWARE_GIT_DIRTY}"
             --build-id "${CMAKE_BUILD_TYPE}"
             --target "b1-h743"
     COMMENT "Generating B1 firmware CRC32 manifest and W25Q256 version payload"

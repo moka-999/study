@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成固件镜像清单及与 firmware_version_info_t 一致的 96 字节载荷。"""
+"""生成B1固件清单及与 firmware_version_info_t 一致的76字节载荷。"""
 
 from __future__ import annotations
 
@@ -11,10 +11,9 @@ from pathlib import Path
 
 
 SCHEMA_VERSION = 1
-STRUCT_SIZE = 96
-FLAG_IMAGE_VALID = 1 << 0
-FLAG_GIT_DIRTY = 1 << 1
-PAYLOAD_FORMAT = "<HHHHHHIII24s16s16s16s"
+STRUCT_SIZE = 76
+# version_patch后补2字节，保持Cortex-M7 C结构中uint32_t字段的4字节对齐。
+PAYLOAD_FORMAT = "<HHHHH2xII24s16s16s"
 
 
 def fixed_text(value: str, size: int, field: str) -> bytes:
@@ -39,7 +38,6 @@ def parse_semantic_version(value: str) -> tuple[int, int, int]:
 def build_payload(args: argparse.Namespace, image: bytes) -> tuple[bytes, dict[str, object]]:
     major, minor, patch = parse_semantic_version(args.version)
     image_crc32 = zlib.crc32(image) & 0xFFFFFFFF
-    flags = FLAG_IMAGE_VALID | (FLAG_GIT_DIRTY if args.git_dirty else 0)
 
     payload = struct.pack(
         PAYLOAD_FORMAT,
@@ -48,12 +46,9 @@ def build_payload(args: argparse.Namespace, image: bytes) -> tuple[bytes, dict[s
         major,
         minor,
         patch,
-        flags,
-        args.build_number,
         len(image),
         image_crc32,
         fixed_text(args.build_time, 24, "build_time"),
-        fixed_text(args.git_commit, 16, "git_commit"),
         fixed_text(args.build_id, 16, "build_id"),
         fixed_text(args.target, 16, "target"),
     )
@@ -63,10 +58,7 @@ def build_payload(args: argparse.Namespace, image: bytes) -> tuple[bytes, dict[s
     manifest: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "semantic_version": args.version,
-        "build_number": args.build_number,
         "build_time_utc": args.build_time,
-        "git_commit": args.git_commit,
-        "git_dirty": bool(args.git_dirty),
         "build_id": args.build_id,
         "target": args.target,
         "image_length": len(image),
@@ -82,16 +74,10 @@ def main() -> None:
     parser.add_argument("--json", type=Path, required=True)
     parser.add_argument("--version-payload", type=Path, required=True)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--build-number", type=int, required=True)
     parser.add_argument("--build-time", required=True)
-    parser.add_argument("--git-commit", required=True)
-    parser.add_argument("--git-dirty", type=int, choices=(0, 1), required=True)
     parser.add_argument("--build-id", required=True)
     parser.add_argument("--target", required=True)
     args = parser.parse_args()
-
-    if args.build_number < 0 or args.build_number > 0xFFFFFFFF:
-        parser.error("build-number 必须位于 0..4294967295")
 
     image = args.image.read_bytes()
     if not image:

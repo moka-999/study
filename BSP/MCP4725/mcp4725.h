@@ -38,6 +38,11 @@ typedef struct {
     uint16_t vdd_mv; /* 真板可改为实测3V3，用于DAC码标定。 */
 } mcp4725_t;
 
+/*
+ * 写接口为同步I2C操作，任务上下文调用，地址为未左移7位地址。
+ * 调用方负责设备/总线串行化；本驱动不控制RK复位或上电时序。
+ * IF_OK只表示DAC写入成功，不能当成RK已经按指定介质启动的确认。
+ */
 /* Fast Write直接更新DAC寄存器和掉电位，不修改EEPROM。 */
 int mcp4725_write_fast(mcp4725_t *device, uint16_t code,
                        mcp4725_power_mode_t power_mode);

@@ -8,11 +8,8 @@
  * ===================================================================
  */
 #include "ddr_power.h"
+#include "board_interfaces.h"
 #include <string.h>
-
-extern i2c_if_t i2c1_if;
-extern i2c_if_t i2c2_if;
-extern i2c_if_t i2c4_if;
 
 /* 三路实例 (A 版地址由 VSET/PG 电阻决定，启动电压 ≤ 目标电压) */
 static tps62868_t _ddr[3] = {

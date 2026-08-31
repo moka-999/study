@@ -14,6 +14,8 @@ SPI_HandleTypeDef hspi4;
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart4;
+DMA_HandleTypeDef hdma_uart4_rx;
+DMA_HandleTypeDef hdma_usart2_rx;
 QSPI_HandleTypeDef hqspi;
 
 uint8_t g_b1_mac[6];
@@ -45,7 +47,7 @@ static void require_ok(HAL_StatusTypeDef status)
 
 int main(void)
 {
-    static const uint8_t banner[] = "B1 FreeRTOS/LwIP and W25Q256 bring-up ready\r\n";
+    static const uint8_t banner[] = "B1 gateway software ready; power remains OFF\r\n";
 
     HAL_Init();
     SystemClock_Config();
@@ -67,7 +69,7 @@ int main(void)
     HAL_Delay(100);
     require_ok(HAL_UART_Transmit(&huart1, (uint8_t *)banner, sizeof(banner) - 1, 100));
 
-    /* CMSIS-RTOS2 包装层由 V2 同版本迁入，后续 TCP/TLV 任务从这里扩展。 */
+    /* 网络/RK/监测任务在RTOS中运行；这里不配置上电时序、不写Boot电压。 */
     osKernelInitialize();
     MX_FREERTOS_Init();
     osKernelStart();
@@ -275,6 +277,28 @@ static void uart_init(UART_HandleTypeDef *uart, USART_TypeDef *instance)
     require_ok(HAL_UART_Init(uart));
 }
 
+/*
+ * 两路候选RK串口各配NORMAL RX DMA；运行时只注册选定的一路。
+ * RX DMA在调度器启动后的默认任务中才开启，避免FromISR早于内核运行。
+ * TX复用软件环+TXE中断，不占用DMA Stream；USART1仍仅作本地控制台。
+ */
+static void uart_rx_dma_init(UART_HandleTypeDef *uart, DMA_HandleTypeDef *dma,
+                              DMA_Stream_TypeDef *stream, uint32_t request)
+{
+    dma->Instance = stream;
+    dma->Init.Request = request;
+    dma->Init.Direction = DMA_PERIPH_TO_MEMORY;
+    dma->Init.PeriphInc = DMA_PINC_DISABLE;
+    dma->Init.MemInc = DMA_MINC_ENABLE;
+    dma->Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    dma->Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    dma->Init.Mode = DMA_NORMAL;
+    dma->Init.Priority = DMA_PRIORITY_HIGH;
+    dma->Init.FIFOMode = DMA_FIFOMODE_DISABLE;
+    require_ok(HAL_DMA_Init(dma));
+    __HAL_LINKDMA(uart, hdmarx, *dma);
+}
+
 static void MX_UART_Init(void)
 {
     __HAL_RCC_USART1_CLK_ENABLE();
@@ -283,6 +307,19 @@ static void MX_UART_Init(void)
     uart_init(&huart1, USART1);
     uart_init(&huart2, USART2);
     uart_init(&huart4, UART4);
+    __HAL_RCC_DMA1_CLK_ENABLE();
+    uart_rx_dma_init(&huart4, &hdma_uart4_rx, DMA1_Stream0, DMA_REQUEST_UART4_RX);
+    uart_rx_dma_init(&huart2, &hdma_usart2_rx, DMA1_Stream1, DMA_REQUEST_USART2_RX);
+
+    /* 回调使用FreeRTOS FromISR接口，优先级不得高于可调用内核的5级边界。 */
+    HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 5, 0);
+    HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 5, 0);
+    HAL_NVIC_SetPriority(UART4_IRQn, 5, 0);
+    HAL_NVIC_SetPriority(USART2_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+    HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
+    HAL_NVIC_EnableIRQ(UART4_IRQn);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
 }
 
 static void MX_QSPI_Init(void)

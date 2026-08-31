@@ -232,6 +232,14 @@ SECTIONS
   PROVIDE( __bss_start = __tbss_start );
   PROVIDE( __bss_size = __bss_end - __bss_start );
 
+  /* 诊断记录不随软件复位清零；实际地址始终从本次烧录的ELF查询。 */
+  .crash_log (NOLOAD) :
+  {
+    . = ALIGN(4);
+    KEEP(*(.crash_log))
+    . = ALIGN(4);
+  } >DTCMRAM
+
   /* User_heap_stack section, used to check that there is enough RAM left */
   ._user_heap_stack (NOLOAD) :
   {
@@ -250,6 +258,16 @@ SECTIONS
     *(.heap)
     *(.heap*)
     . = ALIGN(8);
+  } >RAM
+
+  /* UART DMA可访问AXI，不能放DTCM；与128KiB RTOS堆顺序分配且不重叠。
+   * 不紧贴D2 ETH接收池放置，以免覆盖固定在0x30005000的LwIP堆。 */
+  .uart_dma (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.uart_dma)
+    *(.uart_dma*)
+    . = ALIGN(32);
   } >RAM
 
   /* ETH DMA 无法访问 DTCM；描述符和零拷贝接收池必须位于 D2 SRAM。 */
@@ -274,7 +292,14 @@ SECTIONS
     . = ALIGN(32);
   } >RAM_D2
 
-
+  /* lwipopts.h的固定30KiB堆另需元数据空间，按32KiB预留给链接器。
+   * 若ETH池增长触碰该地址，链接即失败；不能直到运行时才发现内存重叠。 */
+  ASSERT(ADDR(.Rx_PoolSection) + SIZEOF(.Rx_PoolSection) <= 0x30005000,
+         "B1 ETH RX pool overlaps fixed LwIP heap")
+  .lwip_heap 0x30005000 (NOLOAD) :
+  {
+    . += 32K;
+  } >RAM_D2
 
   /* Remove information from the standard libraries */
   /DISCARD/ :

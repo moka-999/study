@@ -3,6 +3,8 @@
  *
  * 管理三组硬件使能：4.0V 系统输入、3.3V 系统电源和 DDR 三轨总使能。
  * 本模块只负责顺序和故障收敛，不决定尚未经过真板确认的具体毫秒值。
+ * 单实例修改接口由同一控制任务串行调用；读到ON不代表已锁定电源，
+ * 后续PC业务必须协调采样停止/安全掉电确认，不能由多任务并发推进。
  */
 #ifndef PWR_CTRL_H
 #define PWR_CTRL_H
@@ -79,4 +81,3 @@ pwr_ctrl_state_t pwr_ctrl_get_state(void);
 uint8_t pwr_ctrl_is_configured(void);
 
 #endif
-

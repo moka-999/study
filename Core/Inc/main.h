@@ -3,6 +3,13 @@
 
 #include "stm32h7xx_hal.h"
 
+/* 板级HAL句柄统一声明；业务层使用board_interfaces.h中的总线接口。 */
+extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;
+extern UART_HandleTypeDef huart4;
+extern DMA_HandleTypeDef hdma_uart4_rx;
+extern DMA_HandleTypeDef hdma_usart2_rx;
+
 /* Ethernet RMII + PHY reset */
 #define B1_RMII_REF_CLK_PORT GPIOA
 #define B1_RMII_REF_CLK_PIN  GPIO_PIN_1

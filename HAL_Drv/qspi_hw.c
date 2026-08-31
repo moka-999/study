@@ -10,7 +10,7 @@
  *   控: 单线 (JEDEC ID, SR, Write Enable 等控制命令)
  *
  * 时钟: QSPI_CLK = D1HCLK / (Prescaler+1)
- * 实际 CLK = 240MHz / 4 ≈ 60MHz
+ * 实际时钟以B1的SystemClock_Config和MX_QSPI_Init为准，不沿用V2时钟值。
  * ===================================================================
  */
 #include "main.h"
@@ -43,7 +43,7 @@ int qspi_init(void)
 {
     uint8_t sr2;
 
-    /* HAL_QSPI_Init 已在 MX_QUADSPI_Init() 调用. */
+    /* HAL_QSPI_Init已由B1的MX_QSPI_Init调用。 */
 
     /* ── 1. 用四线发 0xFF 退出 QPI (若之前误入 QPI 模式) ── */
     {
@@ -168,7 +168,8 @@ int qspi_wait_busy(uint32_t timeout_ms)
             return -1;
         if (!(sr & W25Q_SR1_BUSY))
             return 0;
-        /* B1当前是无RTOS引脚/驱动基线，使用HAL毫秒延时等待Flash就绪。 */
+        /* 启动阶段也会调用本函数，必须允许调度器尚未运行；不能直接改为osDelay。
+         * 任务上下文同样保持这套有界等待，由调用方串行访问Flash器件。 */
         HAL_Delay(1U);
         elapsed++;
     }

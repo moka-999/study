@@ -34,10 +34,12 @@ void memory_monitor_configure(memory_monitor_t *monitor,
                               GPIO_TypeDef *adc_cs_port, uint16_t adc_cs_pin,
                               void (*wait_ms)(uint32_t ms));
 
-/* 电源进入ON后调用；PAC和AD任一失败则返回IF_ERR。 */
+/* 电源进入ON后在任务上下文串行调用；仅重试未就绪器件，不重置已就绪
+ * 器件。就绪标志归本模块维护，任务不直接修改。任一失败返回IF_ERR。 */
 int memory_monitor_init(memory_monitor_t *monitor);
 
-/* 生成一次快照；返回IF_ERR时仍可按valid_mask使用部分数据。 */
+/* 生成一次快照；IF_ERR时仍可按valid_mask使用其他有效器件数据。
+ * 三轨顺序VDD1/VDD2/VDDQ，电压单位mV；未置位数组不是有效的零读数。 */
 int memory_monitor_sample(memory_monitor_t *monitor,
                           memory_monitor_sample_t *sample);
 
@@ -45,4 +47,3 @@ int memory_monitor_sample(memory_monitor_t *monitor,
 void memory_monitor_invalidate(memory_monitor_t *monitor);
 
 #endif
-

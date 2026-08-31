@@ -3,7 +3,7 @@
  * W25Q256 Flash BSP：flash_if_t 的 QSPI 实现
  * ============================================================================
  */
-#include "hal_if.h"
+#include "flash_bsp.h"
 #include "qspi_hw.h"
 
 #include <string.h>

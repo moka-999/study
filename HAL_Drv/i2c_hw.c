@@ -4,7 +4,7 @@
  * I2C1和I2C2由STM32硬件控制器实现。原理图中的“逻辑I2C4”
  * 使用PH4/PH5软件开漏GPIO，也在本文件内实现同一i2c_if_t接口。
  */
-#include "hal_if.h"
+#include "board_interfaces.h"
 #include "main.h"
 
 extern I2C_HandleTypeDef hi2c1;
@@ -12,9 +12,15 @@ extern I2C_HandleTypeDef hi2c2;
 
 #define I2C_TRANSFER_TIMEOUT_MS 100U
 
+/* 硬件/软件总线都只接受未左移的7位地址；无效请求不能触碰HAL或GPIO。 */
+static int bus_is_valid(const i2c_if_t *bus, uint8_t device)
+{
+    return bus != NULL && bus->handle != NULL && device <= 0x7FU;
+}
+
 static int i2c_read_reg(i2c_if_t *bus, uint8_t device, uint8_t reg, uint8_t *value)
 {
-    if (!bus || !bus->handle || !value) return IF_ERR;
+    if (!bus_is_valid(bus, device) || !value) return IF_ERR;
     return HAL_I2C_Mem_Read((I2C_HandleTypeDef *)bus->handle, device << 1, reg,
                             I2C_MEMADD_SIZE_8BIT, value, 1U,
                             I2C_TRANSFER_TIMEOUT_MS) == HAL_OK ? IF_OK : IF_ERR;
@@ -22,7 +28,7 @@ static int i2c_read_reg(i2c_if_t *bus, uint8_t device, uint8_t reg, uint8_t *val
 
 static int i2c_write_reg(i2c_if_t *bus, uint8_t device, uint8_t reg, uint8_t value)
 {
-    if (!bus || !bus->handle) return IF_ERR;
+    if (!bus_is_valid(bus, device)) return IF_ERR;
     return HAL_I2C_Mem_Write((I2C_HandleTypeDef *)bus->handle, device << 1, reg,
                              I2C_MEMADD_SIZE_8BIT, &value, 1U,
                              I2C_TRANSFER_TIMEOUT_MS) == HAL_OK ? IF_OK : IF_ERR;
@@ -31,7 +37,7 @@ static int i2c_write_reg(i2c_if_t *bus, uint8_t device, uint8_t reg, uint8_t val
 static int i2c_read_bytes(i2c_if_t *bus, uint8_t device, uint8_t reg,
                           uint8_t *buffer, uint16_t length)
 {
-    if (!bus || !bus->handle || !buffer || length == 0U) return IF_ERR;
+    if (!bus_is_valid(bus, device) || !buffer || length == 0U) return IF_ERR;
     return HAL_I2C_Mem_Read((I2C_HandleTypeDef *)bus->handle, device << 1, reg,
                             I2C_MEMADD_SIZE_8BIT, buffer, length,
                             I2C_TRANSFER_TIMEOUT_MS) == HAL_OK ? IF_OK : IF_ERR;
@@ -40,7 +46,7 @@ static int i2c_read_bytes(i2c_if_t *bus, uint8_t device, uint8_t reg,
 static int i2c_write_bytes(i2c_if_t *bus, uint8_t device,
                            const uint8_t *buffer, uint16_t length)
 {
-    if (!bus || !bus->handle || !buffer || length == 0U) return IF_ERR;
+    if (!bus_is_valid(bus, device) || !buffer || length == 0U) return IF_ERR;
     return HAL_I2C_Master_Transmit((I2C_HandleTypeDef *)bus->handle, device << 1,
                                    (uint8_t *)buffer, length,
                                    I2C_TRANSFER_TIMEOUT_MS) == HAL_OK ? IF_OK : IF_ERR;
@@ -53,7 +59,7 @@ static int i2c_write_command(i2c_if_t *bus, uint8_t device, uint8_t command)
 
 static int i2c_is_ready(i2c_if_t *bus, uint8_t device)
 {
-    if (!bus || !bus->handle) return IF_ERR;
+    if (!bus_is_valid(bus, device)) return IF_ERR;
     return HAL_I2C_IsDeviceReady((I2C_HandleTypeDef *)bus->handle, device << 1,
                                  3U, 10U) == HAL_OK ? IF_OK : IF_ERR;
 }
@@ -190,8 +196,8 @@ static int soft_i2c_read_byte(uint8_t *value, uint8_t acknowledge)
 static int soft_i2c_write_reg(i2c_if_t *bus, uint8_t device,
                               uint8_t reg, uint8_t value)
 {
-    (void)bus;
     int result = IF_ERR;
+    if (!bus_is_valid(bus, device)) return IF_ERR;
     if (soft_i2c_start() != IF_OK) return IF_ERR;
     if (soft_i2c_write_byte((uint8_t)(device << 1)) != IF_OK) goto done;
     if (soft_i2c_write_byte(reg) != IF_OK) goto done;
@@ -205,8 +211,8 @@ done:
 static int soft_i2c_read_bytes(i2c_if_t *bus, uint8_t device, uint8_t reg,
                                uint8_t *buffer, uint16_t length)
 {
-    (void)bus;
     int result = IF_ERR;
+    if (!bus_is_valid(bus, device)) return IF_ERR;
     if (!buffer || length == 0U || soft_i2c_start() != IF_OK) return IF_ERR;
     if (soft_i2c_write_byte((uint8_t)(device << 1)) != IF_OK) goto done;
     if (soft_i2c_write_byte(reg) != IF_OK) goto done;
@@ -231,8 +237,8 @@ static int soft_i2c_read_reg(i2c_if_t *bus, uint8_t device,
 static int soft_i2c_write_bytes(i2c_if_t *bus, uint8_t device,
                                 const uint8_t *buffer, uint16_t length)
 {
-    (void)bus;
     int result = IF_ERR;
+    if (!bus_is_valid(bus, device)) return IF_ERR;
     if (!buffer || length == 0U || soft_i2c_start() != IF_OK) return IF_ERR;
     if (soft_i2c_write_byte((uint8_t)(device << 1)) != IF_OK) goto done;
     for (uint16_t index = 0U; index < length; index++) {
@@ -251,7 +257,7 @@ static int soft_i2c_write_command(i2c_if_t *bus, uint8_t device, uint8_t command
 
 static int soft_i2c_is_ready(i2c_if_t *bus, uint8_t device)
 {
-    (void)bus;
+    if (!bus_is_valid(bus, device)) return IF_ERR;
     if (soft_i2c_start() != IF_OK) return IF_ERR;
     int result = soft_i2c_write_byte((uint8_t)(device << 1));
     soft_i2c_stop();
@@ -259,8 +265,8 @@ static int soft_i2c_is_ready(i2c_if_t *bus, uint8_t device)
 }
 
 /*
- * ponytail: 当前pwr_ctrl和monitor由同一业务任务串行调用；
- * 若后续允许多个FreeRTOS任务并发访问PH4/PH5，再在此接口外加一把总线互斥锁。
+ * ponytail: 当前软件总线不含跨任务锁，调用方必须串行访问完整器件事务；
+ * 后续若多个FreeRTOS任务并发访问PH4/PH5，再在器件事务边界加总线互斥锁。
  */
 i2c_if_t i2c4_if = {
     .handle = B1_I2C4_SCL_PORT,

@@ -1,80 +1,45 @@
-# B1 MCU firmware
+# B1 MCU 固件
 
-Independent STM32H743IIT6/LQFP176 project for the B1 memory-test board. It does
-not import Apollo V2 application code until that module has passed V2 testing.
+STM32H743IIT6/LQFP176 独立工程。工具链保持 STM32Cube CMake + Ninja + GNU Arm，25MHz HSE、400MHz内核，App位于0x08020000，最小Boot位于0x08000000。
 
-Current image validates the final B1 pin mux, 25 MHz HSE/400 MHz clock, safe
-power defaults, YT8512H reset on PG12, W25Q256 QSPI pins, I2C1/2, the logical
-I2C4 software bus on PH4/PH5, B1 SPI2 mode-0 hardware-NSS slave, AD7124 SPI4
-mode-3 master and USART1/2/UART4. The V2-accepted result LED state machine has
-been ported to PG0-PG5; PG6 remains off until its single-color status meaning is
-frozen.
-B1 uses a UID-derived locally administered MAC.
-The V2-accepted W25Q256 driver and version/FRU v1 records are also present.
-Startup initializes QSPI but deliberately does not write the production metadata
-sectors. Each build emits `b1.bin`, `b1.manifest.json` and the 96-byte
-`b1.version.bin` payload.
+## 当前整合状态
 
-FreeRTOS 10.6.2 and LwIP 2.2.1 are now migrated as the final gateway runtime
-baseline. The default task initializes static IPv4 `192.168.1.201/24`; ETH uses
-the B1 YT8512H, PG12 reset and UID-derived MAC. D-Cache stays disabled on both
-B1 and V2. The 128KiB RTOS heap is in AXI SRAM and all ETH DMA objects are in
-D2 SRAM, so no cache clean/invalidate calls are permitted.
+V2通用软件已整合到B1，并保留B1板级映射。当前是**已编译的软件集成基线，不是真板验收完成**。
 
-B1 has no temperature-control or forwarding role. PC controls the B2 MCU
-directly; B1 SPI2 is reserved only for B1-B2 keepalive.
+- PC：TCP:8888单客户端server，18字节头+JSON，4KiB上限；独立帧状态查表、命令查表、cJSON校验、本地心跳和W25测试仪信息查询。
+- RK：独立TLV解析、完整错误传播、u64序号、pending/重传/心跳；UART4/USART2只选一路，USART1仍是本地控制台。
+- W25Q256：32MiB布局、76字节版本、224字节FRU v2、A/B和CRC；兼容96字节版本只读转换和160/192字节旧FRU，保留旧身份/网络字段并保护有效未知格式。
+- 电源/采样：B1 PC6/PC7/PG11安全OFF基线、三轨20mV配置、PAC/AD快照、MCP4725 Boot映射、既有三组结果灯。仍不自动上电、设DAC、扫压或读采样器件。
+- 总线：UART TX锁/TXE修复，NORMAL RX DMA/IDLE/HT过滤，硬件与软件I2C入口保护，接口声明集中化。
 
-The PC-MCU transport parser accepted on Apollo V2 is now compiled in B1 as an
-independent module: an 18-byte big-endian header followed by a UTF-8 JSON
-object. cJSON v1.7.19 is pinned locally and uses the FreeRTOS heap with nesting
-limited to 16. The 32-bit Length field is capped at a confirmed 4096-byte full
-PDU on the MCU. TCP business dispatch is intentionally not enabled in B1 yet;
-it will be connected with the dual-protocol gateway tasks.
-The first typed business helper accepts `CMD_START_TEST (0x0103)` with
-`algorithmName/algorithmIndex` and creates `CMD_TEST_RESULT_REPORT (0x0105)`
-with `testResults[{siteId,mirrorIndex,testStatus}]`. ServiceID and field value
-semantics remain pending; strict JSON does not allow trailing commas.
+PC新目标合同要求双方发送Seq独立递增、ServiceID固定0，**当前迁移代码仍是旧回显行为**。START_TEST目前仅校验JSON，没有投递RK或回传最终结果；本次移植没有替代后续业务开发。
 
-`b1.ioc` is the CubeMX pin/clock baseline and was generated with
-`D:\stm32cubemx\STM32CubeMX.exe`. PH4/PH5 deliberately stay open-drain GPIOs:
-the schematic calls this bus I2C4, but those pins are not an STM32 I2C4 AF pair.
-SPI4 is stored in the `.ioc` and generated as AD7124 mode 3.
-The V2-accepted AD7124-4 driver is compiled against B1 `spi4_if` only. SPI4
-starts at about 390.625kHz for first-board margin; startup deliberately does
-not access the ADC until the B1 board is available for ID and voltage checks.
-The accepted MCP4725 driver is also compiled and bound only to hardware I2C2
-(PF0/PF1, address `0x60`). It maps the seven schematic Boot modes from 0V to
-1.8V using Fast Write without touching EEPROM. Startup does not write the DAC;
-the first B1 board must verify VOUT before RK mode switching is enabled.
+## 构建与检查
 
 ```powershell
 .\tools\dev.ps1 check
 .\tools\dev.ps1 build
 ```
 
-Program `build_debug/boot.elf` first and `build_debug/b1.elf` second. Both V2
-and B1 use the same bundled STM32Cube CMake, Ninja and GNU Arm toolchain.
+产物为`build_debug/boot.elf`、`b1.elf`、`b1.bin`、`b1.manifest.json`和76字节`b1.version.bin`。烧录和运行测试需另外明确执行，本次整合未烧录或推送。
 
-## Migration rule
+CMake选项`B1_RK_UART=4`暂选UART4，设为2可切换USART2；这不是已确认的RK实机串口。默认只注册slot0的一路。RX在RTOS运行后启动，RK未上电时不主动发命令或心跳。
 
-Move one module at a time from V2 only after its V2 build, module check and
-logic-analyzer or hardware acceptance pass. Port behavior and protocol code;
-keep pins, reset paths, PHY model, UART choice and peripheral handles local to
-B1. Add only the smallest B1 check that proves the migrated module.
+## 必须保留的B1差异
 
-Not copied by design: V2 board glue, unaccepted `App`/`BSP` modules, board demos,
-stress tests, extracted schematics and temporary files. The next milestone is
-the TCP dual-protocol gateway task layer; PHY reset, MAC and RK UART routing
-remain B1-local.
+- PHY复位是PG12，不是RK复位；MAC由STM32 UID生成，不使用V2固定MAC。
+- SPI2是B2主机的Mode 0从机，仅保活；AD7124-4使用SPI4/PE11-PE14、Mode 3、约390.625kHz。
+- PH4/PH5保持软件开漏I2C，不是STM32硬件I2C4 AF。
+- D-Cache关闭；FreeRTOS堆与UART DMA在AXI SRAM，ETH缓冲及预留LwIP堆在D2 SRAM。
+- 三组PG0-PG5仅显示测试结果；单色PG6语义未定，不能借用为通信指示灯。
+- B1不控制、代理或转发温控，PC直接管理B2；不复制V2自检、波形任务或旧TLV GPIO重启代码。
 
-## Result LED board check
+`b1.ioc`保存引脚/时钟与RX DMA配置；重新生成时仍须恢复App偏移、链接段、B1正式任务创建和板级适配，不能用V2生成代码覆盖。
 
-The RTOS task advances the accepted non-blocking 500ms LED state machine. The
-schematic only freezes LED1/2, LED3/4 and LED5/6 as physical pairs. Until the B1
-board is visually checked, the board map provisionally treats odd LED signals as
-red, even signals as green, and assigns the three pairs to LPDDR0, LPDDR1 and
-eMCP in order.
+## 文档入口
 
-On the first B1 board, verify PG0-PG5 with a short logic-analyzer power-on window
-and visually confirm both color order and test-object order. Only
-`s_result_led_map` in `Core/Src/main.c` should change after that check.
+- [整合清单、验证与待办](docs/integration_20260831.md)
+- [PC协议目标框架](docs/protocol/pc/pc_tcp_protocol_spec.md)
+- [RK当前实现基线与差异](docs/protocol/rk/implementation_baseline.md)
+
+仍使用默认IPv4 `192.168.1.201/24`，不会因MAC唯一就自动得到不同IP；8板并网前必须落实唯一IP配置。现工程PHY型号标记仍为YT8512H，与先前确认的YT8512C需核对BOM/芯片ID；本次保留现有PHY实现，不以编译通过代替型号和硬件确认。
