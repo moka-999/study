@@ -1,6 +1,6 @@
 /*
  * ===================================================================
- * TLV 帧解析状态机 — 逐字节喂入, 完整帧回调
+ * RK帧解析状态机 — 逐字节喂入，调用方显式取帧
  * ===================================================================
  *
  * 目标用途: 仅解析 MCU-RK 串口上的 0x5A/0xA5 TLV 字节流。
@@ -16,13 +16,14 @@
  *     int r = tlv_sm_feed(&sm, b);
  *     if (r > 0) {
  *       tlv_frame_t f;
- *       tlv_sm_get_frame(&sm, &f);
- *       // ... 处理完整帧 ...
+ *       if (tlv_sm_get_frame(&sm, &f) >= 0) {
+ *         // ... 只处理完整且TLV结构有效的帧 ...
+ *       }
  *     }
  *   }
  *
  * 超时: 调用方通过 tlv_sm_check_timeout() 定期检查,
- *       超过 500ms 未收到完整帧自动复位状态机
+ *       半帧期间连续500ms没有新字节时复位；不是整帧总耗时限制。
  * ===================================================================
  */
 #ifndef __TLV_STATE_MACHINE_H
@@ -55,13 +56,15 @@ typedef struct {
 /* 初始化状态机 */
 void tlv_sm_init(tlv_sm_t *sm);
 
-/* 喂入一个字节: 返回 0=继续, 1=完整帧就绪, -1=帧错误(已自动复位) */
+/* 喂入一个字节：0=继续，1=边界/CRC校验通过，-1=帧错误(已自动复位)。
+ * 返回1后仍须检查get_frame返回值；CRC正确不保证内部TLV有效。 */
 int  tlv_sm_feed(tlv_sm_t *sm, uint8_t byte);
 
-/* 取出已解析的完整帧 (需在 feed 返回 1 后调用) */
-void tlv_sm_get_frame(tlv_sm_t *sm, tlv_frame_t *frame);
+/* 仅在feed返回1后、下一字节喂入前调用；sm必须是有效实例。
+ * 返回>=0为输出单元数（未知Type可全部跳过）；-1为TLV解包失败，输出清零。 */
+int tlv_sm_get_frame(tlv_sm_t *sm, tlv_frame_t *frame);
 
-/* 超时复位: 超过 timeout_ms 未完成 → 强制归 IDLE
+/* 超时复位：半帧状态下，自最后字节起超过timeout_ms → 强制归IDLE
  * 返回: 1=已复位, 0=未超时 */
 int  tlv_sm_check_timeout(tlv_sm_t *sm, uint32_t timeout_ms);
 

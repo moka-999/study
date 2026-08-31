@@ -1,9 +1,10 @@
-param(
-    [ValidateSet('build', 'rebuild', 'protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build')]
+﻿param(
+    [ValidateSet('build', 'rebuild', 'style-test', 'protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build')]
     [string]$Task = 'build'
 )
 
 $ErrorActionPreference = 'Stop'
+# 本文件保留UTF-8 BOM，避免Windows PowerShell 5按本地编码误读中文注释。
 $repo = Split-Path -Parent $PSScriptRoot
 $buildDirName = if ($Task -eq 'pwr-wave-build') {
     'build_pwr_wave'
@@ -48,6 +49,22 @@ function Find-Python {
     if (Test-Path -LiteralPath $codexPython) { return $codexPython }
 
     throw 'Python not found. Install Python 3 or add python.exe to PATH.'
+}
+
+if ($Task -eq 'style-test') {
+    $python = Find-Python
+    & $python -B -X utf8 (Join-Path $repo 'tests\verify_code_boundaries.py')
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    # 不提供HAL/FreeRTOS/cJSON搜索路径，验证纯接口头不泄漏实现依赖。
+    $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe'
+    if (-not $compiler) { throw 'STM32Cube GCC not found.' }
+    & $compiler -std=c11 -Wall -Wextra -Werror -fsyntax-only `
+        "-I$repo\HAL_Drv" "-I$repo\App\protocol\pc" `
+        (Join-Path $repo 'tests\c\portable_headers.c')
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Output 'Portable headers: GCC syntax check PASS (no HAL/RTOS/cJSON headers)'
+    exit 0
 }
 
 if ($Task -eq 'protocol-test' -or $Task -eq 'pc-protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'lpddr-test' -or $Task -eq 'boot-test' -or

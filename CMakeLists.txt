@@ -97,6 +97,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # 正式任务按通信对象分区，纯验证任务统一放test目录。
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pc/tcp_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/hb_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_link.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/led_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/monitor_task.c

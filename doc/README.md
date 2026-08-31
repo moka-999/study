@@ -2,11 +2,20 @@
 
 本页是仓库文档入口。状态以 **当前源码 + 本次可复现验证** 为准，不以旧文档中的“完成”字样为准。
 
-## 当前结论（2026-08-27）
+## 代码规范与结构检查
+
+见[自定义代码规范与结构检查](code_quality_review.md)：记录2026-08-31接口/任务边界整理、中文注释约定、UART互斥与TX唤醒修复，以及保留的RK队列和硬件耦合问题。正式全量构建、6种隔离镜像及离线检查通过；本轮未烧录、未推送，也未同步B1。
+
+## PC–MCU TCP协议框架
+
+供PC工程师完善的[协议框架（Markdown）](pc_tcp_protocol_spec.md)和[Word修订版](pc_tcp_protocol_spec_协议修订.docx)。8月31日规则为双方独立递增Seq、不回显，ServiceID固定0；固件迁移见任务9.6。旧Word保留，不覆盖用户正在编辑的文件。
+按用户要求保留连接方式、18字节头、B1命令编号和常用JSON示例；删除开发状态、草案/待定清单、HEX长示例及MCU实现附录。软件进度与验证证据仍在本页和任务清单维护，不混入对外框架。
+
+## 当前结论（2026-08-31；各模块按所列验证日期/证据区分）
 
 | 模块 | 代码状态 | 当前验证证据 | 结论 |
 |---|---|---|---|
-| TCP server + 双协议网关 | PC字节流状态机、JSON/命令分发和TCP socket任务三层分离；正式TCP不再解析或回传RK TLV，已实现心跳和0x0101/0x0102测试仪信息查询 | 既有V2真实TCP网络17/0；本轮离线合同及正式/网络/Mock构建通过，新增查询/分层尚未重新烧录联网实测；MCU–RK旧TLV模型65/0 | 传输/本地dispatch闭环；PC到RK业务适配和内部Seq映射待接入 |
+| TCP server + 双协议网关 | PC字节流状态机、JSON/查表命令分发和TCP socket任务三层分离；正式TCP不再解析或回传RK TLV，已实现心跳和0x0101/0x0102测试仪信息查询 | 8月31日PC离线合同19/0、RK模型65/0及正式/网络/Mock构建通过；历史V2真实TCP网络17/0。新增查询/分层/查表及Mock用例未在本轮烧录联网复测 | 传输/本地dispatch闭环；PC到RK业务适配和内部Seq映射待接入 |
 | Bootloader + App 偏移 | 已实现 | 本次全量编译生成 `boot.elf` / `test.elf` | 可构建，未在本次重新烧录 |
 | TPS62868 / DDR 电源 API | 已实现三路独立20mV步进全可写范围；初始化仍回标称 | V2离线/Mock通过；B1已绑定I2C1/I2C2/PH4-PH5软件I2C并通过ARM构建 | 软件基线完成，真板VOUT未闭环 |
 | PAC1934T | 已实现驱动骨架 | 可编译；无本次模块/真板实测 | 未闭环 |
@@ -27,6 +36,7 @@
 ```powershell
 .\tools\dev.ps1 build
 .\tools\dev.ps1 rebuild
+.\tools\dev.ps1 style-test
 .\tools\dev.ps1 protocol-test
 .\tools\dev.ps1 pc-protocol-test
 .\tools\dev.ps1 boot-test
@@ -53,7 +63,7 @@ python -X utf8 tests\pc_protocol_network_test.py
 
 ## 当前 P0 问题
 
-- PC–MCU传输层与MCU–RK已在`App/protocol/pc/`和`App/protocol/rk/`物理分离，正式TCP也已切到PC固定头/cJSON并停止RK TLV原始帧回传；业务dispatch、其余JSON字段和双向黄金样例仍待冻结。Length字段为u32，MCU完整PDU上限已确认为4096字节；MCU响应必须原样回显PC请求Seq，内部RK Seq与其独立。PC–B2温控协议属于B2工程，B1–B2只定义保活。
+- PC–MCU传输层与MCU–RK已在`App/protocol/pc/`和`App/protocol/rk/`物理分离，正式TCP也已切到PC固定头/cJSON并停止RK TLV原始帧回传；业务dispatch、其余JSON字段和双向黄金样例仍待冻结。Length字段为u32，MCU完整PDU上限已确认为4096字节；新合同要求双方按本端发送帧独立递增Seq、不回显、ServiceID固定0，内部RK Seq仍独立；旧固件回显行为待任务9.6迁移。PC–B2温控协议属于B2工程，B1–B2只定义保活。
 - `pwr_ctrl`软件状态机已建立，但启动时刻意不加载PC6/PC7量产顺序和毫秒参数，未确认配置时拒绝上电；V2同名实脚PC6/PC7/PG11的500ms测试波形已闭环，B1真板顺序/延时和最小掉电时间仍未闭环。
 - RK硬复位应通过PC6对`VCC4V0_SYS`做电源循环；B1的PG12连接PHY `ETH_nRST`，当前PG12 `reboot`实现只能保留在Apollo V2，完整PC7/PC6/PG11时序待真板验证。
 - 三颗双色灯对应2组LPDDR4/4X和1组eMCP；物理灯号顺序及两颗单色上电/状态灯语义待定。
@@ -70,7 +80,7 @@ python -X utf8 tests\pc_protocol_network_test.py
 
 ## 建议开发顺序
 
-1. PC–MCU独立帧/cJSON和真实TCP传输已闭环；下一步依据PC草案冻结最小业务响应合同与命令归属，接入正式TCP dispatch和请求到RK Seq的内部映射，再分别冻结PC与RK黄金帧；PC响应必须原样回显请求Seq。与B2负责人只冻结SPI保活载荷、周期和超时，PC–B2温控协议由B2工程独立维护。
+1. PC–MCU独立帧/cJSON和旧合同真实TCP传输已闭环；下一步先迁移双方独立发送Seq、不回显和ServiceID固定0规则，再冻结最小业务响应合同、命令归属及无Seq回显后的业务关联，接入PC到RK适配并分别冻结两侧黄金帧。与B2负责人只冻结SPI保活载荷、周期和超时，PC–B2温控协议由B2工程独立维护。
 2. B1到板后在实际PG0-PG5→2N7002网络上复测结果灯波形和上电毛刺，并确认红绿顺序及三颗灯对应的测试对象；两颗单色状态灯语义仍待确认。
 3. 与硬件/RK负责人冻结PC6/PC7顺序和延时后再加载配置；B1真板复测PC6/PC7/PG11、TPS62868初始化窗口及三路实际电压建立过程。
 4. MCP4725驱动与B1软件移植已完成；按当前优先级继续完成TPS62868/PAC1934/AD7124正式任务接入，随后完成LPDDR上下电、拉偏与IDD业务闭环；真实器件回读留到真板。

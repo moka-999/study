@@ -1,65 +1,115 @@
-/* 多串口路由器 — 面向 uart_if_t 接口 */
+/*
+ * UART字节路由：ISR复制接收块到队列，RK任务在任务上下文取走。
+ * 本层不知道TCP、JSON或TLV命令；不解析帧，不转发PC业务。
+ */
+#include "uart_router.h"
+#include "uart_hw.h"
 #include "main.h"
 #include "FreeRTOS.h"
 #include "queue.h"
-#include "semphr.h"
-#include "hal_if.h"
-#include "uart_router.h"
+
 #include <string.h>
 
-#define UART_NUM 2
-
-/* 队列消息: 长度前缀 + 数据 (data 须 >= rx, 否则满载时溢出) */
-typedef struct { uint16_t len; uint8_t data[UART_RX_BUF_SIZE]; } uart_msg_t;
+#define UART_SLOT_COUNT       2
+#define UART_RX_QUEUE_LENGTH  8U
 
 typedef struct {
-  uart_if_t   *iface;
-  QueueHandle_t q;
-  uint8_t       rx[UART_RX_BUF_SIZE];
+    uint16_t length;
+    uint8_t data[UART_RX_BUF_SIZE];
+} uart_rx_message_t;
+
+typedef struct {
+    uart_if_t *interface;
+    QueueHandle_t rx_queue;
 } uart_slot_t;
 
-/* slots 整体放 .uart_dma 段 (RAM_D2): rx 是 DMA 目标缓冲, DTCM 够不着 */
-static uart_slot_t slots[UART_NUM] __attribute__((section(".uart_dma")));
-static int         count = 0;
+/* 管理状态留在.bss由启动代码清零；不能假设NOLOAD DMA段内的指针为NULL。 */
+static uart_slot_t s_slots[UART_SLOT_COUNT];
+/* 仅DMA载荷进入原.uart_dma段；回调只复制本次实际收到的字节。 */
+static uint8_t s_rx_buffers[UART_SLOT_COUNT][UART_RX_BUF_SIZE]
+    __attribute__((section(".uart_dma")));
 
-/* 统一空闲中断回调 */
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *h, uint16_t sz)
+static int slot_is_registered(int id)
 {
-  int i, id = -1;
-  for(i=0;i<count;i++) if(slots[i].iface->handle == h) { id=i; break; }
-  if(id<0||sz==0||sz>UART_RX_BUF_SIZE) return;
-  /* TLV 协议: 不过滤单字节, 交给上层状态机处理同步/噪声 */
-  uart_msg_t m;
-  m.len = sz; memcpy(m.data, slots[id].rx, sz);
-  BaseType_t xh = pdFALSE;
-  xQueueSendFromISR(slots[id].q, &m, &xh);
-  portYIELD_FROM_ISR(xh);
-  slots[id].iface->start_rx(slots[id].iface, slots[id].rx, sizeof(slots[id].rx));
+    return id >= 0 && id < UART_SLOT_COUNT &&
+           s_slots[id].interface != NULL && s_slots[id].rx_queue != NULL;
 }
 
-void uart_register(int idx, uart_if_t *iface)
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *uart, uint16_t size)
 {
-  if(idx>=UART_NUM) return;
-  slots[idx].iface = iface;
-  slots[idx].q     = xQueueCreate(8, sizeof(uart_msg_t));
-  if(idx >= count) count = idx+1;
+    if (uart == NULL || size == 0U || size > UART_RX_BUF_SIZE) {
+        return;
+    }
+
+    for (int id = 0; id < UART_SLOT_COUNT; ++id) {
+        if (!slot_is_registered(id) || s_slots[id].interface->handle != uart) {
+            continue;
+        }
+
+        uart_rx_message_t message;
+        message.length = size;
+        memcpy(message.data, s_rx_buffers[id], size);
+        BaseType_t higher_priority_task_woken = pdFALSE;
+        /*
+         * ISR不能等队列腾位置；满队列时本接收块被丢弃，不能视为可靠送达。
+         * 当前保持丢块策略，依靠上层帧校验/超时恢复，不在ISR解释协议。
+         */
+        (void)xQueueSendFromISR(s_slots[id].rx_queue, &message,
+                               &higher_priority_task_woken);
+        (void)s_slots[id].interface->start_rx(s_slots[id].interface,
+                                             s_rx_buffers[id],
+                                             UART_RX_BUF_SIZE);
+        portYIELD_FROM_ISR(higher_priority_task_woken);
+        return;
+    }
+}
+
+void uart_register(int id, uart_if_t *interface)
+{
+    if (id < 0 || id >= UART_SLOT_COUNT || interface == NULL ||
+        interface->start_rx == NULL || interface->send == NULL ||
+        s_slots[id].rx_queue != NULL) {
+        return; /* 启动期一次注册；拒绝重复分配队列和无效接口。 */
+    }
+
+    QueueHandle_t queue = xQueueCreate(UART_RX_QUEUE_LENGTH, sizeof(uart_rx_message_t));
+    if (queue == NULL) {
+        return; /* 保持槽位未注册，启动/轮询均跳过它，避免空队列断言。 */
+    }
+    s_slots[id].interface = interface;
+    s_slots[id].rx_queue = queue;
 }
 
 void uart_start_all(void)
 {
-  int i;
-  uart_tx_isr_attach();   /* 绑定 TxISR, 让 HAL 的 TXE 中断自动排空发送环形缓冲 */
-  for(i=0;i<count;i++) slots[i].iface->start_rx(slots[i].iface, slots[i].rx, UART_RX_BUF_SIZE);
+    uart_tx_mutex_init();
+    uart_tx_isr_attach();
+    for (int id = 0; id < UART_SLOT_COUNT; ++id) {
+        if (slot_is_registered(id)) {
+            (void)s_slots[id].interface->start_rx(s_slots[id].interface,
+                                                 s_rx_buffers[id],
+                                                 UART_RX_BUF_SIZE);
+        }
+    }
 }
 
-int uart_poll_rx(int id, uint8_t *buf, uint16_t m)
+int uart_poll_rx(int id, uint8_t *buffer, uint16_t capacity)
 {
-  if(id>=count||m<UART_RX_BUF_SIZE) return 0;
-  uart_msg_t msg;
-  if(xQueueReceive(slots[id].q, &msg, 0) != pdTRUE) return 0;
-  memcpy(buf, msg.data, msg.len);
-  return (int)msg.len;
+    if (!slot_is_registered(id) || buffer == NULL || capacity < UART_RX_BUF_SIZE) {
+        return 0;
+    }
+    uart_rx_message_t message;
+    if (xQueueReceive(s_slots[id].rx_queue, &message, 0) != pdTRUE) {
+        return 0;
+    }
+    memcpy(buffer, message.data, message.length);
+    return (int)message.length;
 }
 
-int uart_send(int id, uint8_t *d, uint16_t l)
-{ if(id<count) return slots[id].iface->send(slots[id].iface, d, l); return -1; }
+int uart_send(int id, uint8_t *buffer, uint16_t length)
+{
+    if (!slot_is_registered(id) || buffer == NULL || length == 0U) {
+        return IF_ERR;
+    }
+    return s_slots[id].interface->send(s_slots[id].interface, buffer, length);
+}

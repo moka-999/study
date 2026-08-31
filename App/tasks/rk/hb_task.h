@@ -4,16 +4,11 @@
  * ===================================================================
  *
  * 每 1000ms 发送 Type=0x0000 心跳帧 (MCU→RK3588)
- * 与 rk_task 共享 g_rk_seq_counter (taskENTER_CRITICAL 保护)
+ * 通过rk_link_next_sequence()与rk_task共用RK序号，不暴露可写计数器。
  * ===================================================================
  */
 #ifndef __HB_TASK_H
 #define __HB_TASK_H
-
-#include <stdint.h>
-
-/* MCU→RK3588 统一序列号 (心跳 + 命令帧共用) */
-extern volatile uint64_t g_rk_seq_counter;
 
 void StartHbTask(void *argument);
 

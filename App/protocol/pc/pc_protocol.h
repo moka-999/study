@@ -7,9 +7,11 @@
 #ifndef PC_PROTOCOL_H
 #define PC_PROTOCOL_H
 
-#include "cJSON.h"
 #include <stddef.h>
 #include <stdint.h>
+
+/* 帧状态机只需要不透明JSON指针，不能因此传递引入整个第三方解析器头。 */
+typedef struct cJSON cJSON;
 
 #ifdef __cplusplus
 extern "C" {

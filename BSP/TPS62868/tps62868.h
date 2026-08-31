@@ -77,6 +77,11 @@ typedef struct {
     uint8_t   ctl_cache; /* CONTROL 软件镜像 (write-only 寄存器, 默认 0x6F) */
 } tps62868_t;
 
+/*
+ * 同步任务接口：bus/设备句柄由调用方持有，同一CONTROL缓存不得并发修改。
+ * addr为未左移7位地址；电压单位mV。寄存器写成功不保证负载电压已稳定，
+ * 更不表示该电压对DDR安全；上电/故障策略仍属于pwr_ctrl/ddr_power。
+ */
 /* ── 3.1 地址扫描 (返回找到的设备数) ── */
 int  tps62868_scan(i2c_if_t *bus, uint8_t *addrs, uint8_t max);
 

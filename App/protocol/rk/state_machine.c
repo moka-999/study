@@ -108,7 +108,7 @@ int tlv_sm_feed(tlv_sm_t *sm, uint8_t byte)
 
             if (calc == exp) {
                 uint16_t plen = tlv_get_length(sm->buf + 1);  /* TLV 字节数 */
-                if (plen == 0 || plen > TLV_PAYLOAD_MAX) {
+                if (plen < TLV_PAYLOAD_MIN || plen > TLV_PAYLOAD_MAX) {
                     if (!_resync(sm)) tlv_sm_reset(sm);
                     break;
                 }
@@ -171,9 +171,10 @@ int tlv_sm_feed(tlv_sm_t *sm, uint8_t byte)
  * 取出已解析帧
  * ═══════════════════════════════════════════════════════════════════ */
 
-void tlv_sm_get_frame(tlv_sm_t *sm, tlv_frame_t *frame)
+int tlv_sm_get_frame(tlv_sm_t *sm, tlv_frame_t *frame)
 {
     uint16_t plen = tlv_get_length(sm->buf + 1);
-    /* buf+5 = Seq 起始, plen = TLV 字节数 */
-    tlv_unpack(sm->buf + 5, plen, frame);
+    /* feed成功只代表帧边界/CRC正确；TLV仍可能损坏。必须把解包失败
+     * 传回任务，不能把CRC正确误当作业务数据已经可用。 */
+    return tlv_unpack(sm->buf + 5, plen, frame);
 }

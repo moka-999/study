@@ -6,13 +6,11 @@
  * 快照留给新PC–MCU JSON业务层读取，不再向旧TLV TCP队列发文本。
  */
 #include "monitor_task.h"
+#include "board_interfaces.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "main.h"
 #include <string.h>
-
-extern i2c_if_t i2c4_if;
-extern spi_if_t spi2_if;
 
 static memory_monitor_t s_monitor;
 static monitor_snapshot_t s_latest;
@@ -58,8 +56,8 @@ void StartMonitorTask(void *argument)
         snapshot.power_state = pwr_ctrl_get_state();
 
         if (snapshot.power_state == PWR_CTRL_STATE_ON) {
-            if (!s_monitor.pac_ready || !s_monitor.adc_ready)
-                (void)memory_monitor_init(&s_monitor);
+            /* 组合层自身管理就绪态，只重试未初始化器件；任务不读取内部标志。 */
+            (void)memory_monitor_init(&s_monitor);
             /* 单器件失败时仍保留其他有效数据，由valid_mask标识。 */
             (void)memory_monitor_sample(&s_monitor, &snapshot.memory);
         } else {

@@ -11,7 +11,10 @@
 #include "usart.h"
 #include "ad7124.h"
 #include "bsp_gpio.h"
+#include "board_interfaces.h"
+#include "crc.h"
 #include "ddr_power.h"
+#include "frame.h"
 #include "mcp4725.h"
 #include "memory_monitor.h"
 #include "pac1934.h"
@@ -20,16 +23,15 @@
 #include "pc_state_machine.h"
 #include "pc_test_message.h"
 #include "pwr_ctrl.h"
+#include "rk_link.h"
+#include "state_machine.h"
+#include "uart_router.h"
 #include "tps62868.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #define MOCK_LOG_CAPACITY  128U
-
-extern i2c_if_t i2c1_if;
-extern i2c_if_t i2c2_if;
-extern i2c_if_t i2c4_if;
 
 typedef enum {
     MOCK_OP_READ,
@@ -565,11 +567,11 @@ static void test_lpddr_power_idd_bias_flow(void)
                pac1934_measure_all(&pac, idd) == IF_OK &&
                idd[0].current_ma == 312U && idd[1].current_ma == 625U &&
                idd[2].current_ma == 937U,
-               "RK进入IDD条件后MCU采集三轨电流");
+               "假设RK已进入IDD条件，Mock采集三轨电流（未验证握手）");
 
     mock_check(pwr_ctrl_request_off(30U) == PWR_CTRL_OK &&
                bsp_gpio_get(GPIO_FUNC_PWR_DDR_EN) == 0U,
-               "RK完成CKE低准备后先关闭DDR三轨");
+               "假设RK已确认安全下电，Mock先关闭DDR三轨（未验证握手）");
     pwr_ctrl_process(40U);
     mock_check(bsp_gpio_get(GPIO_FUNC_PWR_3V3_EN) == 0U,
                "LPDDR下电再关闭3V3");
@@ -766,6 +768,142 @@ static void test_pc_protocol_and_json(void)
                "PC协议拒绝UTF-8代理区编码");
 }
 
+/*
+ * 补充状态查表的边界检查，不重复上面的Version/Flag/JSON语法用例。
+ * 只调用内存解析API，不访问Flash、RK或socket。局部只放一个约4.1KiB的
+ * pc_sm_t；4KiB报文按字节生成，避免同时分配第二个大数组挤占8KiB任务栈。
+ */
+static void test_pc_state_table_boundaries(void)
+{
+    static const pc_sm_state_t invalid_states[] = {
+        (pc_sm_state_t)-1,
+        PC_SM_STATE_COUNT,
+        (pc_sm_state_t)123,
+    };
+    uint8_t packet[PC_PROTOCOL_HEADER_SIZE + 2U] = {0};
+    pc_sm_t stream;
+    pc_protocol_frame_t frame;
+    pc_sm_feed_result_t feed = PC_SM_FEED_MORE;
+    cJSON *root = NULL;
+
+    mock_write_be32(packet, PC_PROTOCOL_HEADER_SIZE);
+    mock_write_be16(packet + 4, PC_PROTOCOL_VERSION);
+    mock_write_be16(packet + 6, PC_PROTOCOL_FLAG_JSON);
+    mock_write_be16(packet + 10, PC_COMMAND_CLIENT_HEARTBEAT);
+    mock_write_be32(packet + 12, 0x11223344UL);
+    packet[PC_PROTOCOL_HEADER_SIZE] = '{';
+    packet[PC_PROTOCOL_HEADER_SIZE + 1U] = '}';
+    memset(&stream, 0xA5, sizeof(stream));
+    pc_sm_init(&stream);
+
+    for (uint32_t i = 0U; i < PC_PROTOCOL_HEADER_SIZE - 1U; i++) {
+        feed = pc_sm_feed(&stream, packet[i]);
+    }
+    mock_check(feed == PC_SM_FEED_MORE && stream.state == PC_SM_STATE_HEADER &&
+               stream.received == PC_PROTOCOL_HEADER_SIZE - 1U &&
+               pc_sm_get_frame(&stream, &frame) == -1,
+               "PC第17字节仍在HEADER且不能提前取帧");
+    feed = pc_sm_feed(&stream, packet[PC_PROTOCOL_HEADER_SIZE - 1U]);
+    mock_check(feed == PC_SM_FEED_FRAME_READY &&
+               stream.state == PC_SM_STATE_FRAME_READY &&
+               pc_sm_get_frame(&stream, &frame) == 0 && frame.json_length == 0U &&
+               pc_json_parse_object(frame.json, frame.json_length, &root, NULL) ==
+                   PC_JSON_ERROR_ARGUMENT && root == NULL,
+               "PC长度18在帧层直接READY，空正文由JSON层拒绝");
+
+    /* 18字节后的哨兵用于发现终态handler是否错误地先写缓冲、再拒绝。 */
+    mock_check(pc_sm_feed(&stream, 0xCCU) == PC_SM_FEED_ERROR &&
+               stream.state == PC_SM_STATE_ERROR && pc_sm_error(&stream) == PC_SM_ERROR_STATE &&
+               stream.received == PC_PROTOCOL_HEADER_SIZE &&
+               memcmp(stream.buffer, packet, PC_PROTOCOL_HEADER_SIZE) == 0 &&
+               stream.buffer[PC_PROTOCOL_HEADER_SIZE] == 0xA5U,
+               "PC READY拒收时不覆盖已收帧或增加received");
+    mock_check(pc_sm_feed(&stream, 0xDDU) == PC_SM_FEED_ERROR &&
+               pc_sm_error(&stream) == PC_SM_ERROR_STATE &&
+               stream.received == PC_PROTOCOL_HEADER_SIZE &&
+               memcmp(stream.buffer, packet, PC_PROTOCOL_HEADER_SIZE) == 0 &&
+               stream.buffer[PC_PROTOCOL_HEADER_SIZE] == 0xA5U,
+               "PC ERROR再次拒收时仍保留原缓冲和received");
+
+    /* COUNT只是表的边界，不是合法状态；负值转换后也不得用来索引函数表。 */
+    for (size_t i = 0U; i < sizeof(invalid_states) / sizeof(invalid_states[0]); i++) {
+        pc_sm_reset(&stream);
+        stream.buffer[0] = 0xA5U;
+        stream.state = invalid_states[i];
+        mock_check(pc_sm_feed(&stream, 0xCCU) == PC_SM_FEED_ERROR &&
+                   stream.state == PC_SM_STATE_ERROR &&
+                   pc_sm_error(&stream) == PC_SM_ERROR_STATE &&
+                   stream.received == 0U && stream.buffer[0] == 0xA5U,
+                   "PC负状态/COUNT/越界状态在查表前安全拒绝");
+    }
+
+    /* 模拟前连接只收到半个头便断开；init必须清掉计数，不能拼进新连接。 */
+    pc_sm_reset(&stream);
+    mock_write_be32(packet, sizeof(packet));
+    for (uint32_t i = 0U; i < 7U; i++) (void)pc_sm_feed(&stream, packet[i]);
+    pc_sm_init(&stream);
+    int reset_ok = stream.state == PC_SM_STATE_HEADER && stream.received == 0U &&
+                   stream.expected_length == 0U && pc_sm_error(&stream) == PC_SM_ERROR_NONE &&
+                   !pc_sm_is_receiving(&stream) && pc_sm_frame_data(&stream) == NULL;
+    mock_write_be32(packet + 12, 0x55667788UL);
+    for (uint32_t i = 0U; i < sizeof(packet); i++) feed = pc_sm_feed(&stream, packet[i]);
+    mock_check(reset_ok && feed == PC_SM_FEED_FRAME_READY &&
+               pc_sm_get_frame(&stream, &frame) == 0 && frame.sequence == 0x55667788UL &&
+               frame.json_length == 2U && memcmp(frame.json, "{}", 2U) == 0,
+               "PC新连接初始化丢弃旧半帧，完整解析新连接报文");
+
+    /* 同一连接处理完一帧后reset，再处理不同Length/命令/Seq的下一帧。 */
+    pc_sm_reset(&stream);
+    mock_write_be32(packet, PC_PROTOCOL_HEADER_SIZE);
+    mock_write_be16(packet + 10, PC_COMMAND_QUERY_TESTER_INFO);
+    mock_write_be32(packet + 12, 0x99AABBCCUL);
+    for (uint32_t i = 0U; i < PC_PROTOCOL_HEADER_SIZE; i++) {
+        feed = pc_sm_feed(&stream, packet[i]);
+    }
+    mock_check(feed == PC_SM_FEED_FRAME_READY && pc_sm_get_frame(&stream, &frame) == 0 &&
+               frame.command_id == PC_COMMAND_QUERY_TESTER_INFO &&
+               frame.sequence == 0x99AABBCCUL && frame.json_length == 0U,
+               "PC连续第二帧不继承前帧长度或Seq");
+
+    pc_sm_reset(&stream);
+    mock_write_be32(packet, PC_PROTOCOL_MAX_PDU);
+    int prefix_ok = 1;
+    for (uint32_t i = 0U; i < PC_PROTOCOL_MAX_PDU - 1U; i++) {
+        uint8_t byte = i < PC_PROTOCOL_HEADER_SIZE ? packet[i] :
+                       (i == PC_PROTOCOL_HEADER_SIZE ? '{' : ' ');
+        if (pc_sm_feed(&stream, byte) != PC_SM_FEED_MORE) prefix_ok = 0;
+    }
+    prefix_ok = prefix_ok && stream.state == PC_SM_STATE_BODY &&
+                stream.received == PC_PROTOCOL_MAX_PDU - 1U;
+    feed = pc_sm_feed(&stream, '}');
+    mock_check(prefix_ok && feed == PC_SM_FEED_FRAME_READY &&
+               pc_sm_get_frame(&stream, &frame) == 0 && frame.length == PC_PROTOCOL_MAX_PDU &&
+               frame.json_length == PC_PROTOCOL_MAX_JSON_SIZE && frame.json[0] == '{' &&
+               frame.json[PC_PROTOCOL_MAX_JSON_SIZE - 1U] == '}',
+               "PC满4KiB帧仅在第4096字节进入READY，正文4078字节");
+
+    feed = pc_sm_feed(&stream, 0xCCU);
+    int buffer_unchanged = 1;
+    for (uint32_t i = 0U; i < PC_PROTOCOL_MAX_PDU; i++) {
+        uint8_t expected = i < PC_PROTOCOL_HEADER_SIZE ? packet[i] :
+                           (i == PC_PROTOCOL_HEADER_SIZE ? '{' :
+                            (i == PC_PROTOCOL_MAX_PDU - 1U ? '}' : ' '));
+        if (stream.buffer[i] != expected) buffer_unchanged = 0;
+    }
+    mock_check(feed == PC_SM_FEED_ERROR && pc_sm_error(&stream) == PC_SM_ERROR_STATE &&
+               stream.received == PC_PROTOCOL_MAX_PDU && buffer_unchanged,
+               "PC满帧后拒收额外字节，4KiB缓冲逐字节保持不变");
+
+    /* 防御损坏的内部计数：即便误处于BODY，缓冲已满也不能继续写入。 */
+    stream.state = PC_SM_STATE_BODY;
+    stream.error = PC_SM_ERROR_NONE;
+    mock_check(pc_sm_feed(&stream, 0xDDU) == PC_SM_FEED_ERROR &&
+               pc_sm_error(&stream) == PC_SM_ERROR_STATE &&
+               stream.received == PC_PROTOCOL_MAX_PDU &&
+               stream.buffer[PC_PROTOCOL_MAX_PDU - 1U] == '}',
+               "PC BODY遇到已满缓冲时拒绝越界写入");
+}
+
 static void test_pc_test_json_contract(void)
 {
     static const char request_json[] =
@@ -850,11 +988,44 @@ static void test_pc_test_json_contract(void)
     cJSON_Delete(root);
 }
 
-/* 直接执行正式dispatch；使用心跳避免Mock镜像改写W25Q256正式FRU扇区。 */
+/*
+ * 直接执行正式dispatch，覆盖查表命中、未命中和拒绝路径。
+ * 不发送合法的测试仪信息查询，避免Mock镜像改写W25Q256正式FRU扇区；
+ * 仅检查非法查询在字段校验阶段被拒绝，真实FRU读取另由Flash/网络测试验收。
+ */
 static void test_pc_dispatch(void)
 {
     static const uint8_t empty_json[] = {'{', '}'};
-    const pc_protocol_frame_t request = {
+    static const struct {
+        uint16_t command_id;
+        const char *json;
+        pc_dispatch_result_t expected;
+        const char *label;
+    } cases[] = {
+        {PC_COMMAND_CLIENT_HEARTBEAT, "{\"state\":1}", PC_DISPATCH_ERROR,
+         "PC查表拒绝携带字段的心跳"},
+        {PC_COMMAND_QUERY_TESTER_INFO, "{\"extra\":1}", PC_DISPATCH_ERROR,
+         "PC查表拒绝非空信息查询，不访问Flash"},
+        {PC_COMMAND_SERVER_HEARTBEAT, "{}", PC_DISPATCH_ERROR,
+         "PC查表拒绝反向MCU心跳"},
+        {PC_COMMAND_TESTER_INFO_RESP, "{}", PC_DISPATCH_ERROR,
+         "PC查表拒绝反向测试仪信息响应"},
+        {PC_COMMAND_START_TEST, "{\"algorithmName\":\"demo\",\"algorithmIndex\":1}",
+         PC_DISPATCH_NO_RESPONSE, "PC查表校验合法START_TEST，不提前回复"},
+        {PC_COMMAND_START_TEST, "{}", PC_DISPATCH_ERROR,
+         "PC查表拒绝START_TEST缺失必填字段"},
+        {PC_COMMAND_START_TEST, "{\"algorithmName\":\"demo\",\"algorithmIndex\":1.5}",
+         PC_DISPATCH_ERROR, "PC查表拒绝非整数algorithmIndex"},
+        {0xFFFFU, "{}", PC_DISPATCH_NO_RESPONSE,
+         "PC查表未命中时不伪造响应"},
+        {0xFFFFU, "{\"extra\":1}", PC_DISPATCH_NO_RESPONSE,
+         "PC未知命令仍接受合法非空对象"},
+        {0xFFFFU, "[]", PC_DISPATCH_ERROR,
+         "PC未知命令也必须使用JSON对象"},
+        {PC_COMMAND_CLIENT_HEARTBEAT, "{", PC_DISPATCH_ERROR,
+         "PC查表前拒绝非法JSON"},
+    };
+    pc_protocol_frame_t request = {
         .service_id = 0x1234U,
         .command_id = PC_COMMAND_CLIENT_HEARTBEAT,
         .sequence = 0x55667788UL,
@@ -879,8 +1050,261 @@ static void test_pc_dispatch(void)
                pc_sm_get_frame(&response_sm, &response_frame) == 0 &&
                response_frame.service_id == request.service_id &&
                response_frame.command_id == PC_COMMAND_SERVER_HEARTBEAT &&
-               response_frame.sequence == request.sequence,
+               response_frame.sequence == request.sequence &&
+               response_frame.json_length == sizeof(empty_json) &&
+               memcmp(response_frame.json, empty_json, sizeof(empty_json)) == 0,
                "PC dispatch响应命令并回显ServiceID/Seq");
+
+    for (size_t i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        request.command_id = cases[i].command_id;
+        request.json = (const uint8_t *)cases[i].json;
+        request.json_length = (uint32_t)strlen(cases[i].json);
+        /* 模拟前一帧留下的有效长度，确保错误/无响应不会发送旧PDU。 */
+        response.length = 123U;
+        mock_check(pc_dispatch_handle(&request, &response) == cases[i].expected &&
+                   response.length == 0U,
+                   cases[i].label);
+    }
+
+    mock_check(pc_dispatch_handle(NULL, &response) == PC_DISPATCH_ERROR &&
+               pc_dispatch_handle(&request, NULL) == PC_DISPATCH_ERROR,
+               "PC dispatch拒绝空参数");
+
+    /* 分发器本身不保存上次处理结果；错误帧之后再次调用仍可处理合法命令。 */
+    request.command_id = PC_COMMAND_CLIENT_HEARTBEAT;
+    request.json = empty_json;
+    request.json_length = sizeof(empty_json);
+    mock_check(pc_dispatch_handle(&request, &response) == PC_DISPATCH_RESPONSE_READY &&
+               response.length == PC_PROTOCOL_HEADER_SIZE + sizeof(empty_json),
+               "PC查表错误路径后再次处理合法心跳");
+}
+
+/*
+ * 只测试适配入口在接触HAL前的拒绝路径，不需要外部I2C/SPI器件。
+ * 新RK序号分配函数也可在此隔离镜像验证；不读取/写入Flash。
+ */
+static void test_interface_boundaries(void)
+{
+    uint8_t byte = 0U;
+    spi_if_t unavailable_spi = {0};
+
+    mock_check(i2c1_if.read_reg(NULL, 0x49U, 0U, &byte) == IF_ERR &&
+               i2c1_if.read_reg(&i2c1_if, 0x49U, 0U, NULL) == IF_ERR,
+               "I2C拒绝空接口和空读取缓冲");
+    mock_check(i2c2_if.read_reg(&i2c2_if, 0x41U, 0U, &byte) == IF_ERR &&
+               i2c2_if.write_cmd(&i2c2_if, 0x41U, 0U) == IF_ERR,
+               "V2未配置I2C2安全拒绝访问");
+    mock_check(i2c1_if.is_ready(&i2c1_if, 0x80U) == IF_ERR &&
+               i2c1_if.write_bytes(&i2c1_if, 0x49U, NULL, 1U) == IF_ERR &&
+               i2c1_if.write_bytes(&i2c1_if, 0x49U, &byte, 0U) == IF_ERR,
+               "I2C拒绝超范围地址和非法写长度");
+    mock_check(spi2_if.transfer(NULL, &byte, &byte, 1U) == IF_ERR &&
+               spi2_if.send(&unavailable_spi, &byte, 1U) == IF_ERR,
+               "SPI拒绝空接口和空硬件句柄");
+    mock_check(spi2_if.transfer(&spi2_if, &byte, NULL, 1U) == IF_ERR &&
+               spi2_if.send(&spi2_if, &byte, 0U) == IF_ERR,
+               "SPI拒绝空接收缓冲和零长度");
+    mock_check(uart_send(-1, &byte, 1U) == IF_ERR &&
+               uart_send(2, &byte, 1U) == IF_ERR &&
+               uart_poll_rx(-1, &byte, 1U) == 0,
+               "UART路由拒绝负槽位和越界槽位");
+    mock_check(uart1_if.send(NULL, &byte, 1U) == IF_ERR &&
+               uart1_if.send(&uart1_if, NULL, 1U) == IF_ERR,
+               "UART适配拒绝空参数且不写TX环");
+
+    uint64_t first = rk_link_next_sequence();
+    mock_check(rk_link_next_sequence() == first + 1U,
+               "RK共享序号入口连续分配且不依赖心跳任务");
+}
+
+/*
+ * 为packet[13..]中预先写好的TLV补齐当前线格式；允许构造CRC正确但TLV
+ * 损坏的报文，避免只测打包器能够生成的合法数据。仅本测试调用，长度不
+ * 超过TLV_PAYLOAD_MAX；Seq固定为01..08，CRC仍为小端、且不覆盖Seq。
+ */
+static uint16_t mock_rk_seal_packet(uint8_t *packet, uint16_t payload_length)
+{
+    packet[0] = TLV_SYNC_HEADER;
+    mock_write_be16(packet + 1, payload_length);
+    uint16_t crc = crc16_modbus(packet, 3U);
+    packet[3] = (uint8_t)crc;
+    packet[4] = (uint8_t)(crc >> 8);
+    for (uint8_t i = 0U; i < 8U; i++) packet[5U + i] = i + 1U;
+    crc = crc16_modbus(packet + 1, 2U);
+    crc = crc16_modbus_continue(crc, packet + 13, payload_length);
+    packet[13U + payload_length] = (uint8_t)crc;
+    packet[14U + payload_length] = (uint8_t)(crc >> 8);
+    packet[15U + payload_length] = TLV_SYNC_FOOTER;
+    return 16U + payload_length;
+}
+
+/* 每次只喂一帧，保留其中最后一个非零事件；不复位，便于验证坏帧后恢复。 */
+static int mock_rk_feed_packet(tlv_sm_t *stream, const uint8_t *packet,
+                               uint16_t length)
+{
+    int event = 0;
+    for (uint16_t i = 0U; i < length; i++) {
+        int result = tlv_sm_feed(stream, packet[i]);
+        if (result != 0) event = result;
+    }
+    return event;
+}
+
+/* 检查整个输出对象，包括旧Seq、单元表和参数区都被撤销，而不只检查count。 */
+static int mock_rk_frame_is_clear(const tlv_frame_t *frame)
+{
+    const uint8_t *bytes = (const uint8_t *)frame;
+    for (size_t i = 0U; i < sizeof(*frame); i++) {
+        if (bytes[i] != 0U) return 0;
+    }
+    return 1;
+}
+
+/*
+ * 直接执行正式RK解包器和状态机，全部报文在内存中构造，不访问Flash、
+ * RK串口或GPIO。三个大对象合计约3.3KiB，复用同一缓冲避免挤占8KiB任务栈。
+ * 这组检查仅证明解析边界，不等于RK真实业务、异步结果或硬件联调通过。
+ */
+static void test_rk_tlv_validation(void)
+{
+    static const uint8_t result_tlv[] = {0x50U, 0U, 0U, 3U, 0U, 0x29U, 1U};
+    static const struct {
+        uint8_t tlv[13];
+        uint16_t length;
+        const char *label;
+    } malformed[] = {
+        {{0x50U, 0U, 0U, 0U}, 4U, "RK拒绝命令容器缺失CmdID并清空输出"},
+        {{0x50U, 0U, 0U, 1U, 0U}, 5U, "RK拒绝仅1字节CmdID并清空输出"},
+        {{0U, 0U, 0U, 1U, 0xABU}, 5U, "RK拒绝非空心跳并清空输出"},
+        {{0x50U, 0U, 0U, 3U, 0U, 1U, 0xABU,
+          0x50U, 0U, 0U, 3U, 0U, 0x29U}, 13U,
+         "RK后段Value截断时撤销前段命令和参数"},
+    };
+    static const uint16_t counted_types[] = {TLV_TYPE_CMD, 0x5002U,
+                                             TLV_TYPE_HEARTBEAT};
+    uint8_t packet[TLV_FRAME_MAX] = {0};
+    tlv_sm_t stream;
+    tlv_frame_t frame;
+    uint16_t length;
+    int event;
+
+    /* 短Length在帧头阶段就拒绝；直接调用解包API也必须清除旧输出。 */
+    for (uint16_t short_length = 0U; short_length < TLV_PAYLOAD_MIN; short_length++) {
+        (void)mock_rk_seal_packet(packet, short_length);
+        tlv_sm_init(&stream);
+        event = mock_rk_feed_packet(&stream, packet, 5U);
+        memset(&frame, 0xCC, sizeof(frame));
+        mock_check(event == 0 && stream.state != TLV_SM_DATA &&
+                   tlv_unpack(packet + 5, short_length, &frame) == -1 &&
+                   mock_rk_frame_is_clear(&frame),
+                   "RK拒绝0至3字节TLV区且清空输出");
+    }
+    memset(&frame, 0xCC, sizeof(frame));
+    mock_check(tlv_unpack(packet + 5, TLV_PAYLOAD_MAX + 1U, &frame) == -1 &&
+               mock_rk_frame_is_clear(&frame), "RK拒绝超长TLV区且清空输出");
+    memset(&frame, 0xCC, sizeof(frame));
+    mock_check(tlv_unpack(NULL, TLV_PAYLOAD_MIN, &frame) == -1 &&
+               mock_rk_frame_is_clear(&frame), "RK拒绝空输入且清空输出");
+    mock_check(tlv_unpack(packet + 5, TLV_PAYLOAD_MIN, NULL) == -1,
+               "RK拒绝空输出指针");
+
+    tlv_sm_init(&stream);
+    for (size_t i = 0U; i < sizeof(malformed) / sizeof(malformed[0]); i++) {
+        memcpy(packet + 13, malformed[i].tlv, malformed[i].length);
+        length = mock_rk_seal_packet(packet, malformed[i].length);
+        event = mock_rk_feed_packet(&stream, packet, length);
+        memset(&frame, 0xCC, sizeof(frame));
+        mock_check(event == 1 && tlv_sm_get_frame(&stream, &frame) == -1 &&
+                   mock_rk_frame_is_clear(&frame), malformed[i].label);
+    }
+    for (uint16_t tail = 1U; tail <= 3U; tail++) {
+        memcpy(packet + 13, result_tlv, sizeof(result_tlv));
+        memset(packet + 13 + sizeof(result_tlv), 0, tail);
+        length = mock_rk_seal_packet(packet, sizeof(result_tlv) + tail);
+        event = mock_rk_feed_packet(&stream, packet, length);
+        memset(&frame, 0xCC, sizeof(frame));
+        mock_check(event == 1 && tlv_sm_get_frame(&stream, &frame) == -1 &&
+                   mock_rk_frame_is_clear(&frame),
+                   "RK拒绝尾部1至3字节残缺TLV头并撤销前缀");
+    }
+
+    /* 前面的坏TLV帧之后，不重新初始化状态机，也应能处理下一帧。 */
+    memcpy(packet + 13, result_tlv, sizeof(result_tlv));
+    length = mock_rk_seal_packet(packet, sizeof(result_tlv));
+    event = mock_rk_feed_packet(&stream, packet, length);
+    mock_check(event == 1 && tlv_sm_get_frame(&stream, &frame) == 1 &&
+               frame.sequence == UINT64_C(0x0102030405060708) &&
+               frame.units[0].cmd == 0x0029U && frame.units[0].data_len == 1U &&
+               frame.payload[0] == 1U,
+               "RK坏TLV后恢复，且允许结果CmdID 0x0029");
+    packet[14] = 2U; /* Type=0x5002仍属未知Type，本次不扩展线协议。 */
+    length = mock_rk_seal_packet(packet, sizeof(result_tlv));
+    event = mock_rk_feed_packet(&stream, packet, length);
+    mock_check(event == 1 && tlv_sm_get_frame(&stream, &frame) == 0 &&
+               frame.count == 0U && frame.payload_used == 0U,
+               "RK合法0x5002结构被跳过，零输出不当成错误");
+
+    /* 数量上限按线上全部TLV计数，不只计算解包后保存的命令单元。 */
+    for (size_t kind = 0U; kind < sizeof(counted_types) / sizeof(counted_types[0]); kind++) {
+        uint16_t unit_length = counted_types[kind] == TLV_TYPE_CMD ? 6U : 4U;
+        for (uint16_t count = 16U; count <= 17U; count++) {
+            for (uint16_t i = 0U; i < count; i++) {
+                uint8_t *unit = packet + 13 + i * unit_length;
+                mock_write_be16(unit, counted_types[kind]);
+                mock_write_be16(unit + 2, unit_length - 4U);
+                if (unit_length == 6U) mock_write_be16(unit + 4, 0x0029U);
+            }
+            length = mock_rk_seal_packet(packet, count * unit_length);
+            event = mock_rk_feed_packet(&stream, packet, length);
+            memset(&frame, 0xCC, sizeof(frame));
+            int result = event == 1 ? tlv_sm_get_frame(&stream, &frame) : -2;
+            int expected = kind == 0U ? 16 : (kind == 1U ? 0 : 1);
+            mock_check(event == 1 &&
+                       (count == 16U ? result == expected :
+                        result == -1 && mock_rk_frame_is_clear(&frame)),
+                       count == 16U ? "RK接受16个命令/未知Type/心跳" :
+                                      "RK拒绝17个命令/未知Type/心跳且清空输出");
+        }
+    }
+    for (uint16_t i = 0U; i < 15U; i++) {
+        memcpy(packet + 13 + i * 6U, result_tlv, 6U);
+        packet[13U + i * 6U + 3U] = 2U;
+    }
+    memset(packet + 13 + 90, 0, 4U); /* 15个命令+1个空心跳，线上共16个。 */
+    length = mock_rk_seal_packet(packet, 94U);
+    event = mock_rk_feed_packet(&stream, packet, length);
+    mock_check(event == 1 && tlv_sm_get_frame(&stream, &frame) == 15,
+               "RK混合16个TLV有效，心跳不挤占命令输出");
+    memcpy(packet + 13 + 94, (uint8_t[]){0x50U, 2U, 0U, 0U}, 4U);
+    length = mock_rk_seal_packet(packet, 98U);
+    event = mock_rk_feed_packet(&stream, packet, length);
+    memset(&frame, 0xCC, sizeof(frame));
+    mock_check(event == 1 && tlv_sm_get_frame(&stream, &frame) == -1 &&
+               mock_rk_frame_is_clear(&frame),
+               "RK命令加心跳加未知Type共17个时原子拒绝");
+
+    memset(packet + 13, 0xA6, TLV_PAYLOAD_MAX);
+    mock_write_be16(packet + 13, TLV_TYPE_CMD);
+    mock_write_be16(packet + 15, TLV_PAYLOAD_MAX - 4U);
+    mock_write_be16(packet + 17, 0x0029U);
+    length = mock_rk_seal_packet(packet, TLV_PAYLOAD_MAX);
+    event = mock_rk_feed_packet(&stream, packet, length);
+    mock_check(event == 1 && tlv_sm_get_frame(&stream, &frame) == 1 &&
+               length == TLV_FRAME_MAX && frame.units[0].data_len == TLV_CMD_DATA_MAX &&
+               frame.payload_used == TLV_CMD_DATA_MAX &&
+               memcmp(frame.payload, packet + 19, TLV_CMD_DATA_MAX) == 0,
+               "RK最大1040字节帧完整解析1018字节命令参数");
+
+    memcpy(packet + 13, result_tlv, sizeof(result_tlv));
+    length = mock_rk_seal_packet(packet, sizeof(result_tlv));
+    packet[length - 3U] ^= 1U; /* 仅破坏FrameCRC，帧头仍合法。 */
+    mock_check(mock_rk_feed_packet(&stream, packet, length) == -1 &&
+               stream.state == TLV_SM_IDLE, "RK帧CRC错误不产生可取帧事件");
+    packet[length - 3U] ^= 1U;
+    event = mock_rk_feed_packet(&stream, packet, length);
+    mock_check(event == 1 && tlv_sm_get_frame(&stream, &frame) == 1 &&
+               frame.units[0].cmd == 0x0029U,
+               "RK坏CRC帧之后无需重启即可解析下一合法帧");
 }
 
 void StartDriverMockTestTask(void *argument)
@@ -896,8 +1320,11 @@ void StartDriverMockTestTask(void *argument)
     test_memory_monitor();
     test_lpddr_power_idd_bias_flow();
     test_pc_protocol_and_json();
+    test_pc_state_table_boundaries();
     test_pc_test_json_contract();
     test_pc_dispatch();
+    test_interface_boundaries();
+    test_rk_tlv_validation();
 
     mock_uart_printf("RESULT: %lu PASS, %lu FAIL\r\n",
                      (unsigned long)s_pass_count, (unsigned long)s_fail_count);

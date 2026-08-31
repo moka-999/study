@@ -242,7 +242,7 @@
  * 设备句柄
  * ═══════════════════════════════════════════════════════════════════ */
 typedef struct {
-    spi_if_t     *spi;           /* SPI 总线接口                    */
+    spi_if_t     *spi;           /* 借用SPI接口；需覆盖本句柄使用期。 */
     GPIO_TypeDef *cs_port;       /* CS GPIO 端口                    */
     uint16_t      cs_pin;        /* CS GPIO 引脚                    */
     uint8_t       id;            /* ID 寄存器值 (上电后读取)         */
@@ -256,6 +256,12 @@ typedef struct {
  * ═══════════════════════════════════════════════════════════════════ */
 
 /* ── 基础操作 ── */
+/*
+ * 本驱动为同步、不可重入接口；调用方负责串行访问同一SPI总线及片选。
+ * 配置/读取不在ISR执行；wait_ms可让出CPU，但不会使整个API变成异步。
+ * 读写缓冲由调用方持有，函数返回后可复用；len单位为字节。
+ * IF_OK表示本次操作完成；ID/实测值验收仍需真实器件，Mock不代表校准。
+ */
 int  ad7124_reset(ad7124_t *d);
 int  ad7124_read_id(ad7124_t *d);
 int  ad7124_read_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len);

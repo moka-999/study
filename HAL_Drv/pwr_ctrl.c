@@ -76,7 +76,7 @@ pwr_ctrl_result_t pwr_ctrl_configure(const pwr_ctrl_config_t *config)
 
 void pwr_ctrl_init(const pwr_ctrl_config_t *config)
 {
-    /* bsp_gpio_init() 会先配置输出再写低；随后重复关断是有意的安全兜底。 */
+    /* bsp_gpio_init()先预置低电平再配置输出；随后重复关断是有意的安全兜底。 */
     bsp_gpio_init();
     force_all_rails_off();
     s_state = PWR_CTRL_STATE_OFF;

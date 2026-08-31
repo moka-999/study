@@ -1,9 +1,10 @@
 /*
- * PC-MCU TCP字节流解析状态机。
+ * PC-MCU TCP字节流解析状态机：状态 -> 字节处理函数查表。
  *
  * TCP只保证字节顺序，不保证一次recv()对应一个协议帧。本模块逐字节收集
  * 固定18字节头和JSON正文，并在头字段刚到齐时尽早检查Length/Version/Flag。
  * 它只负责传输层组帧，不解析JSON字段，也不处理CommandID业务语义。
+ * 状态表在pc_state_machine.c；业务命令表在pc_dispatch.c，两者互相独立。
  *
  * 状态转移：
  *   HEADER -> BODY -> FRAME_READY
@@ -28,6 +29,7 @@ typedef enum {
     PC_SM_STATE_BODY,         /* 固定头有效，正在收集JSON正文。 */
     PC_SM_STATE_FRAME_READY,  /* 完整PDU已收齐，等待上层取帧。 */
     PC_SM_STATE_ERROR,        /* 当前连接已失步，上层应关闭socket。 */
+    PC_SM_STATE_COUNT,        /* 状态表边界，不是可运行状态；新增状态放在它之前。 */
 } pc_sm_state_t;
 
 typedef enum {
@@ -58,7 +60,8 @@ void pc_sm_init(pc_sm_t *sm);
 /* 完整帧处理完后回到HEADER；不清空buffer，旧字节由received=0隔离。 */
 void pc_sm_reset(pc_sm_t *sm);
 
-/* 喂入一个TCP字节，返回继续接收、完整帧或致命错误。 */
+/* 喂入一个TCP字节：先检查状态表下标和缓冲边界，再调用当前状态的函数。
+ * 返回继续接收、完整帧或致命错误；FRAME_READY/ERROR继续喂入会拒绝写缓冲。 */
 pc_sm_feed_result_t pc_sm_feed(pc_sm_t *sm, uint8_t byte);
 
 /*

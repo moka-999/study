@@ -1,8 +1,9 @@
 /*
  * PC-MCU本地命令分发层。
  *
- * 输入是状态机已经收齐的完整帧；本模块负责严格JSON解析、命令方向/字段校验，
- * 并在本地命令需要回复时生成完整PC响应PDU。它不调用socket，也不接触RK链路。
+ * 输入是状态机已经收齐的完整帧；先严格解析JSON，再按CommandID查只读命令表，
+ * 调用对应处理函数校验方向/字段并生成完整PC响应PDU。
+ * 它不调用socket，也不接触RK链路；新增命令只需添加处理函数和表项。
  */
 #ifndef PC_DISPATCH_H
 #define PC_DISPATCH_H
@@ -28,7 +29,12 @@ typedef struct {
     uint32_t length;                           /* data中的有效字节数。 */
 } pc_dispatch_response_t;
 
-/* 解析并处理一条PC请求；响应始终回显请求ServiceID和PC Seq。 */
+/*
+ * 解析并查表处理一条PC请求；响应始终回显请求ServiceID和PC Seq。
+ * 未登记的命令仍须通过严格JSON校验，通过后返回NO_RESPONSE，不隐式转发。
+ * 解析得到的cJSON对象由本函数统一释放，原始帧/正文仍归调用方管理。
+ * 调用方只需依据返回值发送response、继续接收或关闭连接。
+ */
 pc_dispatch_result_t pc_dispatch_handle(
     const pc_protocol_frame_t *request,
     pc_dispatch_response_t *response);

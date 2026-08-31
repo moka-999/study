@@ -1,79 +1,124 @@
 /*
- * ===================================================================
- * I2C 接口 — STM32 HAL 实现
- * ===================================================================
- * 实现 i2c_if_t 接口, 底层调用 HAL_I2C_Mem_xxx 系列函数。
- * 移植指南: 新 MCU 改这个文件, i2c_if_t 实例名不变 → 应用层零改动。
- * ===================================================================
+ * Apollo V2硬件I2C适配：7位地址由本层左移一次，再调用STM32 HAL。
+ * 只处理总线事务，不解释TPS/PAC/MCP寄存器或决定器件初始化顺序。
+ * 事务同步执行；HAL非成功状态沿用IF_ERR，不改变现有调用方合同。
  */
-#include "hal_if.h"
+#include "board_interfaces.h"
 #include "i2c.h"
 
-/* ── 单寄存器读 ── */
-static int _rd(i2c_if_t *b, uint8_t d, uint8_t r, uint8_t *v)
-{ if (!b->handle) return IF_ERR; return HAL_I2C_Mem_Read(b->handle,d<<1,r,I2C_MEMADD_SIZE_8BIT,v,1,100)==HAL_OK?IF_OK:IF_ERR; }
+#include <stddef.h>
 
-/* ── 单寄存器写 ── */
-static int _wr(i2c_if_t *b, uint8_t d, uint8_t r, uint8_t v)
-{ if (!b->handle) return IF_ERR; return HAL_I2C_Mem_Write(b->handle,d<<1,r,I2C_MEMADD_SIZE_8BIT,&v,1,100)==HAL_OK?IF_OK:IF_ERR; }
+#define I2C_TRANSFER_TIMEOUT_MS 100U
+#define I2C_READY_TIMEOUT_MS     10U
+#define I2C_READY_TRIALS          3U
 
-/* ── 批量读 ── */
-static int _rdm(i2c_if_t *b, uint8_t d, uint8_t r, uint8_t *buf, uint16_t l)
-{ if (!b->handle) return IF_ERR; return HAL_I2C_Mem_Read(b->handle,d<<1,r,I2C_MEMADD_SIZE_8BIT,buf,l,100)==HAL_OK?IF_OK:IF_ERR; }
+/* 空接口、未配置的I2C2和超过7位范围的地址不能进入HAL。 */
+static int bus_is_valid(const i2c_if_t *bus, uint8_t device_address)
+{
+    return bus != NULL && bus->handle != NULL && device_address <= 0x7FU;
+}
 
-/* ── 原始数据写（无寄存器地址）── */
-static int _wrm(i2c_if_t *b, uint8_t d, const uint8_t *buf, uint16_t l)
-{ if (!b->handle || !buf || !l) return IF_ERR; return HAL_I2C_Master_Transmit(b->handle,d<<1,(uint8_t *)buf,l,100)==HAL_OK?IF_OK:IF_ERR; }
+static int i2c_read_bytes(i2c_if_t *bus, uint8_t device_address,
+                         uint8_t register_address, uint8_t *buffer,
+                         uint16_t length)
+{
+    if (!bus_is_valid(bus, device_address) || buffer == NULL || length == 0U) {
+        return IF_ERR;
+    }
+    return HAL_I2C_Mem_Read(bus->handle, (uint16_t)device_address << 1,
+                           register_address, I2C_MEMADD_SIZE_8BIT,
+                           buffer, length, I2C_TRANSFER_TIMEOUT_MS) == HAL_OK
+               ? IF_OK : IF_ERR;
+}
 
-/* ── 命令字节 (Send Byte 协议: START→addr+W→cmd→STOP, 无数据) ── */
-static int _cmd(i2c_if_t *b, uint8_t d, uint8_t c)
-{ if (!b->handle) return IF_ERR; return HAL_I2C_Master_Transmit(b->handle,d<<1,&c,1,100)==HAL_OK?IF_OK:IF_ERR; }
+/* 单寄存器读复用批量读，保持参数检查、地址和超时完全一致。 */
+static int i2c_read_register(i2c_if_t *bus, uint8_t device_address,
+                            uint8_t register_address, uint8_t *value)
+{
+    return i2c_read_bytes(bus, device_address, register_address, value, 1U);
+}
 
-/* ── 设备在线检测 ── */
-static int _rdy(i2c_if_t *b, uint8_t d)
-{ if (!b->handle) return IF_ERR; return HAL_I2C_IsDeviceReady(b->handle,d<<1,3,10)==HAL_OK?IF_OK:IF_ERR; }
+static int i2c_write_register(i2c_if_t *bus, uint8_t device_address,
+                             uint8_t register_address, uint8_t value)
+{
+    if (!bus_is_valid(bus, device_address)) {
+        return IF_ERR;
+    }
+    return HAL_I2C_Mem_Write(bus->handle, (uint16_t)device_address << 1,
+                            register_address, I2C_MEMADD_SIZE_8BIT,
+                            &value, 1U, I2C_TRANSFER_TIMEOUT_MS) == HAL_OK
+               ? IF_OK : IF_ERR;
+}
 
-/*
- * ── 工厂实例 ───────────────────────────────────────────────────
- * I2C1, PB8=SCL, PB9=SDA, 100KHz, CubeMX 生成 MX_I2C1_Init()
- * 后续新增 I2C2/I2C3 只需仿照声明 i2c2_if/i2c3_if
- */
+/* 原始写：例如MCP4725 Fast Write，buffer自身已包含完整器件载荷。 */
+static int i2c_write_bytes(i2c_if_t *bus, uint8_t device_address,
+                          const uint8_t *buffer, uint16_t length)
+{
+    if (!bus_is_valid(bus, device_address) || buffer == NULL || length == 0U) {
+        return IF_ERR;
+    }
+    /* HAL旧签名未声明const；Master_Transmit不会修改发送缓冲。 */
+    return HAL_I2C_Master_Transmit(bus->handle, (uint16_t)device_address << 1,
+                                  (uint8_t *)buffer, length,
+                                  I2C_TRANSFER_TIMEOUT_MS) == HAL_OK
+               ? IF_OK : IF_ERR;
+}
+
+/* Send Byte：START→地址+W→command→STOP，没有额外寄存器或数据字节。 */
+static int i2c_write_command(i2c_if_t *bus, uint8_t device_address, uint8_t command)
+{
+    return i2c_write_bytes(bus, device_address, &command, 1U);
+}
+
+static int i2c_is_ready(i2c_if_t *bus, uint8_t device_address)
+{
+    if (!bus_is_valid(bus, device_address)) {
+        return IF_ERR;
+    }
+    return HAL_I2C_IsDeviceReady(bus->handle, (uint16_t)device_address << 1,
+                                I2C_READY_TRIALS, I2C_READY_TIMEOUT_MS) == HAL_OK
+               ? IF_OK : IF_ERR;
+}
+
+/* 具体引脚以本工程.ioc为准；这里只绑定已生成的HAL句柄。 */
 i2c_if_t i2c1_if = {
-  .handle     = &hi2c1,
-  .read_reg   = _rd,
-  .write_reg  = _wr,
-  .read_bytes = _rdm,
-  .write_bytes = _wrm,
-  .write_cmd  = _cmd,
-  .is_ready   = _rdy,
+    .handle = &hi2c1,
+    .read_reg = i2c_read_register,
+    .write_reg = i2c_write_register,
+    .read_bytes = i2c_read_bytes,
+    .write_bytes = i2c_write_bytes,
+    .write_cmd = i2c_write_command,
+    .is_ready = i2c_is_ready,
 };
 
-i2c_if_t i2c2_if = {               /* B2: I2C2 (PF0/1); V2 未配置, handle=NULL 禁用 */
-  .handle     = NULL,              /* B2 阶段改为 &hi2c2 (需 CubeMX 使能 I2C2) */
-  .read_reg   = _rd,
-  .write_reg  = _wr,
-  .read_bytes = _rdm,
-  .write_bytes = _wrm,
-  .write_cmd  = _cmd,
-  .is_ready   = _rdy,
+/* V2无I2C2；最终B1另行绑定PF0/PF1，不能称为B2总线。 */
+i2c_if_t i2c2_if = {
+    .handle = NULL,
+    .read_reg = i2c_read_register,
+    .write_reg = i2c_write_register,
+    .read_bytes = i2c_read_bytes,
+    .write_bytes = i2c_write_bytes,
+    .write_cmd = i2c_write_command,
+    .is_ready = i2c_is_ready,
 };
 
-i2c_if_t i2c3_if = {               /* PH7=SCL, PH8=SDA */
-  .handle     = &hi2c3,
-  .read_reg   = _rd,
-  .write_reg  = _wr,
-  .read_bytes = _rdm,
-  .write_bytes = _wrm,
-  .write_cmd  = _cmd,
-  .is_ready   = _rdy,
+i2c_if_t i2c3_if = {
+    .handle = &hi2c3,
+    .read_reg = i2c_read_register,
+    .write_reg = i2c_write_register,
+    .read_bytes = i2c_read_bytes,
+    .write_bytes = i2c_write_bytes,
+    .write_cmd = i2c_write_command,
+    .is_ready = i2c_is_ready,
 };
 
-i2c_if_t i2c4_if = {               /* PF14=SCL, PF15=SDA (V2 引出排针) */
-  .handle     = &hi2c4,            /* B2 板: I2C4 切到 PH4/5, 本实例不变 */
-  .read_reg   = _rd,
-  .write_reg  = _wr,
-  .read_bytes = _rdm,
-  .write_bytes = _wrm,
-  .write_cmd  = _cmd,
-  .is_ready   = _rdy,
+/* V2为PF14/PF15硬件I2C4；B1同名接口使用PH4/PH5软件开漏实现。 */
+i2c_if_t i2c4_if = {
+    .handle = &hi2c4,
+    .read_reg = i2c_read_register,
+    .write_reg = i2c_write_register,
+    .read_bytes = i2c_read_bytes,
+    .write_bytes = i2c_write_bytes,
+    .write_cmd = i2c_write_command,
+    .is_ready = i2c_is_ready,
 };

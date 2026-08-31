@@ -1,27 +1,22 @@
 /*
  * ===================================================================
- * 心跳任务 — 独立于 rk_task, 防止被阻塞
+ * RK心跳任务 — 独立调度，与rk_task共享发送通道
  * ===================================================================
  *
  * 职责:
- *   1. 每 1000ms 发送 Type=0x0000 心跳帧 (共享 g_rk_seq_counter)
- *   2. 无其他依赖, 不与 rk_task 的命令收发互相阻塞
+ *   1. 每1000ms发送Type=0x0000心跳帧，与命令统一分配RK序号。
+ *   2. 独立调度，但仍与rk_task共享UART发送锁，不能称为完全互不阻塞。
  *
  * Seq 体系:
- *   g_rk_seq_counter — MCU→RK3588 统一单调递增 (心跳 + 命令帧)
+ *   rk_link_next_sequence() — MCU→RK3588序号；与PC Seq无关。
  * ===================================================================
  */
-#include "main.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "uart_router.h"
 #include "frame.h"
 #include "hb_task.h"
-
-/* ═══════════════════════════════════════════════════════════════════
- * 全局序列号 (与 rk_task 共享, taskENTER_CRITICAL 保护读写)
- * ═══════════════════════════════════════════════════════════════════ */
-volatile uint64_t g_rk_seq_counter = 0;
+#include "rk_link.h"
 
 #define HB_INTERVAL_MS  1000
 
@@ -39,15 +34,13 @@ void StartHbTask(void *argument)
         if ((now - last_tick) >= pdMS_TO_TICKS(HB_INTERVAL_MS)) {
             last_tick = now;
 
-            /* 原子获取并递增共享序列号 */
-            taskENTER_CRITICAL();
-            uint64_t seq = g_rk_seq_counter++;
-            taskEXIT_CRITICAL();
+            uint64_t seq = rk_link_next_sequence();
 
             uint8_t hb[TLV_FRAME_MAX];
             int len = tlv_pack_heartbeat(seq, hb, sizeof(hb));
             if (len > 0) {
-                uart_send(0, hb, (uint16_t)len);
+                /* 心跳不进pending；失败则等下个周期，不能忙循环重试。 */
+                (void)uart_send(0, hb, (uint16_t)len);
             }
         }
 

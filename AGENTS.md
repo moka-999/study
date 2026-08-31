@@ -36,8 +36,8 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 
 - `Length`是头部与JSON包体的总长度，字段宽度为u32；MCU完整PDU上限已确认为4096字节。
 - 初版固定`Version=1`、`Flag=8`；长度、版本或Flag非法时关闭连接并清空接收状态。
-- PC与MCU–RK Seq属于两个独立命名空间；MCU响应必须原样回显PC请求Seq，绝不能把内部RK Seq写入PC响应头。
-- 心跳固定为PC主动发送`CMD_CLIENT_HEART_BEAT(0x0002)+{}`，MCU返回`CMD_SERVER_HEART_BEAT(0x0001)+{}`并回显同一Seq；心跳不承载其他状态。
+- 2026-08-31确认：每条连接中PC和MCU分别维护发送u32 Seq，每发一帧本端加1，不再回显请求Seq；接收不改变本端发送计数，两个方向允许同号且可同时发送。Seq仅是发送流水号，业务关联另行定义；绝不能把内部RK Seq写入PC响应头。ServiceID保留2字节但固定0、不参与分发。起始值、重连初始化和回绕边界尚须双方统一，不能把早先“从1开始/重连归1”当作已批准规则。注意：当前固件仍为旧回显实现，迁移任务见`doc/driver_tasks.md` 9.6。
+- 心跳固定为PC主动发送`CMD_CLIENT_HEART_BEAT(0x0002)+{}`，MCU返回`CMD_SERVER_HEART_BEAT(0x0001)+{}`，新合同使用MCU本端递增Seq；心跳不承载其他状态。
 - TCP解析必须支持半包、粘包和连续多包；第一组测试JSON已确认，其余命令与字段分批冻结。
 - 已固定引入cJSON v1.7.19，使用FreeRTOS堆、递归深度16；完整PDU上限4096字节。
 
@@ -50,9 +50,9 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 - TLV 单元：`[Type:2B][TLV_Len:2B][Value]`
 - 命令容器 `Type=0x5000`（Value = `[CmdID:2B][Params]`）；心跳 `Type=0x0000`
 - 帧内 TLV 数量：**至少 1 个，最多 16 个**（`TLV_MAX_PER_FRAME`）
-- 状态机 6 态：IDLE→HEADER→DATA→CRC→FOOTER；迁移后仅用于MCU–RK串口链路。
+- 状态机 5 态：IDLE→HEADER→DATA→CRC→FOOTER；仅用于MCU–RK串口链路。
 
-> ✅ 正式TCP任务已停止使用本TLV状态机和原始帧回传；本协议仅保留在MCU–RK串口任务。MCU–RK的type语义仍按现行枚举常量回归，旧文档的其他候选设计继续搁置。
+> ✅ 正式TCP不使用本TLV状态机和原始帧回传；RK组帧/串口状态机仍在使用。`dispatch.c/.h`是未接正式TCP的旧PC–TLV业务适配器，不代表整套RK协议已废弃。上述Type/CRC/Seq是当前实现基线；外部文档差异待RK双方确认，不能单侧宣布原结果命令号作废。
 
 ---
 
@@ -61,7 +61,7 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 | 目录 | 内容 |
 |------|------|
 | `App/protocol/pc/` | PC–MCU独立字节流状态机、JSON/命令分发、固定头响应组帧和PC业务JSON辅助层 |
-| `App/protocol/rk/` | MCU–RK 0x5A/0xA5、CRC16、TLV状态机和历史分发层 |
+| `App/protocol/rk/` | 现行RK组帧/CRC/TLV状态机；另含未接正式TCP的旧PC–TLV适配器 |
 | `App/tasks/pc/` | PC侧TCP server任务；已使用PC固定头/cJSON，业务适配和响应待接入 |
 | `App/tasks/rk/` | RK串口、pending/重传和RK心跳任务 |
 | `App/tasks/common/` | LED、采样监控等不隶属单一通信对象的正式任务 |
@@ -105,7 +105,7 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 - MCU IP：`192.168.1.201:8888`
 
 ### 崩溃诊断（HardFault 排查）
-- 诊断地址：`crash_log` = 0x20009600（16×uint32），`tcp_diag` = 0x20009640（用 `nm test.elf | grep crash_log` 验证为准）→ **实测(20260817): crash_log=0x200094E0, tcp_diag=0x20009520**（.crash_log 段 NOLOAD, 复位不清零, 排查时先 `-w32 0x20009520 0 0 0 0 0 0 0 0` 清空再复位）
+- 诊断地址随链接变化，读写前必须从**实际烧录的同一份ELF**用`arm-none-eabi-nm -S -n`查询`crash_log`（16×uint32）和`tcp_diag`（8×uint32）。2026-08-31本轮正式ELF为`0x2000A57C` / `0x2000A5BC`，仅为当前构建静态结果，尚未烧录；禁止把历史地址的`-w32`命令直接套用到新镜像。`.crash_log`为NOLOAD，复位不清零。
 - 反汇编：`arm-none-eabi-objdump -d --start-address=<pc-0x100> --stop-address=<pc+0x100> test.elf`
 - **判断异常栈**：用 `EXC_RETURN(LR) bit2`（1=PSP线程 / 0=MSP handler），**不要**用 `__get_CONTROL()&2`（进异常时硬件已清 SPSEL，判断必错）
 
@@ -116,6 +116,7 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 ### 运行测试
 ```bash
 powershell -ExecutionPolicy Bypass -File tools/dev.ps1 protocol-test  # 离线帧/CRC/状态机模型
+powershell -ExecutionPolicy Bypass -File tools/dev.ps1 style-test     # 自定义层边界/事件模型+纯接口头独立编译
 powershell -ExecutionPolicy Bypass -File tools/dev.ps1 pc-protocol-test # PC固定头/cJSON离线合同
 python -X utf8 tests/stability_test.py                                # 需板卡/网络/COM3
 python -X utf8 tests/full_chain_stress.py                             # 需板卡/网络/COM3
@@ -141,21 +142,36 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 ## 五、关键架构约束（改代码前必读）
 
 1. **MCU 是单客户端 TCP server**：`listen(listenfd, 1)` + 单 accept 循环，一次只服务 1 个连接。测试脚本开新连接前必须 `close_tcp()`。
-2. **背压链闭环**：`pcToRk_Queue`(8槽) + rk pending(4槽) = 最多 12 条在途。队列满→回 BUSY(0x04)，pending 满→命令滞留队列。**uart_send 可能失败（TX环满），每处调用都要想「失败怎么办」**。
-3. **RK 响应匹配不到 pending 一律静默丢弃，绝不回 ACK**（否则 RK 把 ACK 当命令再回响应 → 死循环，曾观测单 seq 重传 1207 次）。
+2. **历史RK背压基线**：`pcToRk_Queue`(8槽) + rk pending(4槽) = 最多12条排队/跟踪中的命令；旧TLV入口队列满回BUSY，pending满则暂不出队。正式PC JSON尚未接入这条业务链；结果入队失败、命令回插失败仍有丢消息风险，不称为当前完整闭环。**uart_send可能因锁竞争或TX环满失败，每处调用须有失败策略**；审查见`doc/code_quality_review.md`。
+3. **当前RK响应匹配不到pending一律静默丢弃，绝不回ACK**（否则会引发ACK回环）。匹配只比较RK Seq，不要求同CmdID；首个匹配单元即释放pending。因此未匹配包也可能是尚未支持的异步/第二阶段结果，不能一概称为陈旧包；多阶段生命周期待双方评审。
 4. **重传**：500ms 超时 + 指数退避 500/1000/2000ms，封顶 3 次（`RK_MAX_RETRIES`）。
 5. 历史`tlv_dispatch`不再由正式`tcp_task`调用；若后续RK业务层复用其同步handler，仍禁止在handler中`vTaskDelay`阻塞。
 6. **D-Cache 已关** → 无 cache 一致性顾虑，**勿再加 `SCB_InvalidateDCache_by_Addr`**（否则 UsageFault 升级 HardFault）。
 7. **DMA 够不到 DTCMRAM**（DMA 在 D2 域），DMA 缓冲放 AXI SRAM (RAM, 0x24000000)。
 8. **FreeRTOS 堆(128KB)手动挪到 AXI SRAM**（`heap_4.c` 的 `.heap` section + linker），不是 CubeMX 默认位置。
 9. **SPI2按板型互斥**：Apollo V2临时给AD7124开发（主机Mode 3）；最终B1以SPI2从机连接B2主机，AD7124改SPI4。两个任务不得同时占用SPI2。
+10. **自定义接口归属**：总线实例统一由`board_interfaces.h`声明，UART内部钩子只在`uart_hw.h`；RK任务用`rk_link_next_sequence()`分配独立序号，禁止外部直接修改计数器。`uart_start_all()`在调度前初始化TX互斥锁；分配失败拒绝发送。注释/风格及剩余耦合约束见`doc/code_quality_review.md`。
+11. **RK解析错误必须上送调用方**：`tlv_sm_feed()==1`仅表示帧边界/CRC通过，随后必须检查`tlv_sm_get_frame()`返回值；`-1`时整份输出清零，任务拒绝整帧。Len为4..1024；所有线上TLV（含未知Type/心跳）合计1..16个，任何残缺TLV不得部分交付。未知Type结构有效时仍跳过，不擅自接纳其他命令容器。
 
 ---
 
 ## 六、当前进度
 
+- 📖 2026-08-31：用户要求IP方案及0821评审事项先保留待确认。已记录PB3/PB4/PB5在位/槽位编码区别、八槽电平表、静态/DHCP/地址范围及多B2规则、PHY侧网络切换与FX18默认路径；不改引脚或网络行为。具体待确认表在`doc/driver_tasks.md`开头；本轮按用户要求准备将V2 `main`及B1 `b1`分支发布到Gitea/GitHub，真实推送结果以提交记录为准。
+
+- ✅ 2026-08-31：按用户要求将通用软件整合到独立B1：PC两层查表/TCP任务、RK解析与任务、UART TX修复/NORMAL RX DMA、正式监测快照、接口契约、76B版本/224B FRU v2和旧记录兼容。保留B1引脚/UID MAC/PHY/SPI4/软I2C及默认OFF，不复制测试任务/旧GPIO复位。B1扩展check（含46引脚及旧Flash模型）和UART4/USART2两配置ARM构建通过，最终暂选UART4；未烧录/联网/推送。新增C用例及B1真机验收仍待完成，详见B1 `docs/integration_20260831.md`，不能把前述旧记录中的“尚未同步B1”当作当前软件状态。
+
+- ✅ 2026-08-31：PC帧解析也改为只读`状态 -> 字节处理函数`表：HEADER/BODY独立处理，FRAME_READY/ERROR共用拒收函数；新增状态下标/空表项防护和枚举数量编译检查。与既有`CommandID -> handler`业务表分离，TCP任务无需新增状态分支。PC离线23/23、RK模型96/96、style-test及正式/网络/Mock ARM构建通过；新增12项C状态边界检查已编译、未执行。线格式/现有Seq行为不变，未烧录/推送/同步B1。
+
+- ✅ 2026-08-31：按RK文档审查结论修复V2畸形TLV解析：短Len、残缺头/Value、非法命令/心跳长度和TLV超量整帧拒绝；解包错误传回RK任务，避免未初始化读取和部分交付。纠正旧PC–TLV适配器、结果码“已废弃”等误导注释。Python模型96/96、PC合同19/19、style-test 19项及头编译、正式/Mock ARM构建通过；新增27项真实C隔离检查已编译、未运行，B1同步待完成。本轮不改Type/CRC/Seq/结果码、不改pending生命周期，未烧录/推送。
+
+- ✅ 2026-08-31：V2自定义层完成一轮接口归属、中文注释和职责整理；修复UART TX锁未初始化及TXE唤醒竞态。`style-test`19项源码/模型+独立头编译通过，正式184项全量构建与6种隔离镜像通过；其余PC/RK/电源/Flash离线回归通过。本轮未烧录、未推送、未同步B1；新增8组ARM Mock用例和UART并发待V2实测，保留风险见`doc/code_quality_review.md`。
+
+- 📖 2026-08-31：`doc/pc_tcp_protocol_spec.md`及同名Word按用户要求改为供PC工程师补充的简洁协议框架：连接方式、18字节头、B1命令编号、常用JSON和填写格式。删除草案/待定状态与MCU实现附录；实现进度仍在任务文档维护，不因框架列出命令而视为业务完成。本次仅文档修改。
+
 **阶段：网关基线历史稳定；pwr_ctrl软件基线已建立，B1 电源硬件/采样/Boot 驱动尚未闭环。**
 
+- 📖 2026-08-31协议确认：双方按每连接、本端发送帧独立递增Seq，不回显，接收不改变本端计数，允许同时发送和双向同号；ServiceID固定0。保留通用应答0x0006、DDR配置0x0509及电源/Boot语义；siteId/mirrorIndex含义继续保留，固件版本等后续信息追加到现有JSON，不新增查询命令。仅文档与任务更新，固件及旧网络测试尚未迁移，不得把下文历史回显记录当作当前目标合同。
 - ✅ 2026-08-14 历史里程碑：阿波罗 V2 全链路压测 33/33、稳定性 11/11（本轮未连接硬件复测）
 - ✅ 2026-08-21：从干净构建目录全量编译成功，生成 `boot.elf` / `test.elf`；离线协议模型 65/65 PASS
 - ✅ 已修复 3 个网关固件 bug（重传热循环 / 转发丢命令 / ACK回环）
@@ -181,13 +197,14 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 - ✅ 2026-08-27：PC测试仪信息查询已接入正式TCP任务：PC发送`CMD_QUERY_TESTER_INFO(0x0101)+{}`后，MCU返回`CMD_TESTER_INFO_RESP(0x0102)`并回显ServiceID/Seq；三个响应字段从W25Q256 FRU v2读取，空白/损坏/旧版记录首次查询时懒写入A/B副本，不在连接建立时主动推送
 - ✅ 2026-08-27：PC字节流解析已从通用协议/JSON模块拆为独立`pc_state_machine.c/.h`，显式使用HEADER/BODY/FRAME_READY/ERROR状态；TCP任务只调用状态机API，未复用MCU–RK状态机
 - ✅ 2026-08-27：PC JSON解析、命令方向/字段校验及本地响应组帧已从`tcp_task`拆入`pc_dispatch.c/.h`；TCP任务只保留socket生命周期、状态机编排、发送和超时处理
+- ✅ 2026-08-31：PC命令分发已由switch改为只读`CommandID -> handler`表，各命令使用独立处理函数并补充中文注释；PC帧状态机、ServiceID/Seq回显、每次查询读取W25和未知命令不响应的行为不变。PC离线合同19/19、RK模型65/65、正式/网络/Mock ARM构建通过；新增13项Mock运行检查仅完成编译，未烧录或联网复测。
 - ✅ 2026-08-24：结果灯业务逻辑已移植B1 PG0-PG5（B1提交`f24473f`），构建通过；红绿/对象顺序和上电毛刺待真板
 - ✅ 2026-08-24：B1取消温控职责，温控改为PC直连B2；B1–B2 SPI仅保活，B1基线为从机Mode 0/硬件NSS
 - 📖 接手总览、暂定需求和术语：`doc/README.md`、`doc/requirements_baseline.md`、`CONTEXT.md`
 
 **下一步（待办）**：详见 `doc/driver_tasks.md`（唯一任务来源，每任务 4 步闭环：原理图确认→编码→阿波罗V2模拟→B1/B2真板验证）
 > **两阶段策略**：阶段一 = 阿波罗 V2 开发（驱动代码 + Mock + 逻辑分析仪波形验证，当前无外接模块）；阶段二 = B1/B2 真板（到货后：引脚重映射 + 实测标定 + RK/B2 MCU 联调）
-1. **双协议迁移**：PC帧/cJSON解析和正式TCP入口切换已完成；下一步以PC草案枚举为输入冻结最小业务JSON/响应合同，建立业务请求到独立RK Seq的内部映射；PC响应原样回显请求Seq，MCU–RK现有TLV/pending/重传保持不变
+1. **双协议迁移**：PC帧/cJSON解析和正式TCP入口切换已完成；先迁移8月31日的发送Seq独立递增/ServiceID固定0规则，再冻结最小业务JSON、通用应答及无Seq回显后的结果关联方式；建立业务请求到独立RK Seq的内部映射，MCU–RK现有TLV/pending/重传保持不变
 2. LED状态语义、颜色转换、V2六路功能波形及B1 PG0-PG5软件移植已完成：B1到板后复测实际2N7002网络的上电瞬态并确认红绿/对象顺序；两颗单色状态灯语义仍待确认
 3. **pwr_ctrl硬件闭环**（软件状态机与V2 GPIO波形验证已完成；待PC6/PC7顺序/延时冻结、B1真板标定和PC–MCU命令接入）— 仍阻塞电源类功能验收
 4. **TPS62868/69**（A版VSET配置：VDD1/VDD2/VDDQ地址0x49/0x41/0x4F；与pwr_on联动）

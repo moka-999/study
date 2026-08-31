@@ -150,40 +150,62 @@ uint64_t tlv_get_sequence(const uint8_t *buf)
 int tlv_unpack(const uint8_t *frame_buf, uint16_t frame_len,
                tlv_frame_t *out)
 {
-    /* frame_buf[0..7] = Seq, frame_buf[8..8+frame_len-1] = TLVs */
-    if (frame_len < 4) return -1;  /* 至少 1 个空 TLV */
-
+    /* 先清空输出，保证短帧或后续任一TLV损坏时，调用方都拿不到旧数据。 */
+    if (out == NULL) {
+        return -1;
+    }
     memset(out, 0, sizeof(*out));
+    if (frame_buf == NULL || frame_len < TLV_PAYLOAD_MIN ||
+        frame_len > TLV_PAYLOAD_MAX) {
+        return -1;
+    }
+
+    /* frame_buf[0..7] = Seq, frame_buf[8..8+frame_len-1] = TLVs */
     out->sequence = tlv_get_sequence(frame_buf);
 
     uint16_t offset = 8;           /* 跳过 Seq */
     uint16_t end    = 8 + frame_len;
     uint8_t  has_heartbeat = 0;
+    uint8_t  unit_count = 0;       /* 线上TLV总数，不只是已识别的命令数 */
 
-    while (offset + 4 <= end && out->count < TLV_MAX_PER_FRAME) {
+    while (offset < end) {
+        /* 尾部1~3字节不是填充；它们意味着下一TLV头不完整。超限也不能
+         * 静默截取前16个，否则一帧只执行一部分会造成业务状态不一致。 */
+        if (end - offset < 4 || unit_count >= TLV_MAX_PER_FRAME) {
+            goto invalid_frame;
+        }
+        unit_count++;
         uint16_t type  = ((uint16_t)frame_buf[offset] << 8)
                        | frame_buf[offset + 1];
         uint16_t t_len = ((uint16_t)frame_buf[offset + 2] << 8)
                        | frame_buf[offset + 3];
         offset += 4;
 
-        if (offset + t_len > end) return -1;  /* TLV 超长 */
+        if (t_len > end - offset) {  /* Value被截断 */
+            goto invalid_frame;
+        }
 
         /* ── 心跳: Type=0x0000 ── */
         if (type == TLV_TYPE_HEARTBEAT) {
+            if (t_len != 0) {  /* 现行心跳合同要求空Value */
+                goto invalid_frame;
+            }
             has_heartbeat = 1;
-            offset += t_len;
             continue;
         }
 
         /* ── 命令容器: Type=0x5000, Value=[CmdID:2B][params:N] ── */
-        if (type == TLV_TYPE_CMD && t_len >= 2) {
+        if (type == TLV_TYPE_CMD) {
+            if (t_len < 2) {  /* CmdID必须占满2字节 */
+                goto invalid_frame;
+            }
             uint16_t cmd   = ((uint16_t)frame_buf[offset] << 8)
                            | frame_buf[offset + 1];
             uint16_t d_len = t_len - 2;  /* 参数长度 */
 
-            if (out->payload_used + d_len > TLV_PAYLOAD_MAX)
-                break;
+            if (out->payload_used + d_len > TLV_PAYLOAD_MAX) {
+                goto invalid_frame;
+            }
 
             tlv_unit_t *u = &out->units[out->count];
             u->type     = TLV_TYPE_CMD;
@@ -197,7 +219,7 @@ int tlv_unpack(const uint8_t *frame_buf, uint16_t frame_len,
             }
             out->count++;
         }
-        /* 其他 Type: 跳过, 留待拓展 */
+        /* 未知Type仍按既有行为跳过，但其长度/数量也必须有效。 */
 
         offset += t_len;
     }
@@ -209,4 +231,9 @@ int tlv_unpack(const uint8_t *frame_buf, uint16_t frame_len,
     }
 
     return (int)out->count;
+
+invalid_frame:
+    /* 后段出错时撤销前段结果，防止调用方消费损坏帧中的部分命令。 */
+    memset(out, 0, sizeof(*out));
+    return -1;
 }

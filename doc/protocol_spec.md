@@ -1,4 +1,6 @@
-> **状态警告（2026-08-21）**：本文是旧的STM32–RK UART协议提案，不是当前固件的权威协议。文中的 `Type=0x5002`、高 4 位类型 + 低 12 位 Tag、结果 CmdID 等内容与现有 C/Python 实现存在冲突，也不包含新增的B1 MCU–B2 MCU SPI链路。当前差异和冻结条件见 [`adr/0001-protocol-contract.md`](adr/0001-protocol-contract.md)。
+> **状态说明（2026-08-31）**：本文是仓库保留的RK UART规范副本，正文保留供双方核对，不表示其中的结果命令已废弃。它与外部原始Word《STM32与RK3588_UART通信协议规范--20260708》并非逐项一致；两份文档均有Type、CmdID宽度、CRC范围或Seq加入后偏移等需要统一的表述。当前固件线格式见 [`frame.h`](../App/protocol/rk/frame.h)，仅作为现有实现的回归基线，不能用单侧代码或模拟器测试替代双方协议确认。
+>
+> `dispatch.c/.h`是旧PC–TLV业务适配器，正式PC JSON任务不调用；RK组帧、串口状态机、心跳和重传仍在使用。旧测试的“相同CmdID回结果”不是废弃原结果码的决定；PC–MCU和B1–B2保活也不属于本文的UART规范范围。差异处理原则与待冻结项见 [`adr/0001-protocol-contract.md`](adr/0001-protocol-contract.md)。
 
 STM32 与 RK3588 UART通信协议规范
 

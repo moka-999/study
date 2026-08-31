@@ -2,8 +2,9 @@
 """
 TLV v2.0 协议验证 — 纯 Python 复刻 C 实现
 ===========================================
-逐行复刻 frame.c / state_machine.c / crc.c 的逻辑，但不编译或链接 C 源码。
-它验证当前帧模型，不等于硬件全链路测试或三方协议已经冻结。
+按 frame.c / state_machine.c / crc.c 建立离线模型，不编译或链接 C 源码。
+模型检查不能发现所有C内存/并发缺陷；真实C用例另在driver_mock_test.c中。
+它验证当前实现基线，不等于硬件全链路测试或RK双方协议已经冻结。
 
 用法:
     python verify_protocol_v2.py              # 全量自测
@@ -222,11 +223,12 @@ class TlvSm:
     """逐字节状态机, 完全复刻 state_machine.c:tlv_sm_feed()"""
 
     def __init__(self):
+        self.buf = bytearray()
         self.reset()
 
     def reset(self):
         self.state = IDLE
-        self.buf = bytearray()
+        # 与C一致：仅复位收集状态，保留刚收完的缓冲供get_frame读取。
         self.pos = 0
         self.expect = 0
 
@@ -261,7 +263,7 @@ class TlvSm:
 
             if calc == exp:
                 plen = (self.buf[1] << 8) | self.buf[2]  # BE → host
-                if plen == 0 or plen > 1024:  # TLV_PAYLOAD_MAX
+                if plen < 4 or plen > 1024:  # TLV_PAYLOAD_MIN/MAX
                     if not self._resync():
                         self.reset()
                     return 0
@@ -305,9 +307,7 @@ class TlvSm:
         # FOOTER: verify 0xA5
         if self.state == FOOTER:
             if self.buf[self.pos - 1] == SYNC_FTR:
-                was_good = True
-                # save frame data before reset
-                # (caller reads .buf before next feed)
+                # 调用方必须在下一字节写入前get_frame，并检查TLV解包结果。
                 self.reset()
                 return 1
             else:
@@ -329,14 +329,14 @@ class TlvSm:
         return False
 
     def get_frame(self):
-        """对应 state_machine.c:tlv_sm_get_frame() — 调用者负责"""
+        """仅在feed返回1后调用；None表示TLV损坏，不得消费解析前缀。"""
         plen = (self.buf[1] << 8) | self.buf[2]
         return unpack_frame(self.buf[5:], plen)
 
 
 def unpack_frame(frame_buf: bytes, frame_len: int):
     """复刻 frame.c:tlv_unpack() — frame_buf从Seq起始, frame_len=TLV字节数"""
-    if frame_len < 4:
+    if not 4 <= frame_len <= 1024 or len(frame_buf) < 8 + frame_len:
         return None
 
     seq = struct.unpack('>Q', frame_buf[:8])[0]
@@ -346,8 +346,12 @@ def unpack_frame(frame_buf: bytes, frame_len: int):
     units = []
     payload = bytearray()
     has_hb = False
+    unit_count = 0
 
-    while offset + 4 <= end and len(units) < 16:
+    while offset < end:
+        if end - offset < 4 or unit_count >= 16:
+            return None
+        unit_count += 1
         t_type = (frame_buf[offset] << 8) | frame_buf[offset+1]
         t_len  = (frame_buf[offset+2] << 8) | frame_buf[offset+3]
         offset += 4
@@ -357,12 +361,15 @@ def unpack_frame(frame_buf: bytes, frame_len: int):
 
         # Heartbeat
         if t_type == TYPE_HB:
+            if t_len != 0:
+                return None
             has_hb = True
-            offset += t_len
             continue
 
         # Command container
-        if t_type == TYPE_CMD and t_len >= 2:
+        if t_type == TYPE_CMD:
+            if t_len < 2:
+                return None
             cmd = (frame_buf[offset] << 8) | frame_buf[offset+1]
             d_len = t_len - 2
             d_off = len(payload)
@@ -485,9 +492,7 @@ def test_pack_heartbeat():
     sm = TlvSm()
     for b in hb:
         r = sm.feed(b)
-    # After last byte, state machine resets and returns 1
-    # Actually the last feed returns 1 for FOOTER match
-    check("状态机解析心跳帧成功", True)  # verified by feed returning 1
+    check("状态机解析心跳帧成功", r == 1)
 
     # Re-parse
     sm2 = TlvSm()
@@ -495,10 +500,9 @@ def test_pack_heartbeat():
     for b in hb:
         r = sm2.feed(b)
         if r == 1:
-            # get frame from buffer (but it resets... capture first)
-            pass
-    # Actually we need to capture the buffer
-    check("状态机识别心跳帧", True)  # pass
+            result = sm2.get_frame()
+    check("状态机取出心跳帧", result is not None and
+          result['count'] == 1 and result['sequence'] == 1)
 
     # Unpack
     frame = unpack_frame(hb[5:], 4)
@@ -571,24 +575,18 @@ def test_state_machine():
 
     # ── 全 CmdID 范围打包/解包 ──
     sm2 = TlvSm()
+    decoded_commands = []
     for cmd in [0x0001, 0x0010, 0x0012, 0x0024, 0x003E, 0x003F]:
         f = pack_cmd(cmd, bytes([0x55, 0xAA]), seq=cmd)
         sm2.reset()
         for b in f:
             r = sm2.feed(b)
             if r == 1:
-                # Verify unpack
-                plen = (f[1] << 8) | f[2]
-                frame = unpack_frame(f[5:], plen)
-                if not frame or frame['units'][0]['cmd'] != cmd:
-                    check(f"CmdID 0x{cmd:04X}  round-trip", False,
-                          f"cmd mismatch")
-                    break
-        else:
-            continue
-        break
-    else:
-        check("6 个 CmdID round-trip (打包→状态机→解包→验证)", True)
+                frame = sm2.get_frame()
+                if frame is not None and frame['count'] == 1:
+                    decoded_commands.append(frame['units'][0]['cmd'])
+    check("6 个 CmdID round-trip (打包→状态机→解包→验证)",
+          decoded_commands == [0x0001, 0x0010, 0x0012, 0x0024, 0x003E, 0x003F])
 
     # ── CRC 错误 ──
     sm3 = TlvSm()
@@ -635,9 +633,9 @@ def test_state_machine():
         r = sm7.feed(b)
         if r == 1:
             ok_resync = True
-    # The corrupted frame should fail CRC, but resync may find a new frame start
-    # The key test: no crash, no infinite loop
-    check("resync 不崩溃", True)
+    # 当前CRC不覆盖Seq，改Seq不应被误写成“CRC会拒绝”的测试结论。
+    # 此项只锁定现行兼容行为，不表示这种CRC范围已获双方最终批准。
+    check("Seq内0x5A不触发伪同步，当前CRC不保护Seq", ok_resync)
 
     # ── Len=0 (边缘) ──
     sm8 = TlvSm()
@@ -663,8 +661,8 @@ def test_state_machine():
 
 
 def test_roundtrip():
-    """完整 round-trip: 模拟 MCU→RK 通信"""
-    hdr("5. 完整通信场景")
+    """RK帧往返模型，不执行任务、pending或正式PC业务转换。"""
+    hdr("5. RK帧往返模型（非完整网关）")
 
     # ── 场景1: MCU 心跳 → RK 心跳响应 ──
     mcu_seq = 0
@@ -681,7 +679,7 @@ def test_roundtrip():
     frame2 = unpack_frame(rk_hb[5:], (rk_hb[1]<<8)|rk_hb[2])
     check("场景1: RK 心跳 → MCU 解析成功", frame2 is not None)
 
-    # ── 场景2: PC 发 gtest_start → MCU 转发 → RK 响应 ──
+    # ── 场景2: 旧PC–TLV适配样例，不表示新PC JSON已有转发 ──
     pc_seq = 0x1234
     cmd_frame = pack_cmd(0x0001, bytes([0x01, 0x00, 0x00, 0x80]), seq=pc_seq)
 
@@ -696,19 +694,21 @@ def test_roundtrip():
     mcu_hb2 = pack_heartbeat(mcu_seq); mcu_seq += 1
 
     # RK3588 解析后执行, 返回 result
-    rk_result = pack_cmd(0x0001, bytes([0x01]), seq=pc_seq)  # 当前实现: 响应同 CmdID
+    rk_result = pack_cmd(0x0001, bytes([0x01]), seq=pc_seq)  # 旧模拟器约定，非正式结果码决议
     frame4 = unpack_frame(rk_result[5:], (rk_result[1]<<8)|rk_result[2])
     check("场景2: RK 响应帧 cmd=0x0001", frame4 and frame4['units'][0]['cmd'] == 0x0001)
 
-    # ── 场景3: 多 TLV 帧 (未来拓展) ──
-    # 手动构造: 心跳 + 命令 + 心跳
-    # 这在实际协议中由 TLV 串联实现
-    check("场景3: 单帧多TLV 预留", True)
+    # ── 场景3: 验证解析器能解出两个命令，不声称任务已支持多结果 ──
+    two_tlvs = bytes.fromhex('50 00 00 03 00 01 01 50 00 00 03 00 29 02')
+    decoded = unpack_frame(bytes(8) + two_tlvs, len(two_tlvs))
+    check("场景3: 一帧解出两个命令TLV", decoded is not None and
+          [u['cmd'] for u in decoded['units']] == [1, 0x29] and
+          decoded['payload'] == b'\x01\x02')
 
 
 def test_protocol_compliance():
-    """协议规范合规性检查"""
-    hdr("6. 协议规范合规性")
+    """当前线格式兼容性检查，不代表外部RK文档已统一。"""
+    hdr("6. 当前线格式兼容性")
 
     # Type=0x0000 心跳
     hb = pack_heartbeat(seq=0)
@@ -796,9 +796,91 @@ def test_edge_cases():
           f"len={len(f5)}")
 
 
+def pack_test_tlvs(tlvs: bytes, seq: int = 7) -> bytes:
+    """仅用于用例：给任意TLV字节补正确CRC，单独触发内部格式检查。"""
+    length = struct.pack('>H', len(tlvs))
+    header = bytes([SYNC_HDR]) + length
+    return (header + struct.pack('<H', crc16_modbus(header)) +
+            struct.pack('>Q', seq) + tlvs +
+            struct.pack('<H', crc16_modbus(length + tlvs)) + bytes([SYNC_FTR]))
+
+
+def parse_test_stream(data: bytes):
+    """与任务同样在feed成功后取帧；保留None以检查错误确实传到调用方。"""
+    sm = TlvSm()
+    frames = []
+    for byte in data:
+        if sm.feed(byte) == 1:
+            frames.append(sm.get_frame())
+    return frames
+
+
+def test_tlv_validation():
+    """畸形TLV必须整帧拒绝；合法帧的Type/CRC/Seq/命令号保持不变。"""
+    hdr("8. TLV整帧校验与错误恢复（Python模型）")
+    command = bytes.fromhex('50 00 00 03 00 29 01')
+    heartbeat = bytes(4)
+    unknown = bytes.fromhex('50 02 00 00')
+    good = pack_test_tlvs(command)
+
+    # 固定现有线格式样例，避免解析修复顺手改掉CRC范围、端序或Seq布局。
+    check("现有心跳黄金字节保持不变", pack_heartbeat(1) == bytes.fromhex(
+        '5a 00 04 50 10 00 00 00 00 00 00 00 01 00 00 00 00 f1 db a5'))
+    check("现有命令黄金字节保持不变", pack_cmd(0x12, bytes.fromhex('aabbccdd'), 100)
+          == bytes.fromhex('5a 00 0a d1 d4 00 00 00 00 00 00 00 64 '
+                           '50 00 00 06 00 12 aa bb cc dd 5c 3c a5'))
+
+    for size in range(4):
+        frames = parse_test_stream(pack_test_tlvs(bytes(size)) + good)
+        check(f"Len={size}头部拒绝且下帧恢复", len(frames) == 1 and
+              frames[0] is not None and frames[0]['units'][0]['cmd'] == 0x29)
+        check(f"解包入口拒绝Len={size}", unpack_frame(bytes(8 + size), size) is None)
+
+    invalid = [
+        ("CmdID空缺", bytes.fromhex('50 00 00 00')),
+        ("CmdID仅1字节", bytes.fromhex('50 00 00 01 29')),
+        ("非空心跳", bytes.fromhex('00 00 00 01 01')),
+        ("Value长度超过剩余数据", bytes.fromhex('50 00 00 04 00 29 01')),
+        ("后段Value截断撤销前缀", command + bytes.fromhex('50 00 00 04 00 29')),
+        ("后段未知Type截断撤销前缀", command + bytes.fromhex('50 02 00 01')),
+        ("17个命令", command * 17),
+        ("17个未知Type", unknown * 17),
+        ("17个心跳", heartbeat * 17),
+        ("命令加16个未知Type", command + unknown * 16),
+    ]
+    invalid += [(f"尾部残留{size}字节", command + bytes([0xff]) * size)
+                for size in (1, 2, 3)]
+    for label, tlvs in invalid:
+        frames = parse_test_stream(pack_test_tlvs(tlvs) + good)
+        check(label + "：整帧拒绝/下帧恢复", len(frames) == 2 and frames[0] is None
+              and frames[1] is not None and frames[1]['units'][0]['cmd'] == 0x29)
+
+    valid = [("16个命令", command * 16, 16),
+             ("16个心跳", heartbeat * 16, 1),
+             ("16个未知Type", unknown * 16, 0),
+             ("命令加15个未知Type", command + unknown * 15, 1),
+             ("命令加15个心跳", command + heartbeat * 15, 1)]
+    for label, tlvs, count in valid:
+        frames = parse_test_stream(pack_test_tlvs(tlvs))
+        check(label + "合法", len(frames) == 1 and frames[0] is not None
+              and frames[0]['count'] == count and frames[0]['sequence'] == 7)
+
+    bad_crc = bytearray(good)
+    bad_crc[-3] ^= 1
+    frames = parse_test_stream(bad_crc + good)
+    check("坏CRC拒绝且下帧恢复", len(frames) == 1 and frames[0] is not None
+          and frames[0]['units'][0]['cmd'] == 0x29)
+    check("解包拒绝Len超限", unpack_frame(bytes(1033), 1025) is None)
+
+    simulator = RkSimulator()
+    simulator.feed_bytes(pack_cmd(0x0001, b'', 42))
+    check("串口模拟器实际取帧并返回旧单回复样例",
+          simulator.pending_response == pack_cmd(0x0001, b'\x01', 42))
+
+
 def test_serial_sim():
-    """串口模拟 — 双向通信时序"""
-    hdr("8. MCU-RK串口与内部Seq映射模型")
+    """旧适配流程的打印演示：仅执行帧模型，不执行真实队列/pending。"""
+    hdr("9. 旧PC–TLV适配流程演示（非正式PC业务验收）")
 
     mcu_seq = 0
 
@@ -820,7 +902,7 @@ def test_serial_sim():
             print(f"  │  RK: 心跳 seq=1 ✓")
 
     print("  │")
-    print("  ├─ PC业务适配层生成RK命令: gtest_start (0x0001), pc_seq=100")
+    print("  ├─ 旧PC–TLV适配样例输入: gtest_start (0x0001), pc_seq=100")
     pc_cmd = pack_cmd(0x0001, bytes([0x01, 0x00, 0x00, 0x80]), seq=100)
     print(f"  │  MCU 收到: {pc_cmd.hex()[:60]}...")
 
@@ -833,7 +915,7 @@ def test_serial_sim():
                 print(f"  │  MCU 解包: cmd=0x{u['cmd']:04X}({_cmd_name(u['cmd'])}), params={frame['payload'].hex()}")
 
     print("  │")
-    print("  ├─ MCU → USART1 → RK: 用 rk_seq=2 打包, 加入 pending")
+    print("  ├─ 用 rk_seq=2 打包（仅演示，不实际发送串口或加入pending）")
     fwd = pack_cmd(0x0001, bytes([0x01, 0x00, 0x00, 0x80]), seq=mcu_seq); mcu_seq += 1
     print(f"  │  TX: {fwd.hex()[:60]}...")
 
@@ -845,7 +927,7 @@ def test_serial_sim():
                 print(f"  │  RK: 收到 cmd=0x{u['cmd']:04X}, seq={f['sequence']}, params={f['payload'].hex()}")
 
     print("  │")
-    print("  ├─ RK 执行测试... → 返回相同 CmdID (0x0001), echo rk_seq=2")
+    print("  ├─ 模拟器单回复约定: 相同CmdID (0x0001), echo rk_seq=2")
     result_data = bytes([0x01])  # TLV_ST_PASS
     rk_resp = pack_cmd(0x0001, result_data, seq=2)
     print(f"  │  RK TX: {rk_resp.hex()}")
@@ -856,13 +938,13 @@ def test_serial_sim():
             if f:
                 u = f['units'][0]
                 print(f"  │  MCU: 收到 result cmd=0x{u['cmd']:04X}, seq={f['sequence']}")
-                print(f"  │  MCU: _pending_take(seq={f['sequence']}) → pc_seq=100")
+                print(f"  │  旧映射示意: rk_seq={f['sequence']} → pc_seq=100（未执行pending）")
 
     print("  │")
-    print("  ├─ 业务适配层取回pc_seq=100（PC响应须另用固定头+JSON组帧）")
+    print("  ├─ 新PC业务关联另行冻结，不能把旧pc_seq用作PC响应Seq")
     print("  │  本模型到此结束，不再伪造PC侧TLV响应")
     print("  │")
-    print("  └─ 通信正常 ✓")
+    print("  └─ 帧模型演示结束（未验证任务队列和真实通信）")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1023,6 +1105,7 @@ def main():
     test_roundtrip()
     test_protocol_compliance()
     test_edge_cases()
+    test_tlv_validation()
     test_serial_sim()
     gen_test_frames()
 

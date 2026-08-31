@@ -1,7 +1,9 @@
 # PC–MCU JSON业务合同
 
-本页只记录双方已经给出的JSON结构。固定18字节头、TCP流式组帧和通用
-JSON安全规则见`adr/0001-protocol-contract.md`。
+本页记录双方已经给出的JSON结构。固定18字节头、连接规则和命令目录见
+[PC–MCU TCP协议框架](pc_tcp_protocol_spec.md)，实现进度见`driver_tasks.md`，历史决策见`adr/0001-protocol-contract.md`。
+
+2026-08-31修订已取消Seq回显并停用ServiceID；现有固件与旧测试仍采用回显行为，尚待任务9.6迁移。以下描述为目标合同，不代表新规则已通过网络验收。
 
 ## 1. 算法下发与芯片测试结果
 
@@ -12,12 +14,12 @@ PC工程师草案中的命令映射：
 | PC → MCU | `CMD_START_TEST = 0x0103` | 下发算法名称与编号 |
 | MCU → PC | `CMD_TEST_RESULT_REPORT = 0x0105` | 上报该算法的多项芯片测试结果 |
 
-`ServiceID`尚未确认。MCU响应必须原样回显PC请求的Seq；该u32 Seq只属于PC-MCU协议，与MCU-RK的u64 Seq无关。
+`ServiceID`固定填0，不参与分发。PC和MCU在每条连接中分别维护自己的发送Seq，每发送一个应用帧本端加1；收到对方报文不改变本端发送计数，不回显对方Seq，与MCU–RK的u64 Seq无关。两个方向允许数值相同且可以同时发送。Seq不用于匹配业务请求，重复测试和异步结果的关联由业务规则补充；起始值、重连初始化和回绕边界在实现任务9.6中统一，不把参考程序的进程级静态计数视为已批准的连接级规则。
 
 ## 心跳
 
 - PC主动发送`CMD_CLIENT_HEART_BEAT(0x0002)`，JSON固定为`{}`。
-- MCU返回`CMD_SERVER_HEART_BEAT(0x0001)`，JSON固定为`{}`，并原样回显请求Seq。
+- MCU返回`CMD_SERVER_HEART_BEAT(0x0001)`，JSON固定为`{}`，使用MCU自己的下一发送Seq，不回显请求Seq。
 - 心跳只判断连接存活，不携带版本、电源、温度或板卡信息。
 
 ### START_TEST包体
@@ -45,8 +47,9 @@ PC工程师草案中的命令映射：
 
 当前只冻结结构和JSON类型：`algorithmName/siteId`为字符串，
 `algorithmIndex/mirrorIndex/testStatus`为整数，`testResults`为对象数组。
+`siteId/mirrorIndex`具体业务含义先保留，不绑定物理位置或软件镜像；
 `siteId`是否允许空值、三个整数的业务值域、状态码含义、结果数量以及
-ServiceID仍待PC/测试业务评审。
+请求与结果关联方式仍待PC/测试业务评审。
 
 JSON使用严格语法，最后一个字段或数组元素后不得保留逗号；重复键、尾随
 非空白数据和非法UTF-8均会导致MCU关闭当前TCP连接。完整PDU不得超过4096
@@ -56,12 +59,14 @@ JSON使用严格语法，最后一个字段或数组元素后不得保留逗号�
 
 测试仪信息采用普通请求/响应，不在TCP连接建立后主动推送：
 
+当前仅规定基本格式；固件版本等后续需要的信息可追加到0x0102响应JSON，不必新增命令。保留现有三个字段的含义，接收端允许扩展字段，完整PDU仍不超过4096字节。固件/FRU信息的运行时来源仍为W25Q256；本次不增加JSON字段或Flash结构。
+
 | 方向 | CommandID | JSON用途 |
 |---|---:|---|
 | PC → MCU | `CMD_QUERY_TESTER_INFO = 0x0101` | 查询测试仪信息，包体固定为`{}` |
 | MCU → PC | `CMD_TESTER_INFO_RESP = 0x0102` | 返回测试仪信息 |
 
-响应沿用请求的`ServiceID`，并原样回显PC请求`Seq`。MCU从
+响应的`ServiceID`固定为0，`Seq`使用MCU自己的发送流水号。MCU从
 W25Q256 FRU v2读取三个响应字段：
 
 ```json

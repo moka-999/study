@@ -11,6 +11,7 @@
 #include "task.h"
 #include "usart.h"
 #include "ad7124.h"
+#include "board_interfaces.h"
 #include "tps62868.h"
 #include "ddr_power.h"
 #include "pac1934.h"
@@ -133,7 +134,6 @@ static void _test_ad7124(void)
     uint32_t cfg1_new = (cfg1_save & ~(7u << 28)) | (7u << 28);
     hspi2.Instance->CFG1 = cfg1_new;
 
-    extern spi_if_t spi2_if;
     ad7124_t adc = { .spi = &spi2_if, .cs_port = GPIOB, .cs_pin = GPIO_PIN_12,
                      .id = 0, .wait_ms = _adc_wait_ms };
 
@@ -186,7 +186,6 @@ static void _test_ad7124(void)
 
 static void _test_tps62868(void)
 {
-    extern i2c_if_t i2c1_if;
     int vdd1_found = 0;
 
     _uart_puts("--- TPS62868 Test (I2C1, scan 0x40-0x4F) ---\r\n");
@@ -241,7 +240,6 @@ static void _test_ddr_power(void)
  * PAC1934T 电流/功率采样验证 (I2C4, 0x2C)
  * ═══════════════════════════════════════════════════════════════════ */
 
-extern i2c_if_t i2c4_if;
 
 static void _test_pac1934(void)
 {

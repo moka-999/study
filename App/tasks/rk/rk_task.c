@@ -4,20 +4,20 @@
  * ===================================================================
  *
  * 职责:
- *   1. 收 USART1 字节 → TLV 状态机 → 解析帧
- *   2. RK3588 响应帧 → 匹配 pending, 回传 pc_seq → PC (相同 CmdID)
- *   3. 命令转发: PC→RK 测试命令 (pcToRk_Queue) → 打包 → USART1
+ *   1. 收逻辑串口0字节 → TLV状态机 → 解析帧。
+ *   2. RK响应匹配pending后交给旧PC–TLV结果队列；正式PC JSON尚无消费适配。
+ *   3. 旧PC–TLV命令队列(pcToRk_Queue) → 分配RK Seq → 打包发送。
  *   4. 超时重传: 500ms 无响应重发, 最多 3 次 (指数退避)
  *
- * 心跳由 hb_task 独立发送, 防止被本任务阻塞.
+ * 心跳由hb_task独立调度，两者仍共享UART发送互斥锁。
  *
  * 协议边界：本任务只生成和消费RK侧u64 Seq，不解析PC固定头或JSON。
- * pc_seq字段属于历史队列关联；新业务适配层必须用映射表关联PC u32 Seq，
- * 严禁直接把PC Seq当作RK Seq发送。
+ * pc_seq只是旧PC–TLV通路的关联值。新PC发送Seq仅为本端流水号，业务关联
+ * 规则另行冻结；不能沿用旧字段当作已完成的新PC/RK请求映射。
  *
  * Seq 体系:
- *   g_rk_seq_counter — MCU→RK3588 统一序列号 (心跳 + 命令帧)
- *   pc_seq           — PC 帧的原始序列号, 响应时回传以匹配 PC 端
+ *   rk_link_next_sequence() — MCU→RK3588统一序号(心跳+新命令)。
+ *   pc_seq — 旧TLV关联值，不是已实现的新PC u32 Seq映射。
  *
  * 当前 uart_router slot 0:
  *   阿波罗 V2: USART1 + CH340→PC (用于协议对测)
@@ -31,31 +31,28 @@
 #include "uart_router.h"
 #include "state_machine.h"
 #include "dispatch.h"
-#include "hb_task.h"
+#include "rk_link.h"
 #include "led.h"
 #include <string.h>
-
-/* ── 外部 ── */
-extern QueueHandle_t rkToPc_Queue;
-extern QueueHandle_t pcToRk_Queue;
 
 /* ── 常量 ── */
 #define RK_RESP_TIMEOUT_MS  500
 #define RK_MAX_RETRIES      3
+#define RK_PENDING_CAPACITY 4
 
 /* ── 待确认队列项 ── */
 typedef struct {
     uint8_t  frame[TLV_FRAME_MAX];
     uint16_t len;
     uint64_t seq;           /* MCU→RK 序列号 (匹配) */
-    uint64_t pc_seq;        /* PC 原始序列号 (回传) */
+    uint64_t pc_seq;        /* 历史TLV关联值；不是新PC协议的u32映射。 */
     uint32_t sent_tick;
     uint8_t  retries;
     uint8_t  active;
 } rk_pending_t;
 
-static rk_pending_t _pending[4];
-static uint8_t      _pending_cnt = 0;
+/* 仅本任务读写，无需跨任务锁；心跳不占用pending槽。 */
+static rk_pending_t _pending[RK_PENDING_CAPACITY];
 
 /* ═══════════════════════════════════════════════════════════════════
  * 待确认队列管理
@@ -64,7 +61,7 @@ static uint8_t      _pending_cnt = 0;
 static int _pending_add(const uint8_t *frame, uint16_t len,
                          uint64_t seq, uint64_t pc_seq)
 {
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < RK_PENDING_CAPACITY; i++) {
         if (!_pending[i].active) {
             memcpy(_pending[i].frame, frame, len);
             _pending[i].len       = len;
@@ -73,7 +70,6 @@ static int _pending_add(const uint8_t *frame, uint16_t len,
             _pending[i].sent_tick = xTaskGetTickCount();
             _pending[i].retries   = 0;
             _pending[i].active    = 1;
-            if (i >= _pending_cnt) _pending_cnt = (uint8_t)(i + 1);
             return i;
         }
     }
@@ -83,7 +79,7 @@ static int _pending_add(const uint8_t *frame, uint16_t len,
 /* 是否有空闲 pending 槽 (方案B: 转发前先确认能登记跟踪, 避免"发出去了却没人认领") */
 static int _pending_has_slot(void)
 {
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < RK_PENDING_CAPACITY; i++) {
         if (!_pending[i].active) return 1;
     }
     return 0;
@@ -91,8 +87,10 @@ static int _pending_has_slot(void)
 
 static int _pending_take(uint64_t seq, uint64_t *pc_seq)
 {
+    /* 当前只按RK Seq匹配，不核对CmdID；首个匹配单元即释放pending。
+     * 这是现有单回复基线，不代表已支持ACK后再返回最终结果或多单元上报。 */
     if (!pc_seq) return 0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < RK_PENDING_CAPACITY; i++) {
         if (_pending[i].active && _pending[i].seq == seq) {
             *pc_seq = _pending[i].pc_seq;
             _pending[i].active = 0;
@@ -104,7 +102,7 @@ static int _pending_take(uint64_t seq, uint64_t *pc_seq)
 
 static int _pending_check_timeout(uint32_t now)
 {
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < RK_PENDING_CAPACITY; i++) {
         if (!_pending[i].active) continue;
         uint32_t timeout;
         if (_pending[i].retries >= RK_MAX_RETRIES) {
@@ -138,7 +136,7 @@ void StartRkTask(void *argument)
     {
         uint32_t now = xTaskGetTickCount();
 
-        /* ── ① 接收 USART1 数据 → TLV 状态机 ── */
+        /* ── ① 逻辑串口0接收块 → RK TLV状态机 ── */
         int len;
         while ((len = uart_poll_rx(0, buf, sizeof(buf))) > 0)
         {
@@ -146,21 +144,27 @@ void StartRkTask(void *argument)
                 int r = tlv_sm_feed(&sm, buf[i]);
                 if (r == 1) {
                     tlv_frame_t frame;
-                    tlv_sm_get_frame(&sm, &frame);
+                    if (tlv_sm_get_frame(&sm, &frame) < 0) {
+                        /* CRC正确但TLV损坏：整帧拒绝，继续找下一帧；
+                         * 不消费解析前缀、不释放pending，也不向RK回ACK。 */
+                        continue;
+                    }
 
                     for (uint8_t u = 0; u < frame.count; u++) {
                         tlv_unit_t *unit = &frame.units[u];
 
                         if (unit->type == TLV_TYPE_HEARTBEAT) {
-                            /* RK3588 心跳响应: 更新存活状态 */
+                            /* 收到RK心跳仅翻转指示灯；离线判定尚未接入。 */
                             led_toggle(LED_HEARTBEAT);
 
                         } else if (unit->type == TLV_TYPE_CMD) {
-                            /* RK 响应 (相同 CmdID): 匹配 pending, 取回 PC 原始 seq */
+                            /* RK响应匹配pending，取回历史队列关联值。 */
                             uint64_t pc_seq;
 
                             if (_pending_take(frame.sequence, &pc_seq)) {
-                                /* 匹配成功: RK3588 响应 → 回传 PC */
+                                /* 写入旧结果队列；正式PC JSON尚未消费此队列。
+                                 * TODO: 当前先释放pending，队列满时会丢结果；
+                                 * 新业务接入前须定义结果保留与超时失败策略。 */
                                 if (rkToPc_Queue) {
                                     const uint8_t *d = tlv_unit_get_data(&frame, unit);
                                     rk_msg_t msg;
@@ -171,8 +175,9 @@ void StartRkTask(void *argument)
                                     xQueueSend(rkToPc_Queue, &msg, 0);
                                 }
                             } else {
-                                /* 未匹配 pending 的 CMD 帧 = 重复/陈旧的 RK 响应
-                                 * (重传导致的迟到重复响应). 绝不能回 ACK——否则 RK 会把
+                                /* 当前未匹配pending的CMD一律静默丢弃；可能是迟到
+                                 * 重复包，也可能是尚未支持的异步/第二阶段结果，
+                                 * 不能仅凭未匹配就断言它是旧包。绝不能回ACK，否则RK会把
                                  * ACK 当新命令再回响应, 形成 MCU↔RK 的 ACK↔响应
                                  * ping-pong 死循环 (观测到单 seq 重传 1207 次). 静默丢弃. */
                             }
@@ -199,25 +204,22 @@ void StartRkTask(void *argument)
                     p->retries++;
                     p->sent_tick = xTaskGetTickCount();
                 } else {
-                    p->active = 0;  /* 超限放弃 */
+                    p->active = 0;  /* 当前仅放弃跟踪，链路故障上报尚未接入。 */
                 }
             }
         }
 
-        /* ── ③ PC→RK 命令转发: 用 g_rk_seq_counter 打包 → USART1 + 待确认 ──
+        /* ── ③ 历史队列命令转发：分配独立RK序号 → 串口 + 待确认 ──
          * 方案B: 先确认有空闲 pending 槽才取队列转发; 满了就留在队列等下一轮.
-         * 这样每条发出去的命令必然被登记跟踪, 响应必能匹配回 PC,
-         * 从根上消除"发出去了但 pending 满了 → 响应匹配不到"的丢响应隐患. */
+         * 本任务独占pending，发送成功后登记；只保证跟踪槽不超配，
+         * 不代表结果队列投递或PC响应已经完成。 */
         {
             pc2rk_msg_t fwd;
             while (_pending_has_slot() &&
                    xQueueReceive(pcToRk_Queue, &fwd, 0) == pdTRUE) {
                 uint8_t frame[TLV_FRAME_MAX];
 
-                /* 原子获取并递增共享序列号 */
-                taskENTER_CRITICAL();
-                uint64_t seq = g_rk_seq_counter++;
-                taskEXIT_CRITICAL();
+                uint64_t seq = rk_link_next_sequence();
 
                 int flen = tlv_pack_cmd(fwd.cmd, fwd.data, fwd.data_len,
                                         seq, frame, sizeof(frame));
@@ -227,7 +229,8 @@ void StartRkTask(void *argument)
                                      seq, fwd.pc_seq);
                     } else {
                         /* TX 环满发送失败: 命令已从队列取出, 必须塞回队首,
-                         * 否则这条命令静默丢失. 刚出队空出 1 槽, SendToFront 必成.
+                         * 否则这条命令静默丢失。多生产者并发时空槽可能被抢占，
+                         * 此历史路径仍需在新业务适配接入时完善回插失败策略。
                          * break 让下一轮(10ms)重试, 不会在本轮空转. */
                         xQueueSendToFront(pcToRk_Queue, &fwd, 0);
                         break;

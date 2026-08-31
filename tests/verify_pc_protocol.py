@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import struct
 from pathlib import Path
 
@@ -93,6 +94,22 @@ def main() -> None:
     assert decoded == [frame_a, frame_b]
     passed += 1
 
+    # 帧层允许Length=18，空正文是否符合JSON由dispatch决定；不要在
+    # HEADER->BODY重构时丢掉直接HEADER->FRAME_READY的边界路径。
+    header_only = build_frame(b"", 0, 2, 7)
+    stream.reset()
+    completed = [stream.push(value) for value in header_only]
+    assert completed == [None] * (HEADER_SIZE - 1) + [header_only]
+    passed += 1
+
+    # 4KiB恰好满帧仍合法，不能在最后一个字节写入前提前触发容量拒绝。
+    full_frame = build_frame(b"{}" + b" " * (MAX_PDU - HEADER_SIZE - 2), 0, 2, 8)
+    stream.reset()
+    completed = [stream.push(value) for value in full_frame]
+    assert completed[:-1] == [None] * (MAX_PDU - 1)
+    assert completed[-1] == full_frame and len(full_frame) == MAX_PDU
+    passed += 1
+
     fields = struct.unpack(">IHHHHIH", decoded[0][:HEADER_SIZE])
     assert fields == (len(frame_a), 1, 8, 0x0102, 0x0304, 0x11223344, 0)
     assert json.loads(decoded[0][HEADER_SIZE:].decode("utf-8"))["board"] == "B1"
@@ -103,6 +120,21 @@ def main() -> None:
     expect_protocol_error(struct.pack(">IH", HEADER_SIZE, 2), "Version")
     expect_protocol_error(struct.pack(">IHH", HEADER_SIZE, VERSION, 7), "Flag")
     passed += 4
+
+    # 字段刚到齐时就拒绝，不因拆分状态处理函数而延迟到整帧结束。
+    for invalid, reject_at in ((struct.pack(">I", MAX_PDU + 1), 4),
+                               (struct.pack(">IH", 20, 2), 6),
+                               (struct.pack(">IHH", 20, VERSION, 7), 8)):
+        stream.reset()
+        rejected_at = None
+        for index, value in enumerate(invalid, 1):
+            try:
+                stream.push(value)
+            except ProtocolError:
+                rejected_at = index
+                break
+        assert rejected_at == reject_at
+    passed += 1
 
     # 固定依赖版本和文件摘要，防止无意中升级或改写第三方源码。
     vendor = ROOT / "Middlewares" / "Third_Party" / "cJSON"
@@ -145,6 +177,32 @@ def main() -> None:
     assert "PC_COMMAND_" not in state_source
     passed += 1
 
+    # 帧状态与业务命令使用两张不同的表。此处检查实际C源码路由，
+    # 不将Python模型或静态检查当成C运行；终态/非法状态运行例在Mock中。
+    state_code = re.sub(r"/\*.*?\*/|//[^\n]*", "", state_source, flags=re.S)
+    assert not re.search(r"\bswitch\s*\(", state_code)
+    state_table = re.search(
+        r"static const pc_sm_state_handler_t s_state_handlers\[\]\s*=\s*\{(.*?)\n\};",
+        state_code, re.S)
+    assert state_table is not None
+    state_entries = re.findall(r"\[(PC_SM_STATE_\w+)\]\s*=\s*(\w+)",
+                               state_table.group(1))
+    assert len(state_entries) == 4
+    assert dict(state_entries) == {
+        "PC_SM_STATE_HEADER": "feed_header",
+        "PC_SM_STATE_BODY": "feed_body",
+        "PC_SM_STATE_FRAME_READY": "reject_byte",
+        "PC_SM_STATE_ERROR": "reject_byte",
+    }
+    feed_code = state_code.split("pc_sm_feed(pc_sm_t *sm, uint8_t byte)", 1)[1]
+    feed_code = feed_code.split("int pc_sm_get_frame", 1)[0]
+    assert feed_code.index("(unsigned int)sm->state >= PC_SM_STATE_COUNT") < \
+        feed_code.index("s_state_handlers[sm->state]")
+    assert "return handler(sm, byte);" in feed_code
+    assert "sm->buffer[" not in feed_code  # 只有可接收状态的handler才能写入。
+    assert "_Static_assert" in state_code and "PC_SM_STATE_COUNT" in state_header
+    passed += 1
+
     # JSON解析、命令校验和响应组帧统一由dispatch承担，不泄漏到TCP任务。
     dispatch_source = (ROOT / "App" / "protocol" / "pc" /
                        "pc_dispatch.c").read_text(encoding="utf-8")
@@ -154,6 +212,31 @@ def main() -> None:
     assert "pc_tester_info_load" in dispatch_source
     assert '"testerName"' in dispatch_source
     assert "firmware_version_current" not in dispatch_source
+    passed += 1
+
+    # 命令表取代switch分支；检查已有路由不丢失、命令号不重复。
+    # 这里只检查源码合同，实际处理函数的运行回归在driver_mock_test.c中。
+    assert not re.search(r"\bswitch\s*\(", dispatch_source)
+    table_match = re.search(
+        r"static const pc_command_entry_t s_command_table\[\]\s*=\s*\{(.*?)\n\};",
+        dispatch_source, re.S)
+    assert table_match is not None
+    entries = re.findall(r"\{\s*(PC_COMMAND_\w+)\s*,\s*(\w+)\s*\}",
+                         table_match.group(1))
+    routes = dict(entries)
+    assert len(routes) == len(entries), "PC命令表出现重复CommandID名称"
+    command_source = (ROOT / "App" / "protocol" / "pc" /
+                      "pc_command.h").read_text(encoding="utf-8")
+    command_values = dict(re.findall(
+        r"#define\s+(PC_COMMAND_\w+)\s+(0x[0-9A-Fa-f]+)U", command_source))
+    values = [int(command_values[command], 16) for command in routes]
+    assert len(set(values)) == len(values), "PC命令表出现相同数值的命令别名"
+    assert routes["PC_COMMAND_CLIENT_HEARTBEAT"] == "handle_client_heartbeat"
+    assert routes["PC_COMMAND_QUERY_TESTER_INFO"] == "handle_query_tester_info"
+    assert routes["PC_COMMAND_START_TEST"] == "handle_start_test"
+    assert routes["PC_COMMAND_SERVER_HEARTBEAT"] == "reject_response_command"
+    assert routes["PC_COMMAND_TESTER_INFO_RESP"] == "reject_response_command"
+    assert "s_command_table[i].handler(request, root, response)" in dispatch_source
     passed += 1
 
     tester_store_source = (ROOT / "App" / "protocol" / "pc" /

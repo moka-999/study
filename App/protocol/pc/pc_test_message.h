@@ -30,7 +30,7 @@ typedef struct {
 
 /* MCU准备上报给PC的一条芯片测试结果；本结构不拥有site_id字符串。 */
 typedef struct {
-    const char *site_id;       /* 站点标识；当前协议允许空字符串。 */
+    const char *site_id;       /* 辅助函数接受空串；业务有效性尚待冻结。 */
     uint32_t mirror_index;     /* 镜像/测试位编号，业务值域待冻结。 */
     int32_t test_status;       /* 测试状态码，业务枚举待冻结。 */
 } pc_chip_test_result_t;

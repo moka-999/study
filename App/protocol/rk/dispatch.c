@@ -1,17 +1,19 @@
 /*
  * ===================================================================
- * MCU-RK TLV 命令分发 — 查表路由实现
+ * 旧PC–TLV业务适配器 — 查表路由实现
  * ===================================================================
  *
- * 注意：这里仍保留PC旧TLV入口以维持历史固件可运行。正式PC-MCU JSON业务层
- * 接入后，本文件只接收业务适配层生成的RK命令，不能直接解析PC帧。
+ * 此为旧PC–TLV分发入口，正式PC TCP任务已不调用它；保留用于迁移核对。
+ * 下述ACK/队列行为不是现行PC JSON协议。未来业务适配须显式定义转换，
+ * 不能把本分发器重新接回PC原始帧接收路径。
  *
  *   测试命令(0x0001-0x0024) → pcToRk_Queue → rk_task → RK3588
- *     MCU 先回 ACK(Params[0]=0x03), 结果同 CmdID 异步回报
+ *     旧适配器先向旧PC入口回ACK(Params[0]=0x03)，不是RK的受理应答。
  *
  *   本地命令(reboot 等) → MCU 直接执行 + 响应
  *
- *   RK 返回相同 CmdID, 通过 Params 状态区分命令/结果
+ * 旧模拟测试采用相同CmdID回结果；rk_task实际仅按RK Seq匹配pending。
+ * 原文的独立结果码未作废；ACK后再返回最终结果等生命周期尚未实现。
  * ===================================================================
  */
 #include "main.h"
@@ -22,21 +24,18 @@
 #include "task.h"
 #include "queue.h"
 #include "timers.h"
+#include "rk_link.h"
 #include <string.h>
 
-/* ── RK3588 复位 GPIO ──
- * Apollo V2 历史实现。B1的PG12实际连接PHY ETH_nRST，绝不能用于RK复位；
- * RK硬复位应通过pwr_ctrl切换PC6，
- * 对VCC4V0_SYS/RK806 PMIC做安全电源循环；迁移完成前不得启用本实现。
+/* ── 旧V2适配器使用的复位GPIO，不是B1的RK复位定义 ──
+ * B1的PG12实际连接PHY ETH_nRST，绝不能用于RK复位。
+ * B1正常重启应由pwr_ctrl管理PC6/PC7/PG11的安全掉电/上电，时序单独确认。
+ * 此处只有注释警告，没有B1编译期阻断；不能把该handler接入B1正式业务。
  */
 #ifndef RK_RST_PORT
 #define RK_RST_PORT  GPIOG
 #define RK_RST_PIN   GPIO_PIN_12
 #endif
-
-/* ── 外部依赖 ── */
-extern void *rkToPc_Queue;
-extern void *pcToRk_Queue;
 
 /* ── 处理器原型 ── */
 static int _h_test_cmd(const tlv_frame_t *frame, const tlv_unit_t *unit,
@@ -122,9 +121,9 @@ int tlv_dispatch(const tlv_frame_t *req, uint8_t *resp, uint16_t max)
  * ═══════════════════════════════════════════════════════════════════ */
 
 /*
- * 测试命令透传: PC → MCU → RK3588
+ * 旧PC–TLV测试命令转发：保留CmdID/Params，交给rk_task重建RK帧。
  *   unit->cmd   = 2字节 CmdID
- *   unit->data  = 参数 (不含 CmdID)
+ *   tlv_unit_get_data(frame, unit) = 参数起始地址（不含CmdID）
  */
 static int _h_test_cmd(const tlv_frame_t *frame, const tlv_unit_t *unit,
                         uint8_t *resp, uint16_t max)
@@ -149,11 +148,11 @@ static int _h_test_cmd(const tlv_frame_t *frame, const tlv_unit_t *unit,
 }
 
 /*
- * 重启 RK3588: MCU GPIO 拉低 RK3588 NPOR
+ * 旧V2复位脉冲实现：拉低RK_RST_PIN，定时释放；不是B1正常重启流程。
  *
  * 历史TLV入口曾在tcp_task上下文同步调用本handler；正式TCP现已切到PC JSON，
- * 但同步handler本身仍不能用vTaskDelay阻塞。保留一次性软件定时器实现，避免
- * 未来由其他任务复用时阻塞调用者。
+ * 但同步handler本身仍不能用vTaskDelay阻塞。一次性软件定时器仅避免阻塞，
+ * 不解决上方PG12引脚归属问题，也不代表该实现可移植到B1。
  */
 static TimerHandle_t _rk_rst_timer = NULL;
 

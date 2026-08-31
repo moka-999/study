@@ -1,10 +1,12 @@
 /*
  * ===================================================================
- * MCU-RK TLV 协议帧 — 打包/解包
+ * MCU-RK TLV 当前实现基线 — 打包/解包
  * ===================================================================
  *
  * 仅用于MCU-RK串口链路，不用于PC-MCU TCP；PC协议见../pc/pc_protocol.h。
  * 两侧Seq属于独立命名空间，业务层负责关联，禁止原始帧透传。
+ * 下述线格式用于当前固件回归；与外部RK文档的Type/CRC/结果码差异仍需
+ * 双方确认，不能把本实现当作已宣布废弃其他设计的依据。
  *
  * 帧格式:
  *   [0x5A] [Len:2B BE] [HeaderCRC:2B LE] [Seq:8B] [TLV...N] [FrameCRC:2B LE] [0xA5]
@@ -24,9 +26,9 @@
  *
  *   Type = 0x0000 → 心跳 (Value 为空)
  *   Type = 0x5000 → 命令容器 (Value = [CmdID:2B BE] [Params:N])
- *   Type = 其他   → 后续拓展预留
+ *   Type = 其他   → 校验TLV结构后跳过，不解释其业务含义
  *
- *   TLV_Len = Value 字节数 = 2 + len(Params)
+ *   命令容器 TLV_Len = 2 + len(Params)；心跳 TLV_Len = 0。
  *
  * CRC:
  *   HeaderCRC = crc16_modbus([0x5A, Len_H, Len_L])
@@ -55,6 +57,7 @@
  *   TLV_FRAME_MAX = 1(Sync) + 2(Len) + 2(HCRC) + 8(Seq) + 1024(TLV) + 2(FCRC) + 1(Footer)
  *                 = 1040
  * ── */
+#define TLV_PAYLOAD_MIN     4       /* 至少包含Type(2)+TLV_Len(2)       */
 #define TLV_PAYLOAD_MAX     1024    /* Len 最大值                      */
 #define TLV_CMD_DATA_MAX    (TLV_PAYLOAD_MAX - 6)  /* 1018, 单 TLV 参数上限 */
 #define TLV_FRAME_MAX       (TLV_PAYLOAD_MAX + 16) /* 1040              */
@@ -91,7 +94,7 @@ typedef int (*tlv_handler_t)(const tlv_frame_t *frame,
                              const tlv_unit_t *unit,
                              uint8_t *resp, uint16_t max);
 
-/* ── RK→PC 队列消息 (跨任务传递解析结果) ── */
+/* ── 旧PC–TLV适配器的结果队列载荷，正式PC JSON尚未消费此队列 ── */
 typedef struct {
     uint16_t cmd;
     uint8_t  data[TLV_CMD_DATA_MAX];
@@ -116,8 +119,13 @@ int tlv_pack_heartbeat(uint64_t seq,
 
 /* ── 解包 API ── */
 
-/* 解包: frame_buf 从 Seq 起始, frame_len = Len 值 (TLV 字节数)
-   返回: 成功解析的 TLV 单元数, -1=错误 */
+/* 解包：frame_buf从Seq起始，调用方保证可读长度至少为8+frame_len字节。
+ * frame_len为Len字段值（仅TLV字节数），帧CRC/尾由状态机在此前校验。
+ * 返回：>=0为输出单元数；未知Type可被跳过，因此0也是合法结果。
+ *       -1为参数、TLV结构或容量错误；out非NULL时整份输出清零。
+ * 任一TLV损坏均拒绝整帧，不暴露已解析的前缀。线上所有TLV（含未知Type
+ * 和心跳）合计不得超过16个；纯心跳输出保持合并为一个心跳单元。
+ */
 int tlv_unpack(const uint8_t *frame_buf, uint16_t frame_len,
                tlv_frame_t *out);
 

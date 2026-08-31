@@ -38,15 +38,14 @@ void pc_sm_init(pc_sm_t *sm)
     pc_sm_reset(sm);
 }
 
-pc_sm_feed_result_t pc_sm_feed(pc_sm_t *sm, uint8_t byte)
+/*
+ * HEADER：只收固定头。Length/Version/Flag分别在第4/6/8字节到齐时校验，
+ * 不必等到18字节甚至整个正文收齐；因此非法大包仍能尽早被拒绝。
+ * 收满头后由Length决定进入BODY还是直接FRAME_READY（无正文的18字节帧）。
+ * 正文是否是合法JSON由上层决定，帧状态机不替JSON层扩大或缩小接收规则。
+ */
+static pc_sm_feed_result_t feed_header(pc_sm_t *sm, uint8_t byte)
 {
-    /* FRAME_READY必须先取帧并reset；ERROR连接也不允许尝试原地重同步。 */
-    if (!sm || sm->state == PC_SM_STATE_FRAME_READY ||
-        sm->state == PC_SM_STATE_ERROR || sm->received >= PC_PROTOCOL_MAX_PDU) {
-        if (sm) return fail(sm, PC_SM_ERROR_STATE);
-        return PC_SM_FEED_ERROR;
-    }
-
     sm->buffer[sm->received++] = byte;
 
     /* Length刚到齐便拒绝异常值，避免继续接收不可信的大包体。 */
@@ -68,15 +67,69 @@ pc_sm_feed_result_t pc_sm_feed(pc_sm_t *sm, uint8_t byte)
         return fail(sm, PC_SM_ERROR_FLAG);
     }
 
-    if (sm->expected_length != 0U &&
-        sm->received == sm->expected_length) {
-        sm->state = PC_SM_STATE_FRAME_READY;
-        return PC_SM_FEED_FRAME_READY;
-    }
-    if (sm->received >= PC_PROTOCOL_HEADER_SIZE) {
+    if (sm->received == PC_PROTOCOL_HEADER_SIZE) {
+        if (sm->expected_length == PC_PROTOCOL_HEADER_SIZE) {
+            sm->state = PC_SM_STATE_FRAME_READY;
+            return PC_SM_FEED_FRAME_READY;
+        }
         sm->state = PC_SM_STATE_BODY;
     }
     return PC_SM_FEED_MORE;
+}
+
+/* BODY：头部已经校验通过，只收正文并在完整PDU到齐时通知调用方。 */
+static pc_sm_feed_result_t feed_body(pc_sm_t *sm, uint8_t byte)
+{
+    sm->buffer[sm->received++] = byte;
+    if (sm->received == sm->expected_length) {
+        sm->state = PC_SM_STATE_FRAME_READY;
+        return PC_SM_FEED_FRAME_READY;
+    }
+    return PC_SM_FEED_MORE;
+}
+
+/*
+ * 两个停止接收的状态共用同一处理函数：FRAME_READY要先取帧再reset，
+ * ERROR由TCP任务关闭连接。继续feed属于调用错误，不写buffer、不递增
+ * received，避免覆盖上一帧或把坏连接中的后续字节误当成新帧。
+ */
+static pc_sm_feed_result_t reject_byte(pc_sm_t *sm, uint8_t byte)
+{
+    (void)byte;
+    return fail(sm, PC_SM_ERROR_STATE);
+}
+
+typedef pc_sm_feed_result_t (*pc_sm_state_handler_t)(pc_sm_t *sm, uint8_t byte);
+
+/*
+ * 状态查表入口：枚举值直接作为下标，四个状态的字节处理职责在此集中列出。
+ * 增加状态时，在头文件COUNT之前声明枚举、编写处理函数并登记本表即可；
+ * 不需要在TCP任务里追加状态分支。本表只路由解析状态，不路由业务命令，
+ * CommandID -> handler仍由pc_dispatch中的独立命令表负责。
+ */
+static const pc_sm_state_handler_t s_state_handlers[] = {
+    [PC_SM_STATE_HEADER]      = feed_header,
+    [PC_SM_STATE_BODY]        = feed_body,
+    [PC_SM_STATE_FRAME_READY] = reject_byte,
+    [PC_SM_STATE_ERROR]       = reject_byte,
+};
+
+_Static_assert(sizeof(s_state_handlers) / sizeof(s_state_handlers[0]) ==
+               PC_SM_STATE_COUNT, "PC state table must cover the state enum");
+
+pc_sm_feed_result_t pc_sm_feed(pc_sm_t *sm, uint8_t byte)
+{
+    if (!sm) return PC_SM_FEED_ERROR;
+
+    /* 必须先检查下标再取函数指针；转成无符号也可拦截负值枚举。
+     * 缓冲上限统一在写入前检查，所有可接收状态都受同一4KiB限制。 */
+    if ((unsigned int)sm->state >= PC_SM_STATE_COUNT ||
+        sm->received >= PC_PROTOCOL_MAX_PDU) {
+        return fail(sm, PC_SM_ERROR_STATE);
+    }
+    pc_sm_state_handler_t handler = s_state_handlers[sm->state];
+    if (!handler) return fail(sm, PC_SM_ERROR_STATE);
+    return handler(sm, byte);
 }
 
 int pc_sm_get_frame(const pc_sm_t *sm, pc_protocol_frame_t *frame)

@@ -1,24 +1,28 @@
 /*
  * ===================================================================
- * 外设抽象接口 — 面向对象风格 (Interface + Implementation)
+ * 外设抽象接口 — 驱动与具体总线实现之间的函数表
  * ===================================================================
  *
  * 设计目标:
  *   上层应用只依赖本文件的接口类型, 不直接调用 HAL 库函数。
- *   换 MCU 或 HAL 版本时, 只需修改 *_hw.c 实现文件, 应用层零改动。
+ *   具体总线实例由board_interfaces.h声明，*_hw.c负责HAL绑定。
+ *   移植仍需核对引脚、时钟、片选和并发策略，接口不保证零改动。
  *
  * 使用方式:
- *   #include "hal_if.h"
- *   extern i2c_if_t i2c1_if;
+ *   #include "board_interfaces.h"
  *   i2c1_if.read_reg(&i2c1_if, 0x50, 0x00, &val);
  *
  * 层次关系:
- *   App/tasks/   →   hal_if.h (接口)   →   *_hw.c (HAL 实现)
- *   BSP/         →   直接操作 GPIO/I2C 时序, 不走 HAL
+ *   任务/组合层 → BSP器件驱动 → hal_if.h → *_hw.c
+ *   GPIO、软件I2C等板级实现仍可能直接调用STM32 HAL。
+ *
+ * 通用约束：除注明UART内部复制外，缓冲由调用方持有至同步调用结束。
+ * I2C/SPI/Flash不内置跨任务事务锁，也不允许从ISR调用；共享总线时由
+ * 业务所有者串行访问。IF_OK只表示本次操作成功，不表示业务已完成。
  * ===================================================================
  */
-#ifndef __HAL_IF_H
-#define __HAL_IF_H
+#ifndef HAL_IF_H
+#define HAL_IF_H
 
 #include <stdint.h>
 
@@ -29,7 +33,10 @@
 
 /*
  * ── I2C 总线接口 ────────────────────────────────────────────────
- * 封装 HAL_I2C_Mem_Read/Write, 屏蔽 7/10 位地址差异
+ * dev为未左移的7位地址，由STM32适配层左移1位；不支持10位地址。
+ * reg为8位寄存器地址，len以字节计。read_bytes带寄存器地址；
+ * write_bytes发送原始载荷；write_cmd是Send Byte事务。
+ * V2同步事务超时100ms，在线探测为3次/10ms。
  * handle: HAL I2C_HandleTypeDef* (或软件 I2C 自定义句柄)
  */
 typedef struct i2c_if {
@@ -46,7 +53,8 @@ typedef struct i2c_if {
 
 /*
  * ── SPI 总线接口 ────────────────────────────────────────────────
- * 全双工传输 + 半双工发送, NSS 由上层 GPIO 控制
+ * 全双工传输 + 半双工发送；len以字节计，调用期间缓冲必须有效。
+ * 片选由器件驱动控制，接口不自动切NSS；V2同步超时100ms。
  */
 typedef struct spi_if {
     void   *handle;
@@ -56,18 +64,15 @@ typedef struct spi_if {
 
 /*
  * ── UART 串口接口 ───────────────────────────────────────────────
- * 中断驱动发送(环形缓冲区) + 空闲中断接收(IDLE line detect)
+ * send复制整个载荷到内部环形缓冲，不等待物理发送完成；成功后可复用data。
+ * 互斥锁竞争最多等待100ms，因此不是完全非阻塞，也不能从ISR调用。
+ * start_rx借用DMA缓冲，缓冲需保持有效且位于DMA可访问的SRAM。
  */
 typedef struct uart_if {
     void   *handle;
     int   (*send)    (struct uart_if *port, uint8_t *data, uint16_t len);
     int   (*start_rx)(struct uart_if *port, uint8_t *buf, uint16_t size);
 } uart_if_t;
-
-/* 中断 TX drain: 挂到 HAL 的 TxISR 钩子, 由 HAL_UART_IRQHandler 的 TXE 分支自动调用 */
-struct __UART_HandleTypeDef;   /* 前向声明, 避免 hal_if.h 依赖 usart.h */
-void uart_tx_drain(struct __UART_HandleTypeDef *huart);
-void uart_tx_isr_attach(void); /* 在 start_rx 前调用, 绑定 huart1/2.TxISR */
 
 /*
  * ── PWM 接口 ────────────────────────────────────────────────────
@@ -80,7 +85,9 @@ typedef struct pwm_if {
 
 /*
  * ── Flash 接口 ────────────────────────────────────────────────────
- * W25Q256 NOR Flash, QSPI 四线模式
+ * W25Q256 NOR Flash，地址和len单位为字节；info的total_kb单位为KiB。
+ * write允许任意范围RMW；erase向外扩展到完整扇区，调用方须先确认边界。
+ * 共享扇区缓冲不可重入；同步操作可能包含擦除/编程等待。
  */
 typedef struct flash_if {
     void   *handle;
@@ -91,4 +98,4 @@ typedef struct flash_if {
     void  (*info)(struct flash_if *f, uint32_t *total_kb, uint32_t *sector, uint32_t *page);
 } flash_if_t;
 
-#endif
+#endif /* HAL_IF_H */

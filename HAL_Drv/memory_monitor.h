@@ -34,10 +34,18 @@ void memory_monitor_configure(memory_monitor_t *monitor,
                               GPIO_TypeDef *adc_cs_port, uint16_t adc_cs_pin,
                               void (*wait_ms)(uint32_t ms));
 
-/* 电源进入ON后调用；PAC和AD任一失败则返回IF_ERR。 */
+/*
+ * 电源进入ON后调用；可重复调用，仅重试未就绪器件，不重置已就绪器件。
+ * PAC和AD任一失败返回IF_ERR；就绪标志由本模块管理，任务不直接修改。
+ * 为同步接口，可能执行I2C/SPI和wait_ms；必须在任务上下文串行使用。
+ */
 int memory_monitor_init(memory_monitor_t *monitor);
 
-/* 生成一次快照；返回IF_ERR时仍可按valid_mask使用部分数据。 */
+/*
+ * 清空并生成一次快照；返回IF_ERR时仍可按valid_mask使用部分数据。
+ * valid_mask按器件类别生效；未置位数组不代表有效的零电压/零电流。
+ * 三路顺序固定VDD1/VDD2/VDDQ，voltage_mv单位mV，idd单位见PAC类型。
+ */
 int memory_monitor_sample(memory_monitor_t *monitor,
                           memory_monitor_sample_t *sample);
 

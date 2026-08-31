@@ -12,6 +12,7 @@
 #include "task.h"
 
 #include "ad7124.h"
+#include "board_interfaces.h"
 #include "main.h"
 #include "spi.h"
 
@@ -20,8 +21,6 @@
 #define AD_WAVE_START_DELAY_MS       2000U
 #define AD_WAVE_TRANSACTION_GAP_MS    100U
 #define AD_WAVE_REPEAT_GAP_MS        2000U
-
-extern spi_if_t spi2_if;
 
 static void ad_wave_wait_ms(uint32_t delay_ms)
 {

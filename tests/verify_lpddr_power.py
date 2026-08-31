@@ -2,6 +2,7 @@
 """离线验证 LPDDR4/4X 三轨、20mV步进、IDD 采样和上下电软件合同。"""
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,7 +97,11 @@ def verify_source_contract() -> None:
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     assert "if(ENABLE_DRIVER_MOCK_TEST)" in cmake, "正式固件不应编译Mock任务体"
     assert mock.index("GPIO_FUNC_PWR_4V0_EN") < mock.index("GPIO_FUNC_PWR_3V3_EN")
-    assert "RK完成CKE低准备后先关闭DDR三轨" in mock
+    # 校验下电调用和DDR使能检查，不依赖会随注释规范化变化的日志原句。
+    # 这里只证明Mock包含该检查，不代表RK安全下电握手已经实现或验证。
+    assert re.search(
+        r"mock_check\(pwr_ctrl_request_off\(30U\)\s*==\s*PWR_CTRL_OK\s*&&\s*"
+        r"bsp_gpio_get\(GPIO_FUNC_PWR_DDR_EN\)\s*==\s*0U", mock)
 
 
 def main() -> None:
