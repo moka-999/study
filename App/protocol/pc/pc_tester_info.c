@@ -10,8 +10,6 @@
 #define TESTER_HARDWARE_REVISION   "D00"
 #define TESTER_BOARD_NAME          "RK3588_test"
 
-static int s_flash_initialized;
-
 /* 只补空白字段；旧B1的产品、硬件版本等身份不能被默认常量改写。 */
 static int fill_missing_text(char *destination, size_t capacity, const char *source)
 {
@@ -52,22 +50,13 @@ static int fill_missing_fields(fru_info_t *fru)
     return changed;
 }
 
-int pc_tester_info_load(fru_info_t *fru)
+static int load_locked(fru_info_t *fru)
 {
     uint32_t generation = 0U;
     int load_result;
     int legacy_result;
 
     if (!fru) return -1;
-
-    /*
-     * ponytail: 当前正式固件只有单个TCP任务访问FRU，因此不引入互斥锁；
-     * 后续若增加量产写入任务，必须在flash_if外层增加同一把锁。
-     */
-    if (!s_flash_initialized) {
-        if (flash_if.init(&flash_if) != IF_OK) return -1;
-        s_flash_initialized = 1;
-    }
 
     load_result = fru_info_load(&flash_if, fru, &generation);
     /* 最新有效记录为v2时直接读取，不用编译期常量覆盖它。 */
@@ -107,4 +96,13 @@ int pc_tester_info_load(fru_info_t *fru)
 
     /* 响应必须来自持久化后的实际记录，而不是刚才构造的RAM临时值。 */
     return fru_info_load(&flash_if, fru, &generation) == FLASH_STORE_OK ? 0 : -1;
+}
+
+/* FRU迁移与OTA下载/健康日志共用完整事务锁，保留B1身份和UID MAC规则。 */
+int pc_tester_info_load(fru_info_t *fru)
+{
+    if (fru == NULL || flash_transaction_begin(1000U) != 0) return -1;
+    int result = load_locked(fru);
+    flash_transaction_end();
+    return result;
 }

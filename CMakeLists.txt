@@ -5,6 +5,11 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
+# OTA与普通调试构建隔离；一个A1镜像经修正表可安装到任一896KiB槽。
+option(ENABLE_OTA_RELOCATION_PROBE "Build slot-limited App with relocation records" OFF)
+option(ENABLE_OTA_BOOT "Require B journal and healthy-start confirmation" OFF)
+set(OTA_APP_BASE "0x08020000" CACHE STRING "OTA App slot address")
+
 # RK物理口仍待真板确认；只选择一路，避免向两个候选控制台同时发送协议。
 set(B1_RK_UART 4 CACHE STRING "B1 RK UART candidate: 4=UART4, 2=USART2")
 set_property(CACHE B1_RK_UART PROPERTY STRINGS 4 2)
@@ -83,6 +88,7 @@ add_executable(b1
     App/protocol/pc/pc_protocol.c
     App/protocol/pc/pc_state_machine.c
     App/protocol/pc/pc_dispatch.c
+    App/protocol/pc/pc_ota.c
     App/protocol/pc/pc_tester_info.c
     App/protocol/pc/pc_test_message.c
     App/protocol/rk/crc.c
@@ -110,7 +116,20 @@ add_executable(b1
     ${LWIP_SOURCES}
 )
 
+if(ENABLE_OTA_RELOCATION_PROBE)
+    target_compile_definitions(b1 PRIVATE OTA_RELOCATION_PROBE=1)
+endif()
+if(ENABLE_OTA_BOOT)
+    if(NOT ENABLE_OTA_RELOCATION_PROBE)
+        message(FATAL_ERROR "OTA requires slot-limited build")
+    endif()
+    target_sources(b1 PRIVATE App/ota/ota_app.c App/ota/ota_install.c
+        App/ota/boot_record.c App/ota/boot_health.c)
+    target_compile_definitions(b1 PRIVATE ENABLE_OTA_BOOT=1)
+endif()
+
 target_include_directories(b1 PRIVATE
+    App/ota
     Core/Inc
     HAL_Drv
     BSP/Flash

@@ -3,8 +3,8 @@
  *
  * TCP字节流解析状态已独立到pc_state_machine.h；本模块不定义CommandID
  * 业务含义，也不参与MCU-RK的0x5A/0xA5 TLV协议。
- * 本轮移植保留V2已实现的Seq/ServiceID回显行为；8月31日确认的独立发送
- * Seq与ServiceID固定0尚待双端迁移，不得把下方旧实现说明当作新合同。
+ * MCU发送头使用连接内独立u32流水号，ServiceID固定0；接收PC Seq只用于
+ * 诊断，不回显、不参与RK序号或业务关联。
  */
 #ifndef PC_PROTOCOL_H
 #define PC_PROTOCOL_H
@@ -38,9 +38,9 @@ typedef struct {
     uint32_t length;       /* 完整PDU字节数：18字节头+JSON正文。 */
     uint16_t version;      /* 当前必须为PC_PROTOCOL_VERSION。 */
     uint16_t flag;         /* 当前必须为PC_PROTOCOL_FLAG_JSON。 */
-    uint16_t service_id;   /* 业务服务分类；响应沿用请求值。 */
+    uint16_t service_id;   /* 初版固定为0；非0帧由状态机拒绝。 */
     uint16_t command_id;   /* 当前PDU的请求或响应命令号。 */
-    uint32_t sequence;     /* PC侧Seq；响应原样回显，禁止混用RK侧Seq。 */
+    uint32_t sequence;     /* PC自身发送流水号；接收不改变MCU发送计数。 */
     uint16_t reserved;     /* 预留字段；当前发送响应时固定写0。 */
     const uint8_t *json;   /* 借用PC状态机内部缓冲中的正文，不需要free。 */
     uint32_t json_length;  /* 正文字节数，不包含额外的'\0'结束符。 */
@@ -57,11 +57,11 @@ typedef enum {
 } pc_json_result_t;
 
 /*
- * 构造对PC请求的响应头：沿用请求ServiceID并原样回显请求Seq，CommandID由
- * 具体响应类型提供。MCU-RK Seq不得传入本函数。
+ * 构造MCU发送帧：ServiceID固定0，Seq由当前TCP连接显式传入。该接口不依赖
+ * 请求帧，因此后续异步结果上报也能复用；MCU-RK Seq不得传入本函数。
  */
-int pc_protocol_build_response(const pc_protocol_frame_t *request,
-                               uint16_t response_command_id,
+int pc_protocol_build_response(uint16_t response_command_id,
+                               uint32_t mcu_tx_sequence,
                                const uint8_t *json,
                                uint32_t json_length,
                                uint8_t *output,

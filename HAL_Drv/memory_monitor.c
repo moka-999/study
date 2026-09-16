@@ -49,8 +49,20 @@ int memory_monitor_sample(memory_monitor_t *monitor,
         ad7124_read_all_mv(&monitor->adc, sample->voltage_mv,
                            MEMORY_MONITOR_RAIL_COUNT, &got, 2.5f,
                            pga, bipolar) == IF_OK &&
-        got == MEMORY_MONITOR_RAIL_COUNT)
+        got == MEMORY_MONITOR_RAIL_COUNT) {
+        /*
+         * B1三路采样输入都经过100R串联电阻和10k对地电阻。AD7124读到的是
+         * 10k电阻上的电压，源端电压应乘(100+10000)/10000=1.01。
+         * 这里在现有整数mV接口上做1.01倍四舍五入；raw转mV此前仍有小于
+         * 1mV的量化误差，不影响20mV档位判断。真实电阻误差和ADC增益仍须
+         * 在B1首板上标定，届时再决定是否把分压系数前移到raw换算阶段。
+         */
+        for (uint8_t rail = 0U; rail < MEMORY_MONITOR_RAIL_COUNT; rail++) {
+            int64_t scaled = (int64_t)sample->voltage_mv[rail] * 101;
+            sample->voltage_mv[rail] = (int32_t)((scaled + 50) / 100);
+        }
         sample->valid_mask |= MEMORY_MONITOR_VALID_VOLTAGE;
+    }
 
     /* PAC返回4通道数组，本项目只保存已启用的前3路。 */
     if (monitor->pac_ready) {
@@ -77,4 +89,3 @@ void memory_monitor_invalidate(memory_monitor_t *monitor)
     monitor->pac_ready = 0U;
     monitor->adc_ready = 0U;
 }
-

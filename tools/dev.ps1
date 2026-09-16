@@ -51,7 +51,8 @@ function Find-Python {
 $python = Find-Python
 if ($Task -eq 'check') {
     # 都是离线检查，不打开串口、网络或调试器；缺失测试脚本必须报错。
-    foreach ($script in @('verify_project.py', 'test_manifest.py', 'test_legacy_flash.py')) {
+    foreach ($script in @('verify_project.py', 'test_pc_power_protocol.py',
+                          'test_manifest.py', 'test_legacy_flash.py')) {
         & $python -B -X utf8 (Join-Path $repo "tests\$script")
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }

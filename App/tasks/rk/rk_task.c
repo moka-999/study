@@ -32,6 +32,7 @@
 #include "app_tasks.h"
 #include "rk_link.h"
 #include "pwr_ctrl.h"
+#include "ota_app.h"
 #include <string.h>
 
 /* ── 常量 ── */
@@ -142,6 +143,8 @@ void StartRkTask(void *argument)
             xQueueReset(pcToRk_Queue);
             xQueueReset(rkToPc_Queue);
             while (uart_poll_rx(0, buf, sizeof(buf)) > 0) {}
+            /* OFF是正常待机，不发RK命令，但必须参与App健康观察。 */
+            ota_app_progress(OTA_TASK_RK);
             vTaskDelay(pdMS_TO_TICKS(20U));
             continue;
         }
@@ -249,6 +252,7 @@ void StartRkTask(void *argument)
             }
         }
 
+        ota_app_progress(OTA_TASK_RK);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

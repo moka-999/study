@@ -5,6 +5,8 @@
  */
 #include "flash_bsp.h"
 #include "qspi_hw.h"
+#include "FreeRTOS.h"
+#include "semphr.h"
 
 #include <string.h>
 
@@ -13,6 +15,30 @@
  * 该实例不可重入，上层若从多个任务访问 Flash，必须使用同一把互斥锁串行化。
  */
 static uint8_t s_sector_buffer[W25Q_SECTOR_SIZE];
+static SemaphoreHandle_t s_transaction_lock;
+static int s_initialized;
+
+int flash_transaction_prepare(void)
+{
+    if (s_transaction_lock == NULL) s_transaction_lock = xSemaphoreCreateMutex();
+    return s_transaction_lock != NULL ? 0 : -1;
+}
+
+int flash_transaction_begin(uint32_t timeout_ms)
+{
+    if (s_transaction_lock == NULL ||
+        xSemaphoreTake(s_transaction_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return -1;
+    if (!s_initialized) {
+        if (flash_if.init(&flash_if) != IF_OK) { flash_transaction_end(); return -1; }
+        s_initialized = 1;
+    }
+    return 0;
+}
+
+void flash_transaction_end(void)
+{
+    (void)xSemaphoreGive(s_transaction_lock);
+}
 
 static int page_is_erased(const uint8_t *page)
 {
@@ -24,12 +50,26 @@ static int page_is_erased(const uint8_t *page)
     return 1;
 }
 
+/**
+ * @brief 通过固定QSPI实例初始化W25Q256。
+ * @param[in] flash 接口占位参数，当前未使用。
+ * @return qspi_init的结果：IF_OK成功，IF_ERR初始化失败。
+ * @note 只初始化器件访问模式，不创建版本/FRU记录。
+ */
 static int flash_init(flash_if_t *flash)
 {
     (void)flash;
     return qspi_init();
 }
 
+/**
+ * @brief 同步读取指定Flash范围。
+ * @param[in] flash 接口占位参数，当前未使用。
+ * @param[in] address 字节地址，非零长度时整个范围须在器件内。
+ * @param[out] buffer 至少length字节，非零长度须非NULL。
+ * @param[in] length 字节数，0直接成功。
+ * @return IF_OK完成；IF_ERR参数/IO错误，失败时输出不保证完整。
+ */
 static int flash_read(flash_if_t *flash, uint32_t address,
                       uint8_t *buffer, uint32_t length)
 {
@@ -40,9 +80,16 @@ static int flash_read(flash_if_t *flash, uint32_t address,
     return qspi_read_data(address, buffer, length);
 }
 
-/*
- * 任意范围写入：逐扇区 RMW，保护同扇区内未修改的数据。
- * NOR Flash 不能把 0 直接改回 1，因此内容变化时统一擦除目标扇区。
+/**
+ * @brief 逐扇区读改写，保存目标范围之外的数据，跳过未变化内容。
+ * @param[in] flash 接口占位参数，当前未使用。
+ * @param[in] address Flash字节地址，整个范围须在器件内。
+ * @param[in] buffer 至少length字节，非零长度须非NULL，返回前保持有效。
+ * @param[in] length 字节数，0直接成功。
+ * @return IF_OK全部操作完成；IF_ERR参数或任一步读/擦/写失败。
+ * @note 共用4KiB缓冲，不可重入；必须串行化整个事务。NOR不能直接将0改1，
+ *       内容变化时会擦完整扇区再恢复数据；掉电/失败可能丢目标扇区内容或
+ *       仅写完前面的扇区，函数不回滚。关键记录使用上层A/B副本保护。
  */
 static int flash_write(flash_if_t *flash, uint32_t address,
                        const uint8_t *buffer, uint32_t length)
@@ -93,7 +140,15 @@ static int flash_write(flash_if_t *flash, uint32_t address,
     return IF_OK;
 }
 
-/* 范围擦除会向外扩展到完整 4 KiB 扇区。 */
+/**
+ * @brief 将范围向外扩展到4KiB边界后，选择对齐块逐段擦除。
+ * @param[in] flash 接口占位参数，当前未使用。
+ * @param[in] address Flash字节起始地址。
+ * @param[in] length 请求范围字节数，0不操作直接成功。
+ * @return IF_OK全部擦除完成；IF_ERR范围或底层错误，可能已擦除部分单元。
+ * @note 扩展到的边界扇区不会保留未请求区域，调用方必须确认实际擦除范围。
+ *       使用32/64KiB块优化时也不超出扩展后的范围。
+ */
 static int flash_erase(flash_if_t *flash, uint32_t address, uint32_t length)
 {
     uint32_t erase_begin;
@@ -126,6 +181,13 @@ static int flash_erase(flash_if_t *flash, uint32_t address, uint32_t length)
     return IF_OK;
 }
 
+/**
+ * @brief 返回固定W25Q256容量和擦写几何参数，不访问器件。
+ * @param[in] flash 接口占位参数，当前未使用。
+ * @param[out] total_kb 总容量，单位KiB；NULL跳过。
+ * @param[out] sector_size 扇区字节数；NULL跳过。
+ * @param[out] page_size 页字节数；NULL跳过。
+ */
 static void flash_info(flash_if_t *flash, uint32_t *total_kb,
                        uint32_t *sector_size, uint32_t *page_size)
 {

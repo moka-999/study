@@ -4,14 +4,15 @@
  * ===================================================================
  * 实例: 每轨一个 tps62868_t, bus 指向对应 I2C 接口。
  * B1的I2C1/I2C2为硬件控制器，i2c4_if为PH4/PH5软件开漏总线。
- * 本模块不在启动时自动访问器件，只在pwr_ctrl完成前级上电后初始化。
+ * 本模块不在启动时自动访问器件；PC6产生VCC4V0_SYS且TPS按硬件上拉自动
+ * 启动后，才由pwr_ctrl调用本模块写入训练目标；未指定时使用标称值。
  * ===================================================================
  */
 #include "ddr_power.h"
 #include "board_interfaces.h"
 #include <string.h>
 
-/* 三路实例 (A 版地址由 VSET/PG 电阻决定，启动电压 ≤ 目标电压) */
+/* 三路实例：地址按预期VSET贴装定义；启动值不等于本次训练目标。 */
 static tps62868_t _ddr[3] = {
     /* VDD1: TPS628692A, 56.2k, factor 2 */ { .bus = NULL, .addr = TPS62868_ADDR_VDD1, .factor_x10 = TPS62868_FACTOR_2X0 },
     /* VDD2: TPS628681A, 86.8k (TI 86.6k slot), factor 1 */ { .bus = NULL, .addr = TPS62868_ADDR_VDD2, .factor_x10 = TPS62868_FACTOR_1X0 },
@@ -24,6 +25,14 @@ static const uint16_t _nominal_mv[2][DDR_RAIL_COUNT] = {
 };
 
 static ddr_memory_type_t _memory_type = DDR_MEMORY_LPDDR4X;
+/*
+ * 训练目标与运行中的拉偏缓存分开保存。前者仅在OFF时由控制层选择，
+ * 每次冷启动重新写入；后者随实时调压变化，绝不能反向覆盖训练目标。
+ * 这只是请求目标，不是“RK已经在此电压下训练成功”的记录。
+ */
+static uint16_t _training_mv[DDR_RAIL_COUNT] = {
+    DDR_VDD1_DEFAULT_MV, DDR_VDD2_DEFAULT_MV, DDR_VDDQ_DEFAULT_MV
+};
 static uint16_t _mv[DDR_RAIL_COUNT] = {
     DDR_VDD1_DEFAULT_MV, DDR_VDD2_DEFAULT_MV, DDR_VDDQ_DEFAULT_MV
 };
@@ -69,7 +78,7 @@ int ddr_power_build_step_targets(ddr_memory_type_t type,
                                  const int16_t steps[DDR_RAIL_COUNT],
                                  uint16_t mv[DDR_RAIL_COUNT])
 {
-    if (!steps || !mv || type > DDR_MEMORY_LPDDR4X)
+    if (!steps || !mv || (uint32_t)type > DDR_MEMORY_LPDDR4X)
         return IF_ERR;
 
     for (uint8_t rail = 0U; rail < DDR_RAIL_COUNT; rail++) {
@@ -83,44 +92,62 @@ int ddr_power_build_step_targets(ddr_memory_type_t type,
 
 int ddr_power_select_memory_type(ddr_memory_type_t type)
 {
-    if (type > DDR_MEMORY_LPDDR4X) return IF_ERR;
+    if ((uint32_t)type > DDR_MEMORY_LPDDR4X) return IF_ERR;
 
-    _memory_type = type;
+    /* 兼容旧的“只选择类型”入口：显式撤销自定义训练值，恢复该类型标称值。 */
+    (void)ddr_power_configure_training(type, _nominal_mv[type]);
     memcpy(_mv, _nominal_mv[type], sizeof(_mv));
     return IF_OK;
 }
 
-/* 初始化: 清 STATUS 残留标志 + 写基准电压 + ramp 最快 (EN 拉高后调用) */
+int ddr_power_configure_training(ddr_memory_type_t type,
+                                 const uint16_t mv[DDR_RAIL_COUNT])
+{
+    if ((uint32_t)type > DDR_MEMORY_LPDDR4X || !_targets_are_writable(mv)) {
+        return IF_ERR;
+    }
+
+    /* 全部参数合法后一次性复制，调用后不再借用上层缓冲；此处不访问I2C。 */
+    memcpy(_training_mv, mv, sizeof(_training_mv));
+    _memory_type = type;
+    return IF_OK;
+}
+
+/* TPS可访问后直接写本次训练值，不先写标称值、再做一次运行期拉偏。 */
 int ddr_power_init(void)
 {
     uint8_t st;
-    int r = IF_OK;
-    uint16_t nominal[DDR_RAIL_COUNT];
 
     _bind_buses();
 
     /*
-     * TPS在PG11拉低后寄存器复位，软件镜像也必须同步复位。更重要的是，
-     * 上一次测试留下的拉偏目标绝不能带入下一次DRAM初始化窗口。
+     * TPS掉电/EN关闭会复位寄存器，CONTROL软件镜像也必须重新建立。
+     * B1按当前NC贴装由PC6切断4V，不能假定PG11一定能关闭TPS。
+     * 先检查全部回调，避免明知缺一条总线还先修改其它轨。
      */
-    memcpy(nominal, _nominal_mv[_memory_type], sizeof(nominal));
-    memcpy(_mv, nominal, sizeof(_mv));
-    for (uint8_t rail = 0U; rail < DDR_RAIL_COUNT; rail++)
+    for (uint8_t rail = 0U; rail < DDR_RAIL_COUNT; rail++) {
+        if (!_ddr[rail].bus->read_reg || !_ddr[rail].bus->write_reg) {
+            return IF_ERR;
+        }
         _ddr[rail].ctl_cache = 0U;
-
-    for (int rail = 0; rail < DDR_RAIL_COUNT; rail++) {
-        if (!_ddr[rail].bus) { r = IF_ERR; continue; }
-        /* 读 STATUS 清残留标志 (读后自动清零) */
-        if (tps62868_read_status(&_ddr[rail], &st) != IF_OK)
-            r = IF_ERR;
-        /* ramp 设最快 20mV/µs, 缩短调压/切换窗口 */
-        if (tps62868_set_ramp(&_ddr[rail], TPS62868_RAMP_20MV_US) != IF_OK)
-            r = IF_ERR;
-        /* 写基准电压 */
-        if (tps62868_set_vout1(&_ddr[rail], _mv[rail]) != IF_OK)
-            r = IF_ERR;
     }
-    return r;
+
+    for (uint8_t rail = 0U; rail < DDR_RAIL_COUNT; rail++) {
+        /*
+         * 保持VDD1/VDD2/VDDQ的事务顺序，每轨清STATUS、设置ramp、写目标。
+         * 短路求值：首次总线错误立即返回，由pwr_ctrl关断；不在此处重试，
+         * 也不写其它轨来“凑齐配置”。同步总线超时仍须纳入真板时间预算。
+         */
+        if (tps62868_read_status(&_ddr[rail], &st) != IF_OK ||
+            tps62868_set_ramp(&_ddr[rail], TPS62868_RAMP_20MV_US) != IF_OK ||
+            tps62868_set_vout1(&_ddr[rail], _training_mv[rail]) != IF_OK) {
+            return IF_ERR;
+        }
+    }
+
+    /* 全部写入成功才更新目标缓存；仍不证明模拟电压稳定或RK训练已完成。 */
+    memcpy(_mv, _training_mv, sizeof(_mv));
+    return IF_OK;
 }
 
 /* 动态调压: mask 选轨, mv[3] 各轨目标电压 */

@@ -2,9 +2,8 @@
  * ===================================================================
  * B1 PC-MCU TCP Server任务 — 调度前由freertos.c创建
  *
- * 协议边界：本任务只拥有PC TCP连接和PC u32 Seq。不得把RK u64 Seq直接写入
- * PC响应。当前仍为V2旧回显行为，独立发送Seq的新合同尚待实现；
- * 任务移入B1不代表新Seq规则或PC-RK算法业务已经接通。
+ * 协议边界：本任务拥有PC TCP连接和MCU发送u32 Seq。不得把PC请求Seq或
+ * RK u64 Seq写入MCU发送头；业务结果关联合同仍与Seq解耦。
  *
  * 正式镜像: LWIP就绪 → bind 8888 → accept → PC状态机 → 请求分发层。
  * JSON解析、命令校验和本地响应均由pc_dispatch负责；本任务不理解业务字段，
@@ -23,11 +22,13 @@
 #include "lwip/netif.h"
 #include "pc_dispatch.h"
 #include "pc_state_machine.h"
+#include "ota_app.h"
 #include <string.h>
 #include <errno.h>
 
 #define TCP_PORT    8888
 #define RX_BUF_SIZE 1024
+#define PC_MCU_TX_SEQUENCE_FIRST 1U
 
 /*
  * send()返回值是“本次实际送入TCP发送缓冲的字节数”，可能小于length，
@@ -114,6 +115,15 @@ void StartTcpServerTask(void *argument)
      */
     for (;;) {
         TCP_DIAG(3, 0xBEEF0004);       /* 等待连接 */
+        /* 无连接时也有界等待，避免健康检查把阻塞accept误判为任务卡死。 */
+        fd_set readers;
+        FD_ZERO(&readers); FD_SET(listenfd, &readers);
+        struct timeval accept_wait = {0, 200000};
+        int available = select(listenfd + 1, &readers, NULL, NULL, &accept_wait);
+        ota_app_progress(OTA_TASK_TCP);
+        pc_dispatch_poll();
+        if (available < 0) { close(listenfd); vTaskDelete(NULL); return; }
+        if (available == 0) continue;
         int connfd = accept(listenfd, NULL, NULL);
         if (connfd < 0) {
             vTaskDelay(pdMS_TO_TICKS(500));
@@ -129,6 +139,8 @@ void StartTcpServerTask(void *argument)
         rxto.tv_sec  = 0;
         rxto.tv_usec = 100000;
         setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, &rxto, sizeof(rxto));
+        struct timeval txto = {1, 0};
+        setsockopt(connfd, SOL_SOCKET, SO_SNDTIMEO, &txto, sizeof(txto));
 
         /*
          * 每个TCP连接使用独立PC协议状态，断线后不继承半帧。rx只承接一次
@@ -136,11 +148,18 @@ void StartTcpServerTask(void *argument)
          */
         pc_sm_t pc_sm;
         pc_sm_init(&pc_sm);
+        /*
+         * 每条连接独立从1开始；只有完整PDU成功交给TCP后才推进。u32在
+         * UINT32_MAX后按无符号规则回绕到0，接收端不得把0当成无效值。
+         */
+        uint32_t mcu_tx_sequence = PC_MCU_TX_SEQUENCE_FIRST;
         TickType_t pc_last_byte_tick = xTaskGetTickCount();
         uint8_t rx[RX_BUF_SIZE];
 
         /* 阶段4：服务当前连接，任何致命协议错误都跳出并关闭connfd。 */
         for (;;) {
+            ota_app_progress(OTA_TASK_TCP);
+            pc_dispatch_poll();
             int n = recv(connfd, rx, sizeof(rx), 0);
 
             if (n > 0) {
@@ -148,9 +167,15 @@ void StartTcpServerTask(void *argument)
                 pc_last_byte_tick = xTaskGetTickCount();
                 /*
                  * 逐字节喂流解析器是为了处理任意TCP切分。完成一帧并reset后，
-                 * 循环会继续消费rx剩余字节，所以一次recv中的多个粘包不会丢失。
+                * 循环会继续消费rx剩余字节，所以一次recv中的多个粘包不会丢失。
                  */
                 for (int i = 0; i < n; i++) {
+                    /*
+                     * 本字节已经由recv交付，长业务处理后的MCU耗时不能冒充
+                     * PC半帧停顿。每次实际消费字节都刷新计时，尤其覆盖同一
+                     * recv内“完整控制帧+下一帧前缀”的粘包场景。
+                     */
+                    pc_last_byte_tick = xTaskGetTickCount();
                     pc_sm_feed_result_t result = pc_sm_feed(&pc_sm, rx[i]);
                     if (result == PC_SM_FEED_ERROR) {
                         close_for_protocol_error = 1;
@@ -168,13 +193,20 @@ void StartTcpServerTask(void *argument)
                             close_for_protocol_error = 1;
                             break;
                         }
-                        dispatch_result = pc_dispatch_handle(&frame, &response);
-                        if (dispatch_result == PC_DISPATCH_ERROR ||
-                            (dispatch_result == PC_DISPATCH_RESPONSE_READY &&
-                             pc_send_all(connfd, response.data,
-                                         response.length) != 0)) {
+                        dispatch_result = pc_dispatch_handle(&frame,
+                                                             mcu_tx_sequence,
+                                                             &response);
+                        if (dispatch_result == PC_DISPATCH_ERROR) {
                             close_for_protocol_error = 1;
                             break;
+                        }
+                        if (dispatch_result == PC_DISPATCH_RESPONSE_READY) {
+                            if (pc_send_all(connfd, response.data,
+                                            response.length) != 0) {
+                                close_for_protocol_error = 1;
+                                break;
+                            }
+                            mcu_tx_sequence++;
                         }
                         /*
                          * 其他命令目前只验证并记录，不回临时ACK，避免PC工程师把
@@ -210,6 +242,7 @@ void StartTcpServerTask(void *argument)
             }
         }
 
+        pc_dispatch_disconnected();
         close(connfd);
         TCP_DIAG(3, 0xBEEF0006);       /* 已断开 */
     }

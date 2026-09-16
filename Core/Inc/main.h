@@ -92,7 +92,7 @@ extern DMA_HandleTypeDef hdma_usart2_rx;
 #define B1_USART2_RX_PORT      GPIOD
 #define B1_USART2_RX_PIN       GPIO_PIN_6
 
-/* Power enables default OFF */
+/* PC6/PC7是真实电源使能；PG11到TPS EN为NC，仅按防御性总闸时序驱动。 */
 #define B1_PWR_4V0_EN_PORT     GPIOC
 #define B1_PWR_4V0_EN_PIN      GPIO_PIN_6
 #define B1_PWR_3V3_EN_PORT     GPIOC

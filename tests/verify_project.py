@@ -54,6 +54,25 @@ def main() -> int:
             "PC6/PC7 must default low")
     require("B1_PWR_DDR_EN_PIN | B1_ETH_NRST_PIN" in source,
             "PG11/PG12 safe defaults missing")
+
+    boot = (ROOT / "boot/boot.s").read_text(encoding="utf-8")
+    boot_reset = boot.split("Reset_Handler:", 1)[1]
+    require(all(token in boot for token in (
+        "RCC_AHB4ENR,            0x580244E0",
+        "GPIOC_BSRR,             0x58020818",
+        "GPIOG_BSRR,             0x58021818",
+        "GPIOC_EN_RESET,         0x00C00000",
+        "GPIOG_EN_RESET,         0x08000000")),
+        "Boot coupled-reset GPIO addresses or reset masks are incomplete")
+    app_validation_index = boot_reset.index("ldr     r0, =APP_BASE")
+    require(boot_reset.index("ldr     r0, =GPIOC_BSRR") <
+            boot_reset.index("ldr     r0, =GPIOG_BSRR") < app_validation_index and
+            boot_reset.index("ldr     r0, =GPIOC_MODER") <
+            boot_reset.index("ldr     r0, =GPIOG_MODER") < app_validation_index,
+            "Boot must force PC6/PC7/PG11 low before App validation")
+    require("tst     r2, #1" in boot_reset and "beq     .Lfail" in boot_reset,
+            "Boot must reject an even non-Thumb App reset vector")
+
     require("SPI_POLARITY_HIGH, SPI_PHASE_2EDGE" in source,
             "AD7124 SPI4 must use mode 3")
     require("SPI_BAUDRATEPRESCALER_256" in source,
@@ -73,16 +92,20 @@ def main() -> int:
     require(all(name in led and name in led_header for name in (
         "RESULT_LED_PASS", "RESULT_LED_FAIL", "RESULT_LED_TEST_NORMAL",
         "RESULT_LED_TEST_HOT")), "result LED business states are incomplete")
-    require("levels.green_on = 1U" in led and "levels.red_on = 1U" in led and
-            "levels.green_on = levels.red_on" in led,
-            "PASS/FAIL/orange color conversion is incomplete")
-    require("levels.red_on ? GPIO_PIN_SET : GPIO_PIN_RESET" in led,
+    require("levels.pass_on = 1U" in led and "levels.fail_on = 1U" in led and
+            "levels.pass_on = levels.fail_on" in led,
+            "PASS/FAIL/normal-test channel conversion is incomplete")
+    require("levels.fail_on ? GPIO_PIN_SET : GPIO_PIN_RESET" in led,
             "B1 2N7002 result LED outputs must be active high")
+    require("result_led_get_all" in led and "result_led_get_all" in led_header and
+            led.count("taskENTER_CRITICAL()") >= 4 and
+            "s_states[target] == state" in led,
+            "PC设置/查询结果灯与1ms闪烁推进必须共享原子状态保护")
     rtos_source = (ROOT / "Core/Src/freertos.c").read_text(encoding="utf-8")
     require("result_led_process(HAL_GetTick())" in rtos_source and "osDelay(1U)" in rtos_source,
             "result LED state machine must run without blocking the gateway")
-    require("B1_LED1_PIN, GPIOG, B1_LED2_PIN" in source and
-            "B1_LED5_PIN, GPIOG, B1_LED6_PIN" in source,
+    require(".fail_pin = B1_LED1_PIN" in source and ".pass_pin = B1_LED2_PIN" in source and
+            ".fail_pin = B1_LED5_PIN" in source and ".pass_pin = B1_LED6_PIN" in source,
             "three B1 bicolor LED pairs are not mapped")
     require("B1_LED7_PIN" not in source.split("s_result_led_map", 1)[1].split("};", 1)[0],
             "PG6 single-color status LED must not enter the result LED map")
@@ -102,6 +125,14 @@ def main() -> int:
             "CubeMX baseline must keep SPI2 mode 0 slave pins")
     require("PH4.GPIO_Label=I2C4_SCL" in ioc and "PH5.GPIO_Label=I2C4_SDA" in ioc,
             "CubeMX baseline must preserve the PH4/PH5 logical I2C4 bus")
+    require("PH4.GPIO_OutputLevel=GPIO_PIN_SET" in ioc and
+            "PH5.GPIO_OutputLevel=GPIO_PIN_SET" in ioc,
+            "CubeMX baseline must release both software-I2C lines high")
+    require("Mcu.Pin48=PA13 (JTMS/SWDIO)" in ioc and
+            "Mcu.Pin49=PA14 (JTCK/SWCLK)" in ioc and
+            "PA13\\ (JTMS/SWDIO).Signal=SYS_JTMS-SWDIO" in ioc and
+            "PA14\\ (JTCK/SWCLK).Signal=SYS_JTCK-SWCLK" in ioc,
+            "CubeMX baseline must reserve PA13/PA14 for SWD")
 
     board = (ROOT / "Core/Src/board_identity.c").read_text(encoding="utf-8")
     require("BOARD_PHY_YT8512H" in board and "mac[0] = 0x02" in board,
@@ -170,8 +201,15 @@ def main() -> int:
         "AD7124_ID_AD7124_4_REV_E", "AD7124_DIV_100R_10K")),
             "AD7124-4 ID白名单或B1分压系数缺失")
     require("AD7124_AIN_AIN0, AD7124_AIN_AIN2, AD7124_AIN_AIN4" in ad_source and
-            "AD7124_AIN_AVSS" in ad_source,
-            "AD7124 B1三路电压通道映射缺失")
+            "AD7124_AIN_AIN1, AD7124_AIN_AIN3, AD7124_AIN_AIN5" in ad_source and
+            "AD7124_CH_AINM(b1_ainm[ch])" in ad_source,
+            "AD7124 B1三路原理图差分通道映射缺失")
+    require("AD7124_CFG_REF_SEL(AD7124_REF_INT)" in ad_source and
+            "AD7124_CFG_REF_SEL(AD7124_REF_EXT1)" not in ad_source and
+            "AD7124_CFG_AIN_BUFP" in ad_source and
+            "AD7124_CFG_AIN_BUFM) != IF_OK" not in ad_source and
+            "FB2306为NC" in ad_source,
+            "AD7124必须使用内部2.5V基准且关闭接地负端缓冲")
     require("spi_if_t spi4_if" in spi_source and "&hspi4" in spi_source and
             "hspi2" not in spi_source,
             "AD7124必须只绑定B1 SPI4，不能占用SPI2保活总线")
@@ -195,18 +233,20 @@ def main() -> int:
     require("mcp4725_set_boot_mode" not in source,
             "B1真板前不得在启动流程中自动改写Boot模式")
 
-    # TPS/PAC/DDR电源基线只绑定B1实际总线，启动仍保持全关且不访问器件。
+    # TPS/PAC/DDR电源基线只绑定B1实际总线；当前BRD由PC6统一控制4V和TPS。
     tps_header = (ROOT / "BSP/TPS62868/tps62868.h").read_text(encoding="utf-8")
     pac_header = (ROOT / "BSP/PAC1934/pac1934.h").read_text(encoding="utf-8")
     ddr_header = (ROOT / "HAL_Drv/ddr_power.h").read_text(encoding="utf-8")
     ddr_source = (ROOT / "HAL_Drv/ddr_power.c").read_text(encoding="utf-8")
+    power_header = (ROOT / "HAL_Drv/pwr_ctrl.h").read_text(encoding="utf-8")
     power_source = (ROOT / "HAL_Drv/pwr_ctrl.c").read_text(encoding="utf-8")
     monitor_source = (ROOT / "HAL_Drv/memory_monitor.c").read_text(encoding="utf-8")
     require(all(value in tps_header for value in (
         "TPS62868_ADDR_VDD1      0x49", "TPS62868_ADDR_VDD2      0x41",
         "TPS62868_ADDR_VDDQ      0x4F", "TPS62868_FACTOR_2X0",
         "TPS62868_FACTOR_1X0")), "TPS三路地址或器件因子错误")
-    require("PAC1934_ADDR_B1             0x2C" in pac_header and
+    require("PAC1934_ADDR_B1             0x16U" in pac_header and
+            "总线上写地址字节0x2C、读地址字节0x2D" in pac_header and
             "PAC1934_RSENSE_B1_UOHM      10000U" in pac_header and
             "PAC1934_CH_MASK_B1_RAILS    0x07" in pac_header,
             "PAC1934地址、采样电阻或三通道配置错误")
@@ -225,8 +265,22 @@ def main() -> int:
             "B1_PWR_DDR_EN_PORT" in power_source and
             "pwr_ctrl_init(NULL);" in source,
             "B1电源状态机未绑定PC6/PC7/PG11安全OFF基线")
+    require("POWER_ENABLE_DDR" not in power_source and
+            "second_to_tps_config_delay_ms" in power_header and
+            "second_to_ddr_delay_ms" not in power_header and
+            "PWR_CTRL_STATE_WAIT_DDR" not in power_header and
+            "write_enable(second_system_rail(), GPIO_PIN_RESET)" in power_source,
+            "当前BRD必须由PC6/PC7两级状态机控制，并按反序关闭系统轨")
+    require("write_optional_tps_gate(GPIO_PIN_SET);" in power_source and
+            power_source.index("write_enable(second_system_rail(), GPIO_PIN_SET);") <
+            power_source.index("write_optional_tps_gate(GPIO_PIN_SET);") and
+            power_source.count("write_optional_tps_gate(GPIO_PIN_RESET);") >= 2 and
+            "PC6仍会在系统轨流程中可靠关断" in power_source,
+            "PG11必须只作防御性TPS总闸，且不能替代PC6完成可靠关断")
     require("memory_monitor_configure" in monitor_source and "valid_mask" in monitor_source,
             "TPS/PAC/AD未组合为可部分有效的监测快照")
+    require("* 101" in monitor_source and "(scaled + 50) / 100" in monitor_source,
+            "B1 AD7124电压快照必须应用100R+10k前端的1.01换算")
     require("ddr_power_init();" not in source and "memory_monitor_init" not in source and
             "pwr_ctrl_request_on" not in source,
             "B1启动期禁止自动访问采样器件或打开DDR电源")
@@ -292,7 +346,8 @@ def main() -> int:
             "B1 PC协议固定头或4KiB工程上限错误")
     require("cJSON_ParseWithLengthOpts" in pc_source and
             "PC_JSON_ERROR_DUPLICATE_KEY" in pc_source and
-            "utf8_is_valid" in pc_source,
+            "utf8_is_valid" in pc_source and
+            "json_string_lexemes_are_safe" in pc_source,
             "B1 PC协议严格JSON入口不完整")
     require("pc_json_configure_allocator(pvPortMalloc, vPortFree)" in rtos_source,
             "B1 cJSON未在任务创建前绑定FreeRTOS堆")
@@ -313,6 +368,10 @@ def main() -> int:
     require("PC_COMMAND_SERVER_HEARTBEAT   0x0001U" in pc_command and
             "PC_COMMAND_CLIENT_HEARTBEAT   0x0002U" in pc_command,
             "B1 PC心跳命令合同未同步")
+    require("write_be16(&output[8], 0U);" in pc_source and
+            "write_be32(&output[12], mcu_tx_sequence);" in pc_source and
+            "request->sequence" not in pc_source,
+            "PC发送头必须使用ServiceID=0和MCU独立Seq")
 
     pc_state = (ROOT / "App/protocol/pc/pc_state_machine.c").read_text(encoding="utf-8")
     pc_state_header = (ROOT / "App/protocol/pc/pc_state_machine.h").read_text(encoding="utf-8")
@@ -332,10 +391,32 @@ def main() -> int:
             "(unsigned int)sm->state >= PC_SM_STATE_COUNT" in pc_state,
             "PC四态必须查表分发，并在索引前拒绝越界状态")
     require("s_command_table" in pc_dispatch and
-            "s_command_table[i].handler(request, root, response)" in pc_dispatch and
+            "s_command_table[i].handler(request, mcu_tx_sequence" in pc_dispatch and
             "pc_dispatch_handle" in tcp_task and "pc_sm_feed" in tcp_task and
             "tlv_dispatch(" not in tcp_task and "tlv_sm_feed" not in tcp_task,
             "PC状态表/命令表必须分层，正式TCP不能重新解析或分发RK TLV")
+    require("PC_COMMAND_QUERY_POWER_STATUS" in pc_dispatch and
+            "handle_query_power_status" in pc_dispatch and
+            '"powerState"' in pc_dispatch and
+            "PC_COMMAND_POWER_STATUS_RESP" in pc_dispatch,
+            "PC首批0x0503/0x0504只读电源状态业务未接入")
+    require(all(symbol in pc_command for symbol in (
+                "PC_COMMAND_SET_DDR_CONFIG      0x0509U",
+                "PC_COMMAND_QUERY_POWER_MONITOR 0x0601U",
+                "PC_COMMAND_POWER_MONITOR_RESP  0x0602U",
+                "PC_COMMAND_RESET_RK            0x0505U",
+                "PC_COMMAND_SET_BOOT_MODE       0x0506U",
+                "PC_COMMAND_QUERY_BOOT_MODE     0x0507U",
+                "PC_COMMAND_BOOT_MODE_RESP      0x0508U",
+                "PC_COMMAND_SET_RESULT_INDICATOR    0x0701U",
+                "PC_COMMAND_QUERY_INDICATOR_STATUS  0x0702U",
+                "PC_COMMAND_INDICATOR_STATUS_RESP   0x0703U")) and
+            all(handler in pc_dispatch for handler in (
+                "handle_set_ddr_config", "handle_query_power_monitor",
+                "handle_power_on", "handle_power_off", "handle_reset_rk",
+                "handle_set_boot_mode", "handle_query_boot_mode",
+                "handle_set_result_indicator", "handle_query_indicator_status")),
+            "PC DDR配置、采样查询或结果灯业务未完整接入命令表")
     require("fru_info_load" in pc_info and "fru_info_load_legacy_v1" in pc_info and
             "board_mac_address()" in pc_info and "pc_tester_info_load" in pc_dispatch and
             "firmware_version_current(" not in pc_dispatch,
@@ -365,7 +446,8 @@ def main() -> int:
                 for name in ("pcToRk_Queue", "rkToPc_Queue")) and
             "pdPASS" in rtos_source and "Error_Handler()" in rtos_source,
             "RK业务队列必须各8槽，任务创建失败必须显式处理")
-    require("pwr_ctrl_process(HAL_GetTick())" in rtos_source and
+    require("monitor_power_process(HAL_GetTick())" in rtos_source and
+            "pwr_ctrl_process(now_ms)" in monitor_task and
             all("pwr_ctrl_get_state()" in task and "PWR_CTRL_STATE_ON" in task
                 for task in (rk_task, hb_task, monitor_task)),
             "B1必须推进电源状态机，RK发送和采样均受ON状态门控")
@@ -380,6 +462,21 @@ def main() -> int:
                           r"mcp4725_set_boot_mode|fru_info_save|firmware_version_save)\s*\(",
                           source + rtos_source),
             "主启动/默认任务不得绕过ON门控自动访问器件或写生产元数据")
+    require("monitor_task_prepare" in monitor_task and
+            "xSemaphoreCreateMutexStatic" in monitor_task and
+            monitor_task.count("memory_io_take(") >= 6 and
+            "xSemaphoreGive(s_memory_io_mutex)" in monitor_task and
+            "monitor_apply_ddr_config" in monitor_task,
+            "监测采样和PC三轨调压必须以同一完整事务互斥量串行执行")
+    require("PWR_CTRL_ERR_RESOURCE_BUSY" in monitor_task and
+            "ready强制门待双方业务握手冻结" in monitor_task and
+            "pwr_ctrl_apply_ddr_steps(steps)" in monitor_task and
+            '"busy"' in pc_dispatch,
+            "调压资源占用语义、ON执行路径或RK ready待办缺失")
+    require(tcp_task.count("pc_last_byte_tick = xTaskGetTickCount();") >= 2 and
+            tcp_task.index("for (int i = 0; i < n; i++)") <
+            tcp_task.rindex("pc_last_byte_tick = xTaskGetTickCount();"),
+            "TCP必须按实际消费字节刷新半帧计时，不能计入MCU业务处理时间")
     formal_tasks = rtos_source + tcp_task + rk_task + hb_task + monitor_task
     require(not (ROOT / "App/tasks/test").exists() and
             "App/tasks/test/" not in cmake and
@@ -415,6 +512,33 @@ def main() -> int:
                           source + uart_hw + uart_router + formal_tasks),
             "B1保持D-Cache关闭，新增UART/任务不能加入cache维护调用")
 
+    # OTA复用公共实现，但健康观察和维护门必须接入B1各任务且不改硬件归属。
+    ota_app = (ROOT / "App/ota/ota_app.c").read_text(encoding="utf-8")
+    pc_ota = (ROOT / "App/protocol/pc/pc_ota.c").read_text(encoding="utf-8")
+    require("ENABLE_OTA_BOOT" in cmake and "OTA_RELOCATION_PROBE=1" in cmake and
+            "896K" in linker and "g_pfnVectors" in
+            (ROOT / "Core/Src/system_stm32h7xx.c").read_text(encoding="utf-8"),
+            "OTA必须限制槽容量并按可修正向量符号设置VTOR")
+    require("StartOtaWatchdogTask" in rtos_source and "IWDG1->KR = 0xAAAAU" in rtos_source and
+            "ota_app_watchdog_tick()" in rtos_source and
+            all(f"ota_app_progress(OTA_TASK_{name})" in text for name, text in
+                (("DEFAULT", rtos_source), ("TCP", tcp_task), ("MONITOR", monitor_task),
+                 ("RK", rk_task), ("HB", hb_task))) and
+            rk_task.split("void StartRkTask", 1)[1].index("ota_app_progress(OTA_TASK_RK)") <
+            rk_task.split("void StartRkTask", 1)[1].index("continue;"),
+            "五任务必须参与健康观察，OFF不能导致RK健康缺报")
+    require("pc_dispatch_poll();" in tcp_task and "pc_dispatch_disconnected();" in tcp_task and
+            "select(listenfd + 1" in tcp_task and "SO_SNDTIMEO" in tcp_task and
+            "PC_COMMAND_MCU_OTA_REQUEST, pc_ota_handle" in pc_dispatch and
+            '"otaNotReady"' in pc_dispatch and '"notSupported"' in pc_ota,
+            "OTA命令/有界等待/断线生命周期或普通镜像拒绝入口缺失")
+    require("monitor_ota_enter" in monitor_task and "s_ota_maintenance" in monitor_task and
+            "flash_transaction_prepare()" in rtos_source and
+            "flash_transaction_begin(1000U)" in pc_info and
+            "firmware_version_load(" in ota_app and "firmware_version_current(" not in ota_app,
+            "OTA必须串行访问Flash并保留OFF维护门和W25信息来源")
+    print("OTA slot limits, five-task health, B1 OFF gate and shared Flash transactions PASS")
+
     manifest_path = ROOT / "build_debug/b1.manifest.json"
     image_path = ROOT / "build_debug/b1.bin"
     payload_path = ROOT / "build_debug/b1.version.bin"
@@ -433,6 +557,7 @@ def main() -> int:
                 fields[9].rstrip(b"\0") == b"b1-h743" and manifest["target"] == "b1-h743",
                 "版本二进制载荷的schema/长度/CRC32/B1目标与清单不一致")
     print(f"B1 independent project: {len(actual)}/{len(EXPECTED)} pins PASS")
+    print("Coupled-reset Boot early-off and optional PG11 gate contract PASS")
     print("Safe defaults, SPI2 slave mode 0, SPI4 mode 3 and YT8512H PASS")
     print("Result LED states, 500ms scheduler, active-high PG0-PG5 map and boundary PASS")
     print("W25Q256 32MiB layout, 4-byte QSPI, version/FRU and manifest contract PASS")

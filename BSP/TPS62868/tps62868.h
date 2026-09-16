@@ -7,8 +7,8 @@
  *   U4025 = I2C1 → VCC_1V8_S3_LPDDR4X (VDD1, 1.8V)
  *   U4026 = I2C2 → VDD2_DDR_S3       (VDD2, 1.1V)
  *   U4027 = I2C4 → VDDQ_DDR          (VDDQ, 0.6V)
- *   EN 全部接 PG11 (10K 下拉 → 默认 OFF, 需先 pwr_ctrl 上电)
- *   VIN = VCC4V0_SYS
+ *   EN 各由10K上拉至VCC4V0_SYS；到PG11的R4073/R4081/R4086均为NC
+ *   VIN = VCC4V0_SYS，因此PC6开启4V后三颗TPS按VSET启动值自动启动
  *
  * 器件版本 (A 版, VSET/PG 电阻启动配置):
  *   U4025: TPS628692A, 56.2k, factor=2, 启动1.60V, 地址0x49

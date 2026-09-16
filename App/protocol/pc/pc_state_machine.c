@@ -39,7 +39,8 @@ void pc_sm_init(pc_sm_t *sm)
 }
 
 /*
- * HEADER：只收固定头。Length/Version/Flag分别在第4/6/8字节到齐时校验，
+ * HEADER：只收固定头。Length/Version/Flag/ServiceID分别在第4/6/8/10字节
+ * 到齐时校验，
  * 不必等到18字节甚至整个正文收齐；因此非法大包仍能尽早被拒绝。
  * 收满头后由Length决定进入BODY还是直接FRAME_READY（无正文的18字节帧）。
  * 正文是否是合法JSON由上层决定，帧状态机不替JSON层扩大或缩小接收规则。
@@ -65,6 +66,9 @@ static pc_sm_feed_result_t feed_header(pc_sm_t *sm, uint8_t byte)
     if (sm->received == 8U &&
         read_be16(&sm->buffer[6]) != PC_PROTOCOL_FLAG_JSON) {
         return fail(sm, PC_SM_ERROR_FLAG);
+    }
+    if (sm->received == 10U && read_be16(&sm->buffer[8]) != 0U) {
+        return fail(sm, PC_SM_ERROR_SERVICE_ID);
     }
 
     if (sm->received == PC_PROTOCOL_HEADER_SIZE) {

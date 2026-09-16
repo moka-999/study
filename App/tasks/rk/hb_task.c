@@ -18,6 +18,7 @@
 #include "hb_task.h"
 #include "rk_link.h"
 #include "pwr_ctrl.h"
+#include "ota_app.h"
 
 #define HB_INTERVAL_MS  1000
 
@@ -48,6 +49,7 @@ void StartHbTask(void *argument)
             }
         }
 
+        ota_app_progress(OTA_TASK_HB);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

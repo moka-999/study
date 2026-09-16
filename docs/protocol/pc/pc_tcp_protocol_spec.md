@@ -36,6 +36,10 @@ Length按实际发送的UTF-8字节数计算：`Length = 18 + JSON字节数`，�
 
 每条TCP连接中，PC和MCU分别维护自己的发送Seq，每发送一个应用协议帧，本端Seq加1；接收对方报文不改变本端发送计数。心跳、应答和结果上报共用本端的发送计数，不回显或借用对方Seq。两个方向允许出现相同数值，双方可以同时发送，不要求轮流发包；TCP底层分段和重传不产生新Seq。
 
+每次建立新TCP连接后，双方首个发送帧的Seq为1；完整PDU成功提交发送后才推进计数。
+连接断开后丢弃旧计数，新连接重新从1开始。Seq按u32自然递增，`0xFFFFFFFF`之后
+回绕到0，接收端不得把0视为无效值。发送失败时当前连接关闭，不在新连接复用旧计数。
+
 Seq只表示本端发送顺序，不作为请求与应答的匹配依据。控制应答通过业务内容说明对应命令；同类命令并发、多次执行同一算法及分批结果的关联方式，由业务包体或串行执行规则明确，不能仅凭Seq或算法编号判断。
 
 ## 3. 命令编号
@@ -50,7 +54,7 @@ Seq只表示本端发送顺序，不作为请求与应答的匹配依据。控�
 | 0x0003 | CMD_LOGIN_REQ | PC→MCU：登录请求 |
 | 0x0004 | CMD_LOGIN_RESP | MCU→PC：登录响应 |
 | 0x0005 | CMD_LOGOUT | PC→MCU：登出 |
-| 0x0006 | CMD_COMMAND_RESP | MCU→PC：通用命令应答 |
+| 0x0006 | CMD_COMMAND_RESP | MCU→PC：通用命令执行结果（成功、受理或失败） |
 | 0x0101 | CMD_QUERY_TESTER_INFO | PC→MCU：查询测试仪信息 |
 | 0x0102 | CMD_TESTER_INFO_RESP | MCU→PC：测试仪信息响应 |
 | 0x0103 | CMD_START_TEST | PC→MCU：开始测试 |
@@ -79,6 +83,31 @@ Seq只表示本端发送顺序，不作为请求与应答的匹配依据。控�
 
 通用应答的JSON字段和错误码按第5节补充，至少说明对应命令及执行阶段；头部Seq始终使用MCU自己的发送计数，不回显请求值。
 
+
+
+### 3.1 请求与响应对应关系
+
+| PC请求 | 成功时MCU响应 | 业务失败时MCU响应 |
+|---|---|---|
+| 0x0002 心跳 | 0x0001 + `{}` | 0x0006 failed；帧/JSON语法失步则断连 |
+| 0x0101 查询测试仪 | 0x0102 测试仪信息 | 0x0006 failed |
+| 0x0103 开始测试 | 接入后0x0006 accepted/completed；测试结果0x0105，当前状态见4.7 | 0x0006 failed |
+| 0x0501 上电 | 0x0006 accepted；已ON为completed | 0x0006 failed |
+| 0x0502 下电 | 0x0006 accepted/completed | 0x0006 failed |
+| 0x0503 查询电源 | 0x0504 电源状态 | 0x0006 failed |
+| 0x0505 重启RK | 0x0006 accepted/completed（RK安全确认接入后） | 0x0006 failed |
+| 0x0506 设置Boot模式 | 0x0006 completed | 0x0006 failed |
+| 0x0507 查询Boot模式 | 0x0508 Boot模式信息 | 0x0006 failed |
+| 0x0509 设置DDR配置 | 0x0006 completed | 0x0006 failed |
+| 0x0601 查询电源采样 | 0x0602 采样快照 | 0x0006 failed |
+| 0x0701 设置结果灯 | 0x0006 completed | 0x0006 failed |
+| 0x0702 查询结果灯 | 0x0703 结果灯状态 | 0x0006 failed |
+
+0x0006不是“错误命令”。它是通用命令执行结果，必须结合JSON中的`status`判断：
+`accepted`表示非阻塞操作已受理，`completed`表示操作已完成，`failed`才表示失败。
+若固定头、UTF-8或JSON语法本身非法，MCU直接关闭连接，不发送0x0006。
+
+
 ## 4. 指令与JSON包体
 
 ### 4.1 心跳（0x0001 / 0x0002）
@@ -91,7 +120,35 @@ PC发送0x0002，MCU返回0x0001；双方包体均为 `{}`，各自使用本端�
 
 ### 4.4 登出（0x0005）
 
-### 4.5 通用命令应答（0x0006）
+### 4.5 通用命令执行结果（0x0006）
+
+失败应答格式：
+
+```json
+{
+  "requestCommandId": 1283,
+  "status": "failed",
+  "errorCode": "invalidArgument"
+}
+```
+
+- `requestCommandId`：触发本执行结果的PC请求命令号，使用十进制无符号整数；
+- `status`：失败为`failed`；非阻塞请求已受理为`accepted`；同步控制完成为`completed`；
+- `errorCode`：当前固定`invalidArgument`、`invalidDirection`、`notSupported`、
+  `invalidState`、`busy`、`notReady`、`notConfigured`、`executionFailed`。
+  成功应答不含`errorCode`。
+
+同步控制成功示例：
+
+```json
+{
+  "requestCommandId": 1289,
+  "status": "completed"
+}
+```
+
+已通过固定头和严格JSON语法校验后的参数错误、未支持命令或本地执行失败使用0x0006，
+保持TCP连接。非法Length、Version、Flag、ServiceID、UTF-8或JSON语法仍属于协议失步并断连。
 
 ### 4.6 查询测试仪信息及响应（0x0101 / 0x0102）
 
@@ -113,18 +170,80 @@ PC发送0x0002，MCU返回0x0001；双方包体均为 `{}`，各自使用本端�
 
 字段分别表示测试仪名称、测试仪硬件版本、测试板名称。连接建立时不主动推送，由PC查询后返回。当前仅规定基本JSON格式，后续所需的固件版本等信息可在本响应JSON中追加，不必另增查询命令；新增字段不改变已有字段含义，接收端应允许扩展字段，整包仍不得超过4096字节。
 
-### 4.7 下发测试算法（0x0103）
+### 4.7 开始测试（0x0103）
 
-请求命令0x0103，包体示例：
+三类测试共用0x0103，一次提交算法、训练电压和启动要求，不另拆开始测试命令。
+请求包体示例：
 
 ```json
 {
-  "algorithmName": "algorithmName",
-  "algorithmIndex": 1
+  "algorithmType": "parametric",
+  "algorithmName": "idd_0",
+  "algorithmIndex": 1,
+  "power": {
+    "memoryType": "LPDDR4X",
+    "vdd1Steps": 0,
+    "vdd2Steps": 0,
+    "vddqSteps": 0
+  },
+  "reboot": true,
+  "bootMode": "emmc"
 }
 ```
 
-`algorithmName`为算法名称，`algorithmIndex`为算法编号。
+| 字段 | JSON类型 | 含义 |
+|---|---|---|
+| `algorithmType` | string | 测试大类：`functional`功能测试、`slt`系统级测试、`parametric`参数测试 |
+| `algorithmName` | string | 具体算法名称，例如`idd_0` |
+| `algorithmIndex` | integer | PC当前测试计划中算法项的编号，沿用u32类型；由PC提供，MCU保留并在响应/结果中原样带回 |
+| `power.memoryType` | string | `LPDDR4`或`LPDDR4X` |
+| `power.vdd1Steps` | integer | VDD1相对标称电压的有符号档位，每档20mV |
+| `power.vdd2Steps` | integer | VDD2相对标称电压的有符号档位，每档20mV |
+| `power.vddqSteps` | integer | VDDQ相对标称电压的有符号档位，每档20mV |
+| `reboot` | boolean | PC是否主动要求重新启动；必须是`true`或`false` |
+| `bootMode` | string | 本次启动模式，沿用0x0506的`emmc`、`fspiM0`等取值，见4.15 |
+
+上述字段均必填，`power`必须完整携带内存类型和三路档位，不能省略字段以继承上次值。
+字符串及字段名区分大小写；档位必须是整数，不能用字符串、小数或布尔值代替。
+算法只用“大类＋名称”标识，同一大类内名称必须唯一并按PC/RK共同约定的算法表匹配；
+不再单列小类。`algorithmIndex`标识计划中的算法项，不是算法固定ID或RK命令号：
+同一算法在计划中出现多次时使用不同index，PC用它对齐结果并推进计划，MCU不自行递增或重排。
+MCU到RK所需的内部算法编号由业务映射，不改变RK协议；协议头Seq仍是独立发送流水号，不回显请求Seq。
+
+训练目标计算为`targetMv = nominalMv + steps * 20`。
+标称基准按VDD1/VDD2/VDDQ顺序：LPDDR4为1800/1100/1100mV，LPDDR4X为1800/1100/600mV。
+`0`表示标称值，`1`表示标称值＋20mV，`-1`表示标称值－20mV；这是相对固定标称值的目标档位，
+不是对当前电压再加减，重复发送`1`不会累加。`0`也不表示“保持当前电压”。
+标称基准不随ADC读数或校准结果漂移；测量/输出校准属于驱动，不能改变线上档位含义。
+PC和MCU均须校验换算后的安全电压范围、三轨组合及板级限制，不能用TPS寄存器全范围代替。
+发生重启时统一受控断电再上电，不使用RK软件复位、不复位B1 MCU，因此不再单列重启类型。
+
+执行规则：
+
+1. `power`表示本次DDR初始化和训练期间的电压。MCU先校验完整请求；安全范围或时序尚未配置时拒绝启动，不先开电再检查。
+2. MCU先把三路档位换算为目标mV，再将`memoryType+三路目标mV`与上一份成功生效且当前仍有效的配置比较，不比较JSON文本或仅比较上次请求。任一项不同必须冷重启，即使PC发`reboot=false`；两端判断不一致以MCU为准。三路档位相同但内存类型改变，也不能省略重启。
+3. `bootMode`改变、配置记录未知或已失效，也必须重新建立启动状态。只有RK已就绪、配置仍有效且电源和Boot均未改变时，`reboot=false`才可复用当前启动；`reboot=true`则主动重新启动。已OFF时完成受控上电，无须为了“重启”再做一次无效关电。
+4. 冷重启流程为：取得RK安全下电确认→关RK/DDR并满足放电窗口→在OFF设置Boot→重新上电并在训练前写入、稳定三轨目标→确认RK就绪→交接测试。不能改为先在标称值训练、再把本次`power`写进去。
+5. 仅完成I2C写入或电源状态到`on`，不能记为训练成功。调压/启动失败或MCU复位后，不得沿用成功记录；运行期拉偏改变实际供电后，也不能按旧记录跳过重新建立目标的过程。
+
+B1目前按“TPS配置及稳定能赶在RK训练前完成”的开发预设推进，时间预算与电气波形仍需实板验收。
+`bootMode`选择启动模式，不等于PXE开关；SLT的MemTest86配置和报告上传走PC/RK既定通路，B1不代管温控或报告文件。
+
+接入后的响应约定：受理返回0x0006 `accepted`，`requestCommandId=259`；
+完成启动准备并确认测试启动交接后返回0x0006 `completed`，只表示本次启动命令完成，不表示测试PASS。
+准备或启动失败返回0x0006 `failed`，不继续执行算法；由MCU转报的测试结果仍使用0x0105。
+开始测试的0x0006在成功解析`algorithmIndex`后也原样带回该字段；编号缺失或非法时不伪造编号。
+PC以对应index的约定最终结果推进计划，不能因`accepted`或启动`completed`就切换下一项；
+SLT由PC/RK报告通路判断该项是否完成。
+PC串行提交开始测试，尚有活动测试时不覆盖配置，新开始请求返回`busy`，不得借Seq关联并行测试。
+
+0x0506和0x0509先保留为独立调试/兼容入口，正常新测试流程不要求PC拆包调用。
+0x0509仍是原有类型/运行期拉偏语义，不替代本命令的训练电压，也不修改其现有包体。
+
+**固件接入状态（2026-09-14）**：以上为本次更新的协议格式。V2/B1当前0x0103仍只解析
+`algorithmName/algorithmIndex`，合法请求无同步成功响应；保留编号后，新包可以通过旧字段校验，
+但旧固件不校验/执行算法大类、训练档位和重启要求。带index的执行响应、完整启动流程及新结果格式尚未接入，
+不能把接受JSON视为已支持新业务，须待实现后联调。
 
 ### 4.8 停止测试（0x0104）
 
@@ -134,7 +253,8 @@ PC发送0x0002，MCU返回0x0001；双方包体均为 `{}`，各自使用本端�
 
 ```json
 {
-  "algorithmName": "algorithmName",
+  "algorithmType": "parametric",
+  "algorithmName": "idd_0",
   "algorithmIndex": 1,
   "testResults": [
     {
@@ -146,51 +266,217 @@ PC发送0x0002，MCU返回0x0001；双方包体均为 `{}`，各自使用本端�
 }
 ```
 
+`algorithmType/algorithmName/algorithmIndex`均沿用对应开始测试请求；名称标识具体算法，
+index标识PC当前计划中的算法项，MCU必须原样返回。PC收到该项约定的最终结果后推进计划，
+不按名称猜测index，也不能把局部结果当作整项完成。
+index不是跨计划/重连的全局唯一ID；当前按4.7节串行执行，残留结果必须按会话/任务边界处理。
+这是新结果格式，现有固件构造器仍为名称/编号格式，尚未增加大类。
+
+
 `testResults`包含各测试对象的结果；`siteId`和`mirrorIndex`先保留现有字段及类型，具体业务含义和编号规则后续统一规定，不在本框架中绑定物理测试位或软件镜像。`testStatus`为测试状态码，具体取值由业务定义。
 
 ### 4.10 启动RK及内存电源（0x0501）
 
-执行RK及内存的上电流程；DDR按已配置的LPDDR类型恢复标称电压后初始化，不沿用上一个电源周期的拉偏值。
+请求固定为`{}`。OFF状态且时序已配置时启动非阻塞上电，返回0x0006
+`accepted`，PC随后用0x0503轮询；已经ON返回`completed`。当前B1未写入批准时序，
+因此安全返回`notConfigured`。DDR按已选类型恢复标称电压，不沿用上一周期拉偏。
 
 ### 4.11 关闭RK及内存电源（0x0502）
 
-正常下电先取得RK安全掉电确认，再关闭RK及内存电源；未取得确认不得当作正常下电成功。
+请求固定为`{}`。OFF状态幂等返回`completed`；ON状态在取得RK安全关机确认前返回
+`notReady`，不得直接关轨。安全确认接入后受理反序下电并由0x0503报告进度。
 
 ### 4.12 查询电源状态（0x0503）
 
+请求包体固定为：
+
+```json
+{}
+```
+
 ### 4.13 电源状态响应（0x0504）
+
+最小响应示例：
+
+```json
+{
+  "powerState": "off"
+}
+```
+
+`powerState`只表示MCU电源状态机的逻辑状态，不代表ADC已经确认实际电压。固定取值：
+
+- `off`：系统电源关闭；
+- `starting`：PC6/PC7上电及TPS初始化过程中；
+- `on`：状态机已完成所选目标电压写入，不代表RK训练成功；
+- `stopping`：PC6/PC7反向下电过程中；
+- `fault`：初始化或调压失败，状态机已执行故障关断。
+
+0x0501已接入状态机但在批准时序写入前返回`notConfigured`；0x0502仍受RK安全关机确认
+门控。状态字段不等同于实测电压，实测结果由0x0601/0x0602提供。
 
 ### 4.14 RK安全断电重启（0x0505）
 
-通过B1的电源控制流程执行RK安全下电、再上电；不是RK软件重启，也不复位B1 MCU。B2异常复位不属于本命令。
+请求固定为`{}`。目标流程是RK安全下电确认→反序关电→最小掉电窗口→重新上电；
+不是RK软件重启，也不复位B1 MCU。当前ON状态返回`notReady`，等第1项RK安全确认
+接入后开放；OFF状态返回`invalidState`。
 
 ### 4.15 设置RK引导模式（0x0506）
 
-设置下一次RK启动所使用的引导模式，不隐含立即重启。
+请求示例：
+
+```json
+{"bootMode":"emmc"}
+```
+
+`bootMode`固定为`usbMaskrom`、`sdCard`、`emmc`、`fspiM0`、`fspiM1`、
+`fspiM2`或`emmcSd`。仅RK电源OFF时通过MCP4725 Fast Write设置，不写EEPROM，
+成功返回`completed`；本命令不隐含立即重启。
 
 ### 4.16 查询RK引导模式（0x0507）
 
-查询B1已设置的引导配置，不等同于确认RK当前实际从该介质启动。
+请求固定为`{}`。查询最近一次成功写入的配置；从未成功设置时返回`notConfigured`。
+该值不等同于确认RK实际从对应介质启动。
 
 ### 4.17 引导模式响应（0x0508）
 
+```json
+{"bootMode":"emmc","targetMv":600}
+```
+
+`targetMv`是原理图电阻表对应的目标DAC电压，不是实测VOUT。
+
 ### 4.18 配置LPDDR类型及三轨目标电压（0x0509）
 
-用于选择LPDDR4/LPDDR4X及配置VDD1、VDD2、VDDQ目标电压；类型在下电状态配置，拉偏在内存初始化完成后执行。电压以mV表示，测试档位按20mV步进；设置目标值不等于实测电压，实际采样由0x0601/0x0602查询。每次上电仍先恢复所选类型的标称值，超出器件规格的测试电压存在损坏风险。
+请求固定为四个字段：
+
+```json
+{
+  "memoryType": "LPDDR4X",
+  "vdd1Steps": 0,
+  "vdd2Steps": 0,
+  "vddqSteps": 0
+}
+```
+
+- `memoryType`：固定为`LPDDR4`或`LPDDR4X`；
+- `vdd1Steps`、`vdd2Steps`、`vddqSteps`：相对该类型标称电压的有符号整数档位，
+  `0`表示标称值，每档20mV，不表示“保持当前电压”；
+- 字段名和字符串大小写敏感，四个字段必须全部存在且不能附带其他字段。
+
+可写档位如下，边界来自TPS寄存器可精确编码范围，不代表DDR安全工作范围：
+
+| 内存类型 | VDD1 steps | VDD2 steps | VDDQ steps |
+|---|---:|---:|---:|
+| LPDDR4 | -50..77 | -35..28 | -35..28 |
+| LPDDR4X | -50..77 | -35..28 | -10..53 |
+
+状态规则：
+
+- 电源`off`时只接受三路steps全0，用于选择下一次上电的内存类型，不访问I²C；
+- 电源`on`时只能配置当前已选择的类型，三轨按安全顺序同步写入，完成后返回
+  0x0006 `completed`；
+- `starting`、`stopping`、类型不一致或`off`时带非零steps返回`invalidState`；
+- 字段类型、非整数或档位越界返回`invalidArgument`；真实TPS/I²C失败返回
+  `executionFailed`并进入电源故障关断。
+
+每次重新上电仍先恢复所选类型的标称值，不沿用上一次拉偏。设置值只是TPS目标，
+不等于实测电压；实测由0x0601/0x0602查询。PC必须在RK完成DDR初始化后下发
+非零档位；MCU–RK的DDR-ready强制门待双方业务握手冻结。
+极端档位可能永久损坏被测器件，禁止自动遍历全范围。
 
 ### 4.19 查询电源采样结果（0x0601）
 
+请求包体固定为：
+
+```json
+{}
+```
+
+本命令只读取监测任务最近发布的缓存快照，不在TCP任务中即时访问PAC1934、
+AD7124或TPS。
+
 ### 4.20 电源采样结果响应（0x0602）
+
+完整有效示例：
+
+```json
+{
+  "sampleAgeMs": 37,
+  "samplePowerState": "on",
+  "validMask": 3,
+  "voltageMv": [1801, 1099, 601],
+  "currentMa": [312, 145, 88],
+  "powerMw": [562, 159, 53]
+}
+```
+
+- 三个数组顺序固定为`VDD1`、`VDD2`、`VDDQ`；
+- `sampleAgeMs`是响应时刻减去采样时刻的无符号毫秒差，可跨MCU tick回绕；
+- `samplePowerState`是产生该快照时的电源状态，不是另一次实时读取；
+- `validMask` bit0=三路`voltageMv`有效，bit1=三路`currentMa`和`powerMw`
+  有效；
+- 未置位的测量组在JSON中整体省略，不能用全零数组表示“无效”。部分有效仍正常
+  返回0x0602；启动后尚无任何快照时返回0x0006 `executionFailed`。
+
+`voltageMv`来自AD7124并已按B1的100R+10k前端换算；`currentMa`和`powerMw`
+来自PAC1934。真实零点、增益和电阻误差仍需B1真板标定。TPS STATUS属于读清事件，
+首版不把它作为“当前健康状态”发送。
 
 ### 4.21 设置结果灯状态（0x0701）
 
+```json
+{
+  "target": "lpddr0",
+  "state": "pass"
+}
+```
+
+| 字段 | 允许值 | 说明 |
+|---|---|---|
+| target | `lpddr0` / `lpddr1` / `emcp` | 三组测试对象；不表示GPIO或LED编号 |
+| state | `off` | 两通道关闭 |
+| state | `pass` | PASS通道常亮 |
+| state | `fail` | FAIL通道常亮 |
+| state | `testNormal` | 两通道500ms亮/500ms灭同步闪烁 |
+| state | `testHot` | FAIL/警示通道500ms亮/500ms灭闪烁 |
+
+请求必须恰好包含`target`和`state`。设置完成返回0x0006 `completed`；参数错误
+返回`invalidArgument`，GPIO业务驱动不可用返回`executionFailed`。线协议不绑定颜色，
+当前B1板PASS为蓝色、FAIL/警示为琥珀色，物理顺序只由板级映射决定。
+
 ### 4.22 查询结果灯状态（0x0702）
 
+请求固定为`{}`。查询的是三组业务状态，不是闪烁周期内瞬时亮灭电平。
+
 ### 4.23 结果灯状态响应（0x0703）
+
+```json
+{
+  "lpddr0": "off",
+  "lpddr1": "pass",
+  "emcp": "testHot"
+}
+```
+
+三个值与0x0701的`state`取值完全相同。PC不得向MCU发送0x0602或0x0703；
+反向发送响应命令返回0x0006 `invalidDirection`。
 
 ### 4.24 查询B1–B2保活状态（0x0801）
 
 ### 4.25 B1–B2保活状态响应（0x0802）
+
+### 4.26 MCU固件升级请求（0x0901）
+
+PC发送一个`.ota`文件，按begin/write/finish/query/cancel动作传输；每个write的data为最多1024字节原始内容的Base64字符串。MCU须已健康确认且电源OFF。完整字段及示例见[OTA协议](pc_ota_protocol.md)。B1与V2包不能混用。
+
+### 4.27 MCU固件升级响应（0x0902）
+
+操作成功及进度查询返回0902；字段/状态/校验失败返回0006并携带requestCommandId=2305。finish的accepted仅表示已提交安装，不表示升级完成。
+
+### 4.28 MCU固件升级完成（0x0903）
+
+重启重连后PC携带目标packageId查询，仅当目标镜像已运行并完成30秒任务健康确认才返回0903；不依赖主动推送，不复用请求Seq。
 
 ## 5. 业务命令补充格式
 

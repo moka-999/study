@@ -1,11 +1,17 @@
 /*
  * B1 系统电源状态机实现
  *
+ * 当前BRD硬件合同：PG11到三颗TPS EN的串联电阻均为NC，TPS EN由
+ * VCC4V0_SYS上拉。因此PC6始终是4V及三路DDR电源的可靠总开关。
+ * 固件仍按安全时序驱动PG11作为防御性预留：当前板上无电气效果；若后续
+ * 装上R4073/R4081/R4086，则可在两路系统电源启动后统一释放三颗TPS。
+ * 电源状态和故障关断绝不能依赖该预留信号是否实际接通。
+ *
  * 安全原则：
- * 1. 初始化和任何 DDR 配置失败都把 PC6/PC7/PG11 收敛到低电平。
+ * 1. 初始化和任何DDR配置失败都关闭PC6/PC7，并把PG11防御性拉低。
  * 2. 未提供经过评审的时序配置时，上电请求直接拒绝。
  * 3. 上电过程中收到关机请求时立即全部关闭；只有稳定 ON 状态才执行
- *    “DDR -> 第二系统电源 -> 第一系统电源”的受控反向下电。
+ *    “第二系统电源 -> 第一系统电源”的受控反向下电。
  * 4. 用 now_ms 差值判断延时，天然兼容 32 位毫秒计数器回绕。
  *
  * “非阻塞”仅指轨间等待不使用 HAL_Delay/vTaskDelay；DDR 寄存器配置沿用
@@ -16,11 +22,10 @@
 #include "ddr_power.h"
 #include "main.h"
 
-/* B1只有这三个电源使能需要状态机统一管理，不再引入整套V2 GPIO抽象。 */
+/* 状态机只把PC6和PC7视为真实使能；PG11仅是可能无效的防御性总闸。 */
 typedef enum {
     POWER_ENABLE_4V0 = 0,
     POWER_ENABLE_3V3,
-    POWER_ENABLE_DDR,
 } power_enable_t;
 
 static pwr_ctrl_config_t s_config;
@@ -49,12 +54,18 @@ static void write_enable(power_enable_t enable, GPIO_PinState state)
     case POWER_ENABLE_3V3:
         HAL_GPIO_WritePin(B1_PWR_3V3_EN_PORT, B1_PWR_3V3_EN_PIN, state);
         break;
-    case POWER_ENABLE_DDR:
-        HAL_GPIO_WritePin(B1_PWR_DDR_EN_PORT, B1_PWR_DDR_EN_PIN, state);
-        break;
     default:
         break;
     }
+}
+
+/*
+ * PG11可能因三颗0R未装而悬空于TPS侧，因此只负责“有连接时多一层保护”。
+ * 调用方仍必须通过PC6切断VCC4V0_SYS，不能把本GPIO写成功当作TPS已关断。
+ */
+static void write_optional_tps_gate(GPIO_PinState state)
+{
+    HAL_GPIO_WritePin(B1_PWR_DDR_EN_PORT, B1_PWR_DDR_EN_PIN, state);
 }
 
 static void enter_state(pwr_ctrl_state_t state, uint32_t now_ms)
@@ -71,7 +82,7 @@ static uint8_t delay_elapsed(uint32_t now_ms, uint32_t delay_ms)
 /* 故障路径必须一次性关断全部使能，不能依赖后续任务仍能运行。 */
 static void force_all_rails_off(void)
 {
-    write_enable(POWER_ENABLE_DDR, GPIO_PIN_RESET);
+    write_optional_tps_gate(GPIO_PIN_RESET);
     write_enable(POWER_ENABLE_3V3, GPIO_PIN_RESET);
     write_enable(POWER_ENABLE_4V0, GPIO_PIN_RESET);
 }
@@ -84,7 +95,7 @@ static void enter_fault(void)
 
 pwr_ctrl_result_t pwr_ctrl_configure(const pwr_ctrl_config_t *config)
 {
-    if (!config || config->rail_order > PWR_CTRL_RAIL_ORDER_3V3_FIRST)
+    if (!config || (uint32_t)config->rail_order > PWR_CTRL_RAIL_ORDER_3V3_FIRST)
         return PWR_CTRL_ERR_PARAM;
     if (s_state != PWR_CTRL_STATE_OFF)
         return PWR_CTRL_ERR_BUSY;
@@ -96,7 +107,7 @@ pwr_ctrl_result_t pwr_ctrl_configure(const pwr_ctrl_config_t *config)
 
 void pwr_ctrl_init(const pwr_ctrl_config_t *config)
 {
-    /* MX_GPIO_Init()已将三路配置为低电平；这里再关断一次作为状态机兜底。 */
+    /* MX_GPIO_Init()已关闭PC6/PC7/PG11；这里再执行一次状态机兜底。 */
     force_all_rails_off();
     s_state = PWR_CTRL_STATE_OFF;
     s_state_enter_ms = 0;
@@ -122,6 +133,23 @@ pwr_ctrl_result_t pwr_ctrl_request_on(uint32_t now_ms)
     return PWR_CTRL_OK;
 }
 
+pwr_ctrl_result_t pwr_ctrl_request_training_on(
+    ddr_memory_type_t type, const uint16_t mv[DDR_RAIL_COUNT], uint32_t now_ms)
+{
+    if (!s_configured) return PWR_CTRL_ERR_NOT_CONFIGURED;
+    if (s_state == PWR_CTRL_STATE_FAULT) return PWR_CTRL_ERR_FAULT;
+    if (s_state != PWR_CTRL_STATE_OFF) return PWR_CTRL_ERR_BUSY;
+
+    /*
+     * 先完整校验/复制训练目标，再开第一轨。ON时即使目标相同也不走此入口，
+     * 更不能用新目标覆盖运行中的电压；电源变化的冷重启编排由业务层负责。
+     */
+    if (ddr_power_configure_training(type, mv) != IF_OK) {
+        return PWR_CTRL_ERR_PARAM;
+    }
+    return pwr_ctrl_request_on(now_ms);
+}
+
 pwr_ctrl_result_t pwr_ctrl_request_off(uint32_t now_ms)
 {
     if (s_state == PWR_CTRL_STATE_OFF)
@@ -138,8 +166,11 @@ pwr_ctrl_result_t pwr_ctrl_request_off(uint32_t now_ms)
         return PWR_CTRL_OK;
     }
 
-    write_enable(POWER_ENABLE_DDR, GPIO_PIN_RESET);
-    enter_state(PWR_CTRL_STATE_WAIT_DDR_OFF, now_ms);
+    /* 有连接时先关TPS；无连接时无副作用，PC6仍会在系统轨流程中可靠关断。 */
+    write_optional_tps_gate(GPIO_PIN_RESET);
+    /* 从最后开启的系统轨开始反序下电。 */
+    write_enable(second_system_rail(), GPIO_PIN_RESET);
+    enter_state(PWR_CTRL_STATE_WAIT_SECOND_RAIL_OFF, now_ms);
     return PWR_CTRL_OK;
 }
 
@@ -152,10 +183,21 @@ pwr_ctrl_result_t pwr_ctrl_select_memory_type(ddr_memory_type_t type)
 
 pwr_ctrl_result_t pwr_ctrl_apply_ddr_steps(const int16_t steps[DDR_RAIL_COUNT])
 {
+    uint16_t targets[DDR_RAIL_COUNT];
+
     if (s_state == PWR_CTRL_STATE_FAULT) return PWR_CTRL_ERR_FAULT;
     if (s_state != PWR_CTRL_STATE_ON) return PWR_CTRL_ERR_BUSY;
 
-    if (ddr_power_apply_steps(steps) != IF_OK) {
+    /*
+     * 先用纯计算接口拒绝空指针、越界或非20mV档位。参数错误不能被误判为
+     * TPS/I2C故障，更不能因此触发整机故障关断。
+     */
+    if (ddr_power_build_step_targets(ddr_power_get_memory_type(), steps,
+                                     targets) != IF_OK) {
+        return PWR_CTRL_ERR_PARAM;
+    }
+
+    if (ddr_power_set(DDR_RAIL_MASK_ALL, targets) != IF_OK) {
         enter_fault();
         return PWR_CTRL_ERR_FAULT;
     }
@@ -168,33 +210,28 @@ void pwr_ctrl_process(uint32_t now_ms)
     case PWR_CTRL_STATE_WAIT_FIRST_RAIL:
         if (delay_elapsed(now_ms, s_config.first_to_second_delay_ms)) {
             write_enable(second_system_rail(), GPIO_PIN_SET);
+            /*
+             * 两路系统使能均已发出后才释放可选TPS总闸；随后沿用现有
+             * second_to_tps_config_delay_ms等待TPS启动，再访问I2C。
+             */
+            write_optional_tps_gate(GPIO_PIN_SET);
             enter_state(PWR_CTRL_STATE_WAIT_SECOND_RAIL, now_ms);
         }
         break;
 
     case PWR_CTRL_STATE_WAIT_SECOND_RAIL:
-        if (delay_elapsed(now_ms, s_config.second_to_ddr_delay_ms)) {
-            /* 三颗 TPS62868 的 VIN 来自 4.0V，因此 PG11 必须最后使能。 */
-            write_enable(POWER_ENABLE_DDR, GPIO_PIN_SET);
-            enter_state(PWR_CTRL_STATE_WAIT_DDR_READY, now_ms);
-        }
-        break;
-
-    case PWR_CTRL_STATE_WAIT_DDR_READY:
-        if (delay_elapsed(now_ms, s_config.ddr_enable_to_config_delay_ms)) {
-            /* EN 拉高后寄存器才可访问；任一轨初始化失败都视为整机上电失败。 */
+        if (delay_elapsed(now_ms, s_config.second_to_tps_config_delay_ms)) {
+            /*
+             * PC6产生4V后TPS和RK806并行启动。这里直接写保存的训练目标，
+             * 不先写标称。开发暂按能赶在RK训练前完成；实际可访问等待、
+             * 总线/锁/调度耗时和模拟稳定时间仍须标定，不能照搬V2展示延时。
+             * ON只表示写入完成，不等于DDR-ready；首个事务失败立即全关。
+             */
             if (ddr_power_init() != IF_OK) {
                 enter_fault();
             } else {
                 enter_state(PWR_CTRL_STATE_ON, now_ms);
             }
-        }
-        break;
-
-    case PWR_CTRL_STATE_WAIT_DDR_OFF:
-        if (delay_elapsed(now_ms, s_config.ddr_to_system_off_delay_ms)) {
-            write_enable(second_system_rail(), GPIO_PIN_RESET);
-            enter_state(PWR_CTRL_STATE_WAIT_SECOND_RAIL_OFF, now_ms);
         }
         break;
 

@@ -28,15 +28,25 @@ static void MX_UART_Init(void);
 static void MX_QSPI_Init(void);
 
 /*
- * 原理图只冻结了LED1/2、LED3/4、LED5/6为三组双色灯，尚未冻结每组
- * 对应的测试对象和红绿顺序。当前验收镜像暂按奇数红、偶数绿以及
- * LPDDR0、LPDDR1、eMCP的顺序映射；B1真板目视确认后只修改本表。
+ * 2026-08-27 BRD确认LED1/2、LED3/4、LED5/6依次驱动三颗琥珀+蓝双色灯：
+ * 奇数通道接琥珀色并定义为FAIL，偶数通道接蓝色并定义为PASS。
+ * PCB网络不能证明三颗灯对应LPDDR0、LPDDR1、eMCP的机械标签顺序，
+ * 因此对象顺序仍沿用暂定值，待B1真板目视确认后只调整本表的三行顺序。
  */
 static const result_led_board_map_t s_result_led_map = {
     .pairs = {
-        [RESULT_LED_LPDDR0] = { GPIOG, B1_LED1_PIN, GPIOG, B1_LED2_PIN },
-        [RESULT_LED_LPDDR1] = { GPIOG, B1_LED3_PIN, GPIOG, B1_LED4_PIN },
-        [RESULT_LED_EMCP]   = { GPIOG, B1_LED5_PIN, GPIOG, B1_LED6_PIN },
+        [RESULT_LED_LPDDR0] = {
+            .fail_port = GPIOG, .fail_pin = B1_LED1_PIN,
+            .pass_port = GPIOG, .pass_pin = B1_LED2_PIN,
+        },
+        [RESULT_LED_LPDDR1] = {
+            .fail_port = GPIOG, .fail_pin = B1_LED3_PIN,
+            .pass_port = GPIOG, .pass_pin = B1_LED4_PIN,
+        },
+        [RESULT_LED_EMCP] = {
+            .fail_port = GPIOG, .fail_pin = B1_LED5_PIN,
+            .pass_port = GPIOG, .pass_pin = B1_LED6_PIN,
+        },
     },
 };
 

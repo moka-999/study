@@ -201,13 +201,14 @@ int ad7124_config_setup(ad7124_t *d, uint8_t setup,
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * 初始化：复位 → 读ID → 配置3通道（B1/MB360原理图20260811，AIN0/2/4）
- *   CH0: AIN0 ↔ AVSS → VCC_1V8_S3_LPDDR4X (VDD1, 1.8V, TPS62868 U4025)
- *   CH1: AIN2 ↔ AVSS → VDD2_DDR_S3       (VDD2, 1.1V, TPS62868 U4026)
- *   CH2: AIN4 ↔ AVSS → VDDQ_DDR          (VDDQ, 0.6V, TPS62868 U4027)
- *   AIN1/3/5 = AGND, AIN6/7 = NC (原理图)
+ * 初始化：复位 → 读ID → 配置3路原理图差分通道
+ *   CH0: AIN0 - AIN1 → VCC_1V8_S3_LPDDR4X (VDD1, 1.8V, TPS62868 U4025)
+ *   CH1: AIN2 - AIN3 → VDD2_DDR_S3       (VDD2, 1.1V, TPS62868 U4026)
+ *   CH2: AIN4 - AIN5 → VDDQ_DDR          (VDDQ, 0.6V, TPS62868 U4027)
+ *   AIN1/3/5由原理图接AGND，AIN6/7未使用。
  *
- *   默认: 外部基准 REFIN1 (2.5V), SINC4, 50Hz ODR, 增益=1, 单极性 (unipolar)
+ *   默认: 内部2.5V基准, SINC4, 50Hz ODR, 增益=1, 单极性 (unipolar)
+ *   原因: 20260831版B1原理图中REFIN1+串联的FB2306标为NC，外部基准未接入。
  *   单极性理由: DDR 电压全正 (0.6~1.8V), unipolar 满量程 0~2.5V 分辨率翻倍
  *              (24-bit 全用 vs bipolar 有效 23-bit), 更符合老化拉偏精度需求
  *   使能 DATA_STATUS: 读 DATA 时状态字节附加在数据后 (第4字节)
@@ -215,16 +216,19 @@ int ad7124_config_setup(ad7124_t *d, uint8_t setup,
 
 int ad7124_init(ad7124_t *d)
 {
-    /* B1原理图：CH0→AIN0，CH1→AIN2，CH2→AIN4（AIN1/3/5=AGND）。 */
+    /* 正负端一一按B1原理图配对，不用内部AVSS代替板上AGND回路。 */
     static const uint8_t b1_ainp[3] = {
         AD7124_AIN_AIN0, AD7124_AIN_AIN2, AD7124_AIN_AIN4
+    };
+    static const uint8_t b1_ainm[3] = {
+        AD7124_AIN_AIN1, AD7124_AIN_AIN3, AD7124_AIN_AIN5
     };
 
     if (!d || !d->spi) return IF_ERR;
     if (ad7124_reset(d) != IF_OK) return IF_ERR;
     if (ad7124_read_id(d) != IF_OK) return IF_ERR;
 
-    /* ADC_CTRL: 内部时钟, 外部基准 REFIN1 (见 CFGx REF_SEL), 连续模式, 全功率, DATA_STATUS */
+    /* ADC_CTRL同时使能内部2.5V基准；CFGx再显式选择该内部基准。 */
     if (_wr16(d, AD7124_REG_ADC_CTRL,
               AD7124_ADC_CLK_SEL(AD7124_CLK_INT) |
               AD7124_ADC_POWER_MODE(AD7124_PWR_FULL) |
@@ -237,20 +241,22 @@ int ad7124_init(ad7124_t *d)
     d->num_ch = 3;  /* B1本板的3路DDR电压回读 */
 
     for (int ch = 0; ch < d->num_ch; ch++) {
-        /* CHx_MAP：使能，AIN(b1_ainp)对AVSS，setup=ch。 */
+        /* CHx_MAP：使能原理图对应的AIN正/负端，setup=ch。 */
         if (_wr16(d, AD7124_REG_CH0 + ch,
                   AD7124_CH_ENABLE | AD7124_CH_AINP(b1_ainp[ch]) |
-                  AD7124_CH_AINM(AD7124_AIN_AVSS) |
+                  AD7124_CH_AINM(b1_ainm[ch]) |
                   AD7124_CH_SETUP(ch)) != IF_OK)
             return IF_ERR;
 
-        /* CFGx: 单极性, gain=1, 外部基准 REFIN1, 缓冲器使能
+        /* CFGx: 单极性, gain=1, 内部2.5V基准, 仅使能正端输入缓冲。
+         * 最新B1原理图的FB2306为NC，不能选择悬空的REFIN1作为转换基准。
+         * AIN1/3/5直接AGND；增益1时负端缓冲要求输入高于AVSS 100mV，
+         * 因此必须关闭AIN_BUFM。内部基准直接调制器，也不需要REFIN缓冲器。
          * (单极性: AIN 范围 0~VREF/gain, DDR 电压全正用满 24-bit 分辨率) */
         if (_wr16(d, AD7124_REG_CFG0 + ch,
                   AD7124_CFG_PGA(0) |
-                  AD7124_CFG_REF_SEL(AD7124_REF_EXT1) |
-                  AD7124_CFG_REF_BUFP | AD7124_CFG_REF_BUFM |
-                  AD7124_CFG_AIN_BUFP | AD7124_CFG_AIN_BUFM) != IF_OK)
+                  AD7124_CFG_REF_SEL(AD7124_REF_INT) |
+                  AD7124_CFG_AIN_BUFP) != IF_OK)
             return IF_ERR;
 
         /* FILTERx: SINC4, FS=384 → fADC = 614400/(32*384) ≈ 50Hz */
@@ -488,7 +494,7 @@ float ad7124_raw_to_voltage(int32_t raw, float vref, uint8_t pga, uint8_t bipola
 /* ═══════════════════════════════════════════════════════════════════
  * 原始值 → mV (int32_t, 整数, 协议上报用)
  *
- * vref 传基准电压 (REFIN1 = 2.5V); 若前端有分压, 用 _div 系列传 divider:
+ * vref 传实际基准电压（B1使用内部2.5V）；若前端有分压, 用 _div 系列传 divider:
  *   B1: AIN输入经100R+10K分压 → V_src = V_ADC × (100+10000)/10000
  *       = V_ADC × 1.01  → divider = AD7124_DIV_100R_10K
  * ═══════════════════════════════════════════════════════════════════ */

@@ -2,7 +2,8 @@
  * PC-MCU TCP字节流解析状态机：状态 -> 字节处理函数查表。
  *
  * TCP只保证字节顺序，不保证一次recv()对应一个协议帧。本模块逐字节收集
- * 固定18字节头和JSON正文，并在头字段刚到齐时尽早检查Length/Version/Flag。
+ * 固定18字节头和JSON正文，并在头字段刚到齐时尽早检查Length/Version/Flag/
+ * ServiceID。
  * 它只负责传输层组帧，不解析JSON字段，也不处理CommandID业务语义。
  * 状态表在pc_state_machine.c；业务命令表在pc_dispatch.c，两者互相独立。
  *
@@ -38,6 +39,7 @@ typedef enum {
     PC_SM_ERROR_LENGTH,   /* Length小于18或超过完整PDU上限。 */
     PC_SM_ERROR_VERSION,  /* Version不是当前固定值1。 */
     PC_SM_ERROR_FLAG,     /* Flag不是当前固定JSON标志8。 */
+    PC_SM_ERROR_SERVICE_ID, /* ServiceID不是初版固定值0。 */
 } pc_sm_error_t;
 
 typedef enum {
@@ -70,7 +72,7 @@ pc_sm_feed_result_t pc_sm_feed(pc_sm_t *sm, uint8_t byte);
  */
 int pc_sm_get_frame(const pc_sm_t *sm, pc_protocol_frame_t *frame);
 
-/* 测试镜像需要原样回显PDU；仅在FRAME_READY状态返回内部帧首地址。 */
+/* 诊断/测试需要检查原始接收PDU；仅在FRAME_READY状态返回内部帧首地址。 */
 const uint8_t *pc_sm_frame_data(const pc_sm_t *sm);
 
 /* 返回1表示已收到部分字节但尚未成帧，供TCP任务执行半帧超时判断。 */

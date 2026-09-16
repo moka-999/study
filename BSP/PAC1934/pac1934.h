@@ -4,7 +4,8 @@
  * ===================================================================
  *
  * 硬件（B1/MB360 原理图 P22）：
- *   逻辑I2C4(PH4/PH5软件开漏，非STM32 I2C4 AF)，地址0x2C
+ *   逻辑I2C4(PH4/PH5软件开漏，非STM32 I2C4 AF)，7位地址0x16
+ *   （总线上写地址字节0x2C、读地址字节0x2D）
  *   SENSE1 = VCC_1V8_S3_LPDDR4X  (0.01Ω)  → VDD1 电流
  *   SENSE2 = VDD2_DDR_S3        (0.01Ω)  → VDD2 电流
  *   SENSE3 = VDDQ_DDR           (0.01Ω)  → VDDQ 电流
@@ -60,7 +61,7 @@
 /* 产品/厂商 ID 值 */
 #define PAC1934_PRODUCT_ID          0x5B   /* PAC1934 */
 #define PAC1934_MANUF_ID            0x5D   /* Microchip */
-#define PAC1934_ADDR_B1             0x2C   /* ADDRSEL=5.23kΩ接地 */
+#define PAC1934_ADDR_B1             0x16U  /* 未左移7位地址；底层发送时统一左移1位 */
 #define PAC1934_RSENSE_B1_UOHM      10000U /* 三路均为0.01Ω */
 #define PAC1934_CH_MASK_B1_RAILS    0x07   /* 启用CH1-3，关闭CH4 */
 #define PAC1934_CH_MASK_ALL          0x0F   /* bit0-3 = ch1-4 使能位 */
@@ -72,7 +73,7 @@ typedef void (*pac1934_wait_ms_fn)(uint32_t ms);
 
 typedef struct {
     i2c_if_t *bus;       /* I2C 总线接口 (i2c4_if) */
-    uint8_t   addr;      /* I2C 地址 (0x2C, ADDRSEL 决定) */
+    uint8_t   addr;      /* 未左移的7位I2C地址（B1为0x16） */
     uint32_t  rsense_uohm; /* 采样电阻 (µΩ, 默认 0.01Ω=10000) */
     uint8_t   active_mask; /* 初始化成功后保存实际启用的通道，bit0=ch1 */
     pac1934_wait_ms_fn wait_ms; /* REFRESH_V后必须等待至少1ms */

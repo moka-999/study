@@ -17,8 +17,8 @@ static void write_be32(uint8_t *data, uint32_t value)
     data[3] = (uint8_t)value;
 }
 
-int pc_protocol_build_response(const pc_protocol_frame_t *request,
-                               uint16_t response_command_id,
+int pc_protocol_build_response(uint16_t response_command_id,
+                               uint32_t mcu_tx_sequence,
                                const uint8_t *json,
                                uint32_t json_length,
                                uint8_t *output,
@@ -26,7 +26,7 @@ int pc_protocol_build_response(const pc_protocol_frame_t *request,
                                uint32_t *output_length)
 {
     if (output_length) *output_length = 0U;
-    if (!request || !json || json_length == 0U || !output || !output_length ||
+    if (!json || json_length == 0U || !output || !output_length ||
         json_length > PC_PROTOCOL_MAX_JSON_SIZE) {
         return -1;
     }
@@ -38,9 +38,9 @@ int pc_protocol_build_response(const pc_protocol_frame_t *request,
     write_be32(&output[0], length);
     write_be16(&output[4], PC_PROTOCOL_VERSION);
     write_be16(&output[6], PC_PROTOCOL_FLAG_JSON);
-    write_be16(&output[8], request->service_id);
+    write_be16(&output[8], 0U);
     write_be16(&output[10], response_command_id);
-    write_be32(&output[12], request->sequence); /* PC请求Seq必须原样回显。 */
+    write_be32(&output[12], mcu_tx_sequence);
     write_be16(&output[16], 0U);
     memcpy(&output[PC_PROTOCOL_HEADER_SIZE], json, json_length);
     *output_length = length;
@@ -113,6 +113,59 @@ static int is_json_whitespace(char value)
 }
 
 /*
+ * cJSON以C字符串保存键和值，JSON的"\\u0000"会被解码为内嵌NUL；若不在
+ * 原始文本阶段拒绝，后续strcmp可能把"pass\\u0000junk"误认成"pass"。
+ * 本扫描只补C字符串边界保护，其他转义合法性仍交给cJSON统一判断。
+ */
+static int json_string_lexemes_are_safe(const uint8_t *json, size_t length,
+                                        size_t *bad_offset)
+{
+    uint8_t in_string = 0U;
+
+    for (size_t i = 0U; i < length; i++) {
+        uint8_t value = json[i];
+
+        /* NUL在JSON文本任何位置都非法，也会截断后续C字符串处理。 */
+        if (value == 0U) {
+            if (bad_offset) *bad_offset = i;
+            return 0;
+        }
+        if (!in_string) {
+            if (value == '"') in_string = 1U;
+            continue;
+        }
+        if (value == '"') {
+            in_string = 0U;
+            continue;
+        }
+        if (value < 0x20U) {
+            if (bad_offset) *bad_offset = i;
+            return 0;
+        }
+        if (value != '\\') continue;
+
+        if (i + 1U >= length) {
+            if (bad_offset) *bad_offset = i;
+            return 0;
+        }
+        value = json[++i];
+        if (value == 'u') {
+            if (i + 4U >= length) {
+                if (bad_offset) *bad_offset = i - 1U;
+                return 0;
+            }
+            if (json[i + 1U] == '0' && json[i + 2U] == '0' &&
+                json[i + 3U] == '0' && json[i + 4U] == '0') {
+                if (bad_offset) *bad_offset = i - 1U;
+                return 0;
+            }
+            i += 4U;
+        }
+    }
+    return 1;
+}
+
+/*
  * 对象通常只有少量字段，直接两两比较比额外哈希表更省代码和堆。
  * 同时递归检查数组/对象中的所有子对象，深度由 CJSON_NESTING_LIMIT 限制。
  */
@@ -160,6 +213,10 @@ pc_json_result_t pc_json_parse_object(const uint8_t *json,
     if (!utf8_is_valid(json, json_length, &offset)) {
         if (error_offset) *error_offset = offset;
         return PC_JSON_ERROR_UTF8;
+    }
+    if (!json_string_lexemes_are_safe(json, json_length, &offset)) {
+        if (error_offset) *error_offset = offset;
+        return PC_JSON_ERROR_SYNTAX;
     }
 
     /*
