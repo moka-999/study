@@ -1,12 +1,6 @@
-# 构建产物
+# 仅忽略B构建产物；源码和OTA记录必须可跟踪。
 build/
 build_debug/
-build_pwr_wave/
-build_led_wave/
-build_flash_self_test/
-build_driver_mock/
-build_ad_wave/
-build_pc_net_test/
 *.o
 *.a
 *.elf
@@ -14,21 +8,6 @@ build_pc_net_test/
 *.hex
 *.map
 *.lst
-
-# CubeMX 生成缓存
-mx.scratch
-.mxproject
-
-# IDE / 工具缓存
-.clangd
+.clangd/
 .vscode/
-.settings/
-
-# 参考资料 / 临时文件（下划线前缀, 根目录）
-/_*
-
-# 二进制大文件 / 图片
-*.zip
-*.bmp
-*.png
-*.svg
+__pycache__/

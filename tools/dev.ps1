@@ -1,154 +1,76 @@
 ﻿param(
-    [ValidateSet('build', 'rebuild', 'style-test', 'protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build')]
-    [string]$Task = 'build'
+    [ValidateSet('build', 'rebuild', 'ota-test', 'ota-pack')]
+    [string]$Task = 'build',
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Debug',
+    [ValidateSet('apollo-v2', 'b1')]
+    [string]$Board = 'apollo-v2',
+    [ValidateSet('None', 'A1', 'A2')]
+    [string]$ProbeSlot = 'None',
+    [string]$AppBuild = '',
+    [string]$Qemu = 'D:\qemu\qemu-system-arm.exe'
 )
 
 $ErrorActionPreference = 'Stop'
-# 本文件保留UTF-8 BOM，避免Windows PowerShell 5按本地编码误读中文注释。
-$repo = Split-Path -Parent $PSScriptRoot
-$buildDirName = if ($Task -eq 'pwr-wave-build') {
-    'build_pwr_wave'
-} elseif ($Task -eq 'led-wave-build') {
-    'build_led_wave'
-} elseif ($Task -eq 'flash-self-test-build') {
-    'build_flash_self_test'
-} elseif ($Task -eq 'driver-mock-build') {
-    'build_driver_mock'
-} elseif ($Task -eq 'ad-wave-build') {
-    'build_ad_wave'
-} elseif ($Task -eq 'pc-net-test-build') {
-    'build_pc_net_test'
-} else {
-    'build_debug'
-}
-$buildDir = Join-Path $repo $buildDirName
+$bootRoot = Split-Path -Parent $PSScriptRoot
 
+# 复用已安装的STM32Cube工具链，不安装新依赖、不访问烧录器。
 function Find-BundledExe([string]$bundle, [string]$exe) {
-    $root = Join-Path $env:LOCALAPPDATA "stm32cube\bundles\$bundle"
-    # STM32Cube bundle 的标准结构是 <版本>/bin/<exe>，先走确定路径，避免
-    # 对带完整文档的 CMake 目录做数十秒递归扫描。
-    $versionDirs = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
-        Sort-Object Name -Descending
-    if ($versionDirs) {
-        # 交给实际启动报告“文件不存在”；某些受限终端会让 Test-Path 对可执行
-        # 文件偶发返回 False，不能因此把已安装工具误判为缺失。
-        return Join-Path $versionDirs[0].FullName "bin\$exe"
-    }
-
-    # 兼容少数不遵循标准目录结构的旧 bundle。
-    Get-ChildItem -LiteralPath $root -Filter $exe -File -Recurse -ErrorAction SilentlyContinue |
-        Sort-Object FullName -Descending |
-        Select-Object -First 1 -ExpandProperty FullName
+    $bundleRoot = Join-Path $env:LOCALAPPDATA "stm32cube\bundles\$bundle"
+    $versionDir = Get-ChildItem -LiteralPath $bundleRoot -Directory |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $versionDir) { throw "STM32Cube bundle not found: $bundle" }
+    return Join-Path $versionDir.FullName "bin\$exe"
 }
 
-function Find-Python {
-    $cmd = Get-Command python.exe -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
+$compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe'
+$cmake = Find-BundledExe 'cmake' 'cmake.exe'
+$ninja = Find-BundledExe 'ninja' 'ninja.exe'
+$env:PATH = (Split-Path -Parent $compiler) + ';' + $env:PATH
 
-    $codexPython = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
-    if (Test-Path -LiteralPath $codexPython) { return $codexPython }
-
-    throw 'Python not found. Install Python 3 or add python.exe to PATH.'
-}
-
-if ($Task -eq 'style-test') {
-    $python = Find-Python
-    & $python -B -X utf8 (Join-Path $repo 'tests\verify_code_boundaries.py')
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-    # 不提供HAL/FreeRTOS/cJSON搜索路径，验证纯接口头不泄漏实现依赖。
-    $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe'
-    if (-not $compiler) { throw 'STM32Cube GCC not found.' }
-    & $compiler -std=c11 -Wall -Wextra -Werror -fsyntax-only `
-        "-I$repo\HAL_Drv" "-I$repo\App\protocol\pc" `
-        (Join-Path $repo 'tests\c\portable_headers.c')
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    Write-Output 'Portable headers: GCC syntax check PASS (no HAL/RTOS/cJSON headers)'
-    exit 0
-}
-
-if ($Task -eq 'protocol-test' -or $Task -eq 'pc-protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'lpddr-test' -or $Task -eq 'boot-test' -or
-    $Task -eq 'led-test' -or $Task -eq 'flash-test') {
-    $python = Find-Python
-    $script = if ($Task -eq 'pc-protocol-test') {
-        'tests\verify_pc_protocol.py'
-    } elseif ($Task -eq 'boot-test') {
-        'tests\test_boot_mode.py'
-    } elseif ($Task -eq 'lpddr-test') {
-        'tests\verify_lpddr_power.py'
-    } elseif ($Task -eq 'pwr-test') {
-        'tests\verify_pwr_ctrl.py'
-    } elseif ($Task -eq 'led-test') {
-        'tests\verify_result_led.py'
-    } elseif ($Task -eq 'flash-test') {
-        'tests\test_version.py'
+# 测试与打包仍使用原GNU工具链；Python/QEMU只在PC离线运行，不连SWD。
+if ($Task -eq 'ota-test' -or $Task -eq 'ota-pack') {
+    if ($ProbeSlot -ne 'None') { throw 'ProbeSlot is only valid for build/rebuild' }
+    $python = (Get-Command python.exe -ErrorAction Stop).Source
+    if ($Task -eq 'ota-pack') {
+        if (-not $AppBuild) { throw 'ota-pack requires -AppBuild pointing to verified A1 build' }
+        $appName = if ($Board -eq 'b1') { 'b1' } else { 'test' }
+        & $python -X utf8 (Join-Path $bootRoot 'tools\pack_ota.py') --app-build $AppBuild --compiler $compiler --app-name $appName
     } else {
-        'tests\verify_protocol_v2.py'
+        $testArgs = @('-X', 'utf8', (Join-Path $bootRoot 'tests\verify_ota_install.py'),
+            '--compiler', $compiler, '--cmake', $cmake, '--ninja', $ninja,
+            '--configuration', $Configuration, '--qemu', $Qemu)
+        if ($AppBuild) { $testArgs += @('--app-build', $AppBuild) }
+        & $python @testArgs
     }
-    & $python -B -X utf8 (Join-Path $repo $script)
     exit $LASTEXITCODE
 }
+$buildName = $Configuration
+if ($Board -eq 'b1') { $buildName += '-b1' }
+if ($ProbeSlot -ne 'None') { $buildName += "-$ProbeSlot" }
+$bootBuild = Join-Path $bootRoot "build\$buildName"
+$probe = if ($ProbeSlot -eq 'None') { 'OFF' } else { 'ON' }
+$appBase = if ($ProbeSlot -eq 'A2') { '0x08100000' } else { '0x08020000' }
 
-$ninja = $null
-$cache = Join-Path $buildDir 'CMakeCache.txt'
-if (Test-Path -LiteralPath $cache) {
-    # 首次由命令行指定 Ninja 时，CMake 可能把类型记为 UNINITIALIZED；
-    # 两种缓存类型都应复用，避免受当前 PowerShell PATH 或沙箱可见性影响。
-    $line = Select-String -LiteralPath $cache -Pattern '^CMAKE_MAKE_PROGRAM:(?:FILEPATH|UNINITIALIZED)=(.+)$' | Select-Object -First 1
-    if ($line) { $ninja = $line.Matches[0].Groups[1].Value }
-}
-if (-not $ninja) {
-    $ninja = Find-BundledExe 'ninja' 'ninja.exe'
-}
-# A restricted shell may not enumerate the STM32Cube bundle directory.
-# Reuse the absolute tool path from the configured production build cache.
-if (-not $ninja) {
-    $referenceCache = Join-Path $repo 'build_debug\CMakeCache.txt'
-    if (Test-Path -LiteralPath $referenceCache) {
-        $line = Select-String -LiteralPath $referenceCache -Pattern '^CMAKE_MAKE_PROGRAM:(?:FILEPATH|UNINITIALIZED)=(.+)$' | Select-Object -First 1
-        if ($line) { $ninja = $line.Matches[0].Groups[1].Value }
-    }
-}
-if (-not $ninja) { throw 'STM32Cube Ninja not found.' }
-
-# 每次正式构建都快速重新配置一次，用当前UTC时间刷新固件版本元数据。
-# 版本宏只属于 flash_layout.c，因此通常只重编译该文件并重新链接。
-$cmake = Find-BundledExe 'cmake' 'cmake.exe'
-if (-not $cmake) {
-    $referenceCache = Join-Path $repo 'build_debug\CMakeCache.txt'
-    if (Test-Path -LiteralPath $referenceCache) {
-        $line = Select-String -LiteralPath $referenceCache -Pattern '^CMAKE_COMMAND:INTERNAL=(.+)$' | Select-Object -First 1
-        if ($line) { $cmake = $line.Matches[0].Groups[1].Value }
-    }
-}
-if (-not $cmake) { throw 'STM32Cube CMake not found.' }
-$pwrWaveOption = if ($Task -eq 'pwr-wave-build') { '-DENABLE_PWR_WAVE_TEST=ON' } else { '-DENABLE_PWR_WAVE_TEST=OFF' }
-$ledWaveOption = if ($Task -eq 'led-wave-build') { '-DENABLE_RESULT_LED_WAVE_TEST=ON' } else { '-DENABLE_RESULT_LED_WAVE_TEST=OFF' }
-$flashSelfTestOption = if ($Task -eq 'flash-self-test-build') { '-DENABLE_FLASH_SELF_TEST=ON' } else { '-DENABLE_FLASH_SELF_TEST=OFF' }
-$driverMockOption = if ($Task -eq 'driver-mock-build') { '-DENABLE_DRIVER_MOCK_TEST=ON' } else { '-DENABLE_DRIVER_MOCK_TEST=OFF' }
-$adWaveOption = if ($Task -eq 'ad-wave-build') { '-DENABLE_AD7124_WAVE_TEST=ON' } else { '-DENABLE_AD7124_WAVE_TEST=OFF' }
-$pcNetTestOption = if ($Task -eq 'pc-net-test-build') { '-DENABLE_PC_PROTOCOL_NET_TEST=ON' } else { '-DENABLE_PC_PROTOCOL_NET_TEST=OFF' }
-$cmakeArgs = @(
-    '-S', $repo, '-B', $buildDir, '-G', 'Ninja',
-    '-DCMAKE_BUILD_TYPE=Debug',
-    "-DCMAKE_MAKE_PROGRAM=$ninja",
-    $pwrWaveOption,
-    $ledWaveOption,
-    $flashSelfTestOption
-    $driverMockOption
-    $adWaveOption
-    $pcNetTestOption
-)
-if (-not (Test-Path -LiteralPath $cache)) {
-    $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake"
-}
-& $cmake @cmakeArgs
+& $cmake -S $bootRoot -B $bootBuild -G Ninja "-DCMAKE_BUILD_TYPE=$Configuration" `
+    "-DCMAKE_TOOLCHAIN_FILE=$bootRoot\cmake\gcc-arm-none-eabi.cmake" `
+    "-DCMAKE_MAKE_PROGRAM=$ninja" "-DENABLE_OTA_RELOCATION_PROBE=$probe" `
+    "-DOTA_APP_BASE=$appBase" "-DBOOT_BOARD=$Board"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$buildArgs = @('--build', $bootBuild)
+if ($Task -eq 'rebuild') { $buildArgs += '--clean-first' }
+& $cmake @buildArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-if ($Task -eq 'rebuild') {
-    & $ninja -C $buildDir -t clean
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+# 最小产物回归：B必须位于128 KiB以内，初始栈和Thumb入口必须与链接布局相符。
+# 这里只检查生成的B镜像，不代表B已具备对外部升级包的完整安全校验。
+$bootBytes = [IO.File]::ReadAllBytes((Join-Path $bootBuild 'boot.bin'))
+if ($bootBytes.Length -lt 8 -or $bootBytes.Length -gt 131072) { throw 'Invalid B image size' }
+$bootSp = [BitConverter]::ToUInt32($bootBytes, 0)
+$bootEntry = [BitConverter]::ToUInt32($bootBytes, 4)
+if ($bootSp -ne 0x20020000 -or ($bootEntry -band 1) -ne 1 -or
+    ($bootEntry - 1) -lt 0x08000008 -or
+    ($bootEntry - 1) -ge (0x08000000 + $bootBytes.Length)) {
+    throw 'Invalid B reset vector'
 }
-
-& $ninja -C $buildDir
-exit $LASTEXITCODE
+Write-Output "PASS: $bootBuild\boot.elf / boot.bin; B vector and size checked. No flashing."

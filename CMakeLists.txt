@@ -1,238 +1,120 @@
 cmake_minimum_required(VERSION 3.22)
+project(bootloader LANGUAGES C ASM)
 
-#
-# This file is generated only once,
-# and is not re-generated if converter is called multiple times.
-#
-# User is free to modify the file as much as necessary
-#
-
-# Setup compiler settings
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS ON)
-
-
-# Define the build type
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Debug")
+# 同一安装核心，按板型生成独立B；B1复位先关RK/DDR，包身份不能由PC指定。
+set(BOOT_BOARD "apollo-v2" CACHE STRING "Boot board: apollo-v2 or b1")
+set_property(CACHE BOOT_BOARD PROPERTY STRINGS apollo-v2 b1)
+if(NOT BOOT_BOARD STREQUAL "apollo-v2" AND NOT BOOT_BOARD STREQUAL "b1")
+    message(FATAL_ERROR "Unknown BOOT_BOARD")
 endif()
 
-# Set the project name
-set(CMAKE_PROJECT_NAME test)
-
-# 仅用于阿波罗 V2 逻辑分析仪验收；默认关闭，正式镜像绝不跳过 DDR 器件访问。
-option(ENABLE_PWR_WAVE_TEST "Build Apollo V2 pwr_ctrl waveform image" OFF)
-
-# 仅用于阿波罗 V2 六路结果灯逻辑分析仪验收；正式镜像默认关闭。
-option(ENABLE_RESULT_LED_WAVE_TEST "Build Apollo V2 result LED waveform image" OFF)
-
-# 仅用于阿波罗 V2 板载 W25Q256；所有破坏性访问限制在末尾 64 KiB。
-option(ENABLE_FLASH_SELF_TEST "Build isolated Apollo V2 W25Q256 self-test image" OFF)
-
-# 无外接TPS/PAC/AD/MCP器件时，运行正式驱动源码的事务级Mock验收镜像。
-option(ENABLE_DRIVER_MOCK_TEST "Build isolated TPS/PAC/AD/MCP mock self-test image" OFF)
-
-# 仅用于阿波罗 V2 实脚 SPI2 波形验收；循环输出 AD7124 典型事务。
-option(ENABLE_AD7124_WAVE_TEST "Build isolated Apollo V2 AD7124 SPI waveform image" OFF)
-
-# 仅用于阿波罗 V2 真实以太网验收PC固定头+cJSON；合法帧原样回显，不定义业务语义。
-option(ENABLE_PC_PROTOCOL_NET_TEST "Build isolated PC protocol TCP echo test image" OFF)
-
-# 固件身份由构建系统统一提供，禁止在 C 源文件中散落手写版本字符串。
-set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
-set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
-set(FIRMWARE_VERSION_PATCH 0 CACHE STRING "Firmware semantic version patch")
-
-# Enable compile command to ease indexing with e.g. clangd
-set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
-
-# Core project settings
-project(${CMAKE_PROJECT_NAME})
-message("Build type: " ${CMAKE_BUILD_TYPE})
-
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
-# 版本字符串使用配置时刻。重新配置即可刷新；打包清单与固件共用该值。
-string(TIMESTAMP FIRMWARE_BUILD_TIME_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
-
-# Enable CMake support for ASM and C languages
-enable_language(C ASM)
-
-# Create an executable object type
-add_executable(${CMAKE_PROJECT_NAME})
-
-# Add STM32CubeMX generated sources
-add_subdirectory(cmake/stm32cubemx)
-
-# Link directories setup
-target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined library search paths
-)
-
-# Add sources to executable
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/uart_router.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/board_identity.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/uart_hw.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/i2c_hw.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/memory_monitor.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/bsp_gpio.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/ddr_power.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/pwr_ctrl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/pwm_hw.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/qspi_hw.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/spi_hw.c
-    # PC-MCU 与 MCU-RK 是两套独立协议，源码目录必须保持物理隔离。
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_dispatch.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_protocol.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_state_machine.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_test_message.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_tester_info.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/crc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/dispatch.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/frame.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/state_machine.c
-    # 正式任务按通信对象分区，纯验证任务统一放test目录。
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pc/tcp_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/hb_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_link.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/led_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/monitor_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/pwr_wave_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/result_led_wave_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/qspi_test.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/test_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/AD7124/ad7124.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_bsp.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_layout.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/IIC/myiic.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/LED/led.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/MCP4725/mcp4725.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PCF8574/pcf8574.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PAC1934/pac1934.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/TPS62868/tps62868.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/WDT/wdt.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/cJSON/cJSON.c
-)
-
-# Mock任务体只进入隔离测试镜像，正式固件不编译测试代码。
-if(ENABLE_DRIVER_MOCK_TEST)
-    target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/driver_mock_test.c
-    )
-endif()
-
-# 实脚SPI波形任务同样只进入专用镜像，正式固件不携带测试入口。
-if(ENABLE_AD7124_WAVE_TEST)
-    target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/ad7124_wave_task.c
-    )
-endif()
-
-# Add include paths
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined include paths
-    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pc
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/AD7124
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/IIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/LED
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/MCP4725
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PCF8574
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PAC1934
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/TPS62868
-    ${CMAKE_CURRENT_SOURCE_DIR}/BSP/WDT
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/cJSON
-)
-
-# Add project symbols (macros)
-target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined symbols
-    $<$<BOOL:${ENABLE_PWR_WAVE_TEST}>:ENABLE_PWR_WAVE_TEST=1>
-    $<$<BOOL:${ENABLE_RESULT_LED_WAVE_TEST}>:ENABLE_RESULT_LED_WAVE_TEST=1>
-    $<$<BOOL:${ENABLE_FLASH_SELF_TEST}>:ENABLE_FLASH_SELF_TEST=1>
-    $<$<BOOL:${ENABLE_DRIVER_MOCK_TEST}>:ENABLE_DRIVER_MOCK_TEST=1>
-    $<$<BOOL:${ENABLE_AD7124_WAVE_TEST}>:ENABLE_AD7124_WAVE_TEST=1>
-    $<$<BOOL:${ENABLE_PC_PROTOCOL_NET_TEST}>:ENABLE_PC_PROTOCOL_NET_TEST=1>
-    # MCU 接收的 JSON 只承载扁平业务对象，限制递归深度可抵御畸形嵌套输入。
-    CJSON_NESTING_LIMIT=16
-)
-
-# 版本宏只影响 flash_layout.c，刷新构建时间时无需重编译整个固件。
-set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_layout.c
-    APPEND PROPERTY COMPILE_DEFINITIONS
-    FIRMWARE_VERSION_MAJOR=${FIRMWARE_VERSION_MAJOR}
-    FIRMWARE_VERSION_MINOR=${FIRMWARE_VERSION_MINOR}
-    FIRMWARE_VERSION_PATCH=${FIRMWARE_VERSION_PATCH}
-    FIRMWARE_BUILD_TIME_UTC="${FIRMWARE_BUILD_TIME_UTC}"
-    FIRMWARE_BUILD_ID="${CMAKE_BUILD_TYPE}"
-    FIRMWARE_TARGET="apollo-v2-h743"
-)
-
-# Remove wrong libob.a library dependency when using cpp files
-list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
-
-# Add linked libraries
-target_link_libraries(${CMAKE_PROJECT_NAME}
-    stm32cubemx
-
-    # Add user defined libraries
-)
-
-# 生成精确的裸镜像、CRC32清单和76字节版本载荷；不向固件中加入OTA行为。
-add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -O binary
-            $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
-            ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_firmware_manifest.py
-            --image ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin
-            --json ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.manifest.json
-            --version-payload ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.version.bin
-            --version "${FIRMWARE_VERSION_MAJOR}.${FIRMWARE_VERSION_MINOR}.${FIRMWARE_VERSION_PATCH}"
-            --build-time "${FIRMWARE_BUILD_TIME_UTC}"
-            --build-id "${CMAKE_BUILD_TYPE}"
-            --target "apollo-v2-h743"
-    COMMENT "Generating firmware binary, CRC32 manifest and W25Q256 version payload"
-    VERBATIM
-)
-
-# ===================================================================
-# Bootloader — 最小跳转 (0x08000000, 128KB)
-# 烧录顺序: boot.elf 先, test.elf 后
-# 用显式命令构建, 绕开 CMake executable 规则 (全局 -T/编译flags 会泄漏)
-# ===================================================================
-set(BOOT_OBJ ${CMAKE_BINARY_DIR}/boot.s.o)
-set(BOOT_ELF ${CMAKE_BINARY_DIR}/boot.elf)
+# B工程不携带App、FreeRTOS、LwIP或测试仪业务。
+option(ENABLE_OTA_RELOCATION_PROBE "Build fixed-slot startup probe, not OTA installer" OFF)
+set(OTA_APP_BASE "0x08020000" CACHE STRING "App address for isolated startup probe")
 set(BOOT_FLAGS -mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-d16)
+if(ENABLE_OTA_RELOCATION_PROBE)
+    if(BOOT_BOARD STREQUAL "b1")
+        message(FATAL_ERROR "B1 uses full safe-off Boot, not V2 fixed-slot probe")
+    endif()
+    if(NOT OTA_APP_BASE MATCHES "^(0x08020000|0x08100000)$")
+        message(FATAL_ERROR "Startup probe only supports A1 or A2")
+    endif()
+    list(APPEND BOOT_FLAGS -DOTA_BOOT_APP_BASE=${OTA_APP_BASE})
+endif()
 
+# 显式沿用原GNU汇编/链接参数，避免App的链接偏移与第三方库泄漏到B。
+set(BOOT_ELF ${CMAKE_BINARY_DIR}/boot.elf)
+set(BOOT_BIN ${CMAKE_BINARY_DIR}/boot.bin)
+set(BOOT_OBJ ${CMAKE_BINARY_DIR}/boot.s.o)
+if(ENABLE_OTA_RELOCATION_PROBE)
 add_custom_command(
-    OUTPUT ${BOOT_OBJ}
+    OUTPUT ${BOOT_ELF} ${BOOT_BIN}
     COMMAND ${CMAKE_C_COMPILER} ${BOOT_FLAGS} -x assembler-with-cpp
             -c ${CMAKE_CURRENT_SOURCE_DIR}/boot/boot.s -o ${BOOT_OBJ}
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/boot/boot.s
-    COMMENT "Assembling boot/boot.s"
-    VERBATIM
-)
-
-add_custom_command(
-    OUTPUT ${BOOT_ELF}
-    COMMAND ${CMAKE_C_COMPILER} ${BOOT_FLAGS}
-            -nostartfiles -nostdlib
+    COMMAND ${CMAKE_C_COMPILER} ${BOOT_FLAGS} -nostartfiles -nostdlib
             -T ${CMAKE_CURRENT_SOURCE_DIR}/boot/STM32H743_boot.ld
+            -Wl,-Map=${CMAKE_BINARY_DIR}/boot.map
             ${BOOT_OBJ} -o ${BOOT_ELF}
-    DEPENDS ${BOOT_OBJ} ${CMAKE_CURRENT_SOURCE_DIR}/boot/STM32H743_boot.ld
-    COMMENT "Linking boot.elf"
+    COMMAND ${CMAKE_OBJCOPY} -O binary ${BOOT_ELF} ${BOOT_BIN}
+    COMMAND ${CMAKE_SIZE} ${BOOT_ELF}
+    DEPENDS boot/boot.s boot/STM32H743_boot.ld
+    BYPRODUCTS ${BOOT_OBJ} ${CMAKE_BINARY_DIR}/boot.map
+    COMMENT "Building standalone B image"
     VERBATIM
 )
+add_custom_target(boot_probe DEPENDS ${BOOT_ELF} ${BOOT_BIN})
+endif()
 
-add_custom_target(boot ALL DEPENDS ${BOOT_ELF})
+# 安装、日志及健康判定保持独立编译，正式B和离线测试使用相同源码。
+add_library(ota_core STATIC boot/ota_install.c boot/boot_record.c boot/boot_health.c)
+target_include_directories(ota_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/boot)
+target_compile_features(ota_core PUBLIC c_std_11)
+target_compile_options(ota_core PRIVATE ${BOOT_FLAGS} -Wall -Wextra -Wconversion
+    -Wshadow -Werror -ffunction-sections -fdata-sections -fstack-usage)
+
+# 正式B使用独立C启动、持久化日志、受限NOR/内部Flash端口；固定槽探针单独保留。
+if(ENABLE_OTA_RELOCATION_PROBE)
+    add_custom_target(boot ALL DEPENDS boot_probe)
+else()
+    add_executable(boot boot/startup.s boot/boot_main.c boot/boot_port.c)
+    if(BOOT_BOARD STREQUAL "b1")
+        target_compile_definitions(boot PRIVATE BOOT_BOARD_B1=1)
+    endif()
+    set_source_files_properties(boot/startup.s PROPERTIES COMPILE_OPTIONS "-x;assembler-with-cpp")
+    target_include_directories(boot PRIVATE vendor/cmsis vendor/stm32)
+    target_link_libraries(boot PRIVATE ota_core c gcc)
+    target_compile_options(boot PRIVATE ${BOOT_FLAGS} -Wall -Wextra -Wshadow -Werror
+        -ffunction-sections -fdata-sections -fstack-usage)
+    target_link_options(boot PRIVATE ${BOOT_FLAGS} -nostartfiles --specs=nosys.specs
+        -T${CMAKE_CURRENT_SOURCE_DIR}/boot/STM32H743_ota.ld -Wl,--gc-sections
+        -Wl,-Map=${CMAKE_BINARY_DIR}/boot.map)
+    set_target_properties(boot PROPERTIES SUFFIX ".elf"
+        LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/boot/STM32H743_ota.ld)
+    add_custom_command(TARGET boot POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:boot> ${BOOT_BIN}
+        COMMAND ${CMAKE_SIZE} $<TARGET_FILE:boot>)
+endif()
+
+# 只在显式离线测试构建启用；MPS2测试ELF不是可烧录的STM32镜像。
+option(ENABLE_BOOT_RAM_AGENT "Build explicit SWD-only RAM backup/deployment helper" OFF)
+if(ENABLE_BOOT_RAM_AGENT)
+    add_executable(boot_ram_agent boot/startup.s boot/boot_port.c tests/ram_agent.c)
+    target_include_directories(boot_ram_agent PRIVATE vendor/cmsis vendor/stm32)
+    target_compile_definitions(boot_ram_agent PRIVATE BOOT_RAM_AGENT=1)
+    if(BOOT_BOARD STREQUAL "b1")
+        target_compile_definitions(boot_ram_agent PRIVATE BOOT_BOARD_B1=1)
+    endif()
+    target_compile_options(boot_ram_agent PRIVATE ${BOOT_FLAGS} -Wall -Wextra -Werror -ffunction-sections -fdata-sections)
+    target_link_libraries(boot_ram_agent PRIVATE ota_core c gcc)
+    target_link_options(boot_ram_agent PRIVATE ${BOOT_FLAGS} -nostartfiles --specs=nosys.specs
+        -T${CMAKE_CURRENT_SOURCE_DIR}/tests/ram_agent.ld -Wl,--gc-sections)
+    set_target_properties(boot_ram_agent PROPERTIES SUFFIX ".elf" LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/ram_agent.ld)
+endif()
+
+option(ENABLE_OTA_CORE_TEST "Build offline Cortex-M7 installer tests" OFF)
+if(ENABLE_OTA_CORE_TEST)
+    foreach(manager IN ITEMS boot_main_test boot_main_b1_test)
+        add_executable(${manager} tests/test_boot_main.c boot/boot_main.c tests/qemu_start.s)
+        target_link_libraries(${manager} PRIVATE ota_core c gcc)
+        target_compile_options(${manager} PRIVATE ${BOOT_FLAGS} -Wall -Wextra -Werror)
+        target_link_options(${manager} PRIVATE ${BOOT_FLAGS} -nostartfiles --specs=nosys.specs
+            -T${CMAKE_CURRENT_SOURCE_DIR}/tests/qemu_test.ld -Wl,--gc-sections)
+        set_target_properties(${manager} PROPERTIES SUFFIX ".elf")
+    endforeach()
+    target_compile_definitions(boot_main_b1_test PRIVATE BOOT_BOARD_B1=1)
+    add_executable(boot_record_test tests/test_boot_record.c tests/qemu_start.s)
+    target_link_libraries(boot_record_test PRIVATE ota_core c gcc)
+    target_compile_options(boot_record_test PRIVATE ${BOOT_FLAGS} -Wall -Wextra -Werror)
+    target_link_options(boot_record_test PRIVATE ${BOOT_FLAGS} -nostartfiles --specs=nosys.specs
+        -T${CMAKE_CURRENT_SOURCE_DIR}/tests/qemu_test.ld -Wl,--gc-sections)
+    set_target_properties(boot_record_test PROPERTIES SUFFIX ".elf")
+    add_executable(ota_core_test tests/test_ota_install.c tests/qemu_start.s)
+    target_link_libraries(ota_core_test PRIVATE ota_core c gcc)
+    target_compile_options(ota_core_test PRIVATE ${BOOT_FLAGS} -Wall -Wextra -Werror
+        -ffunction-sections -fdata-sections)
+    target_link_options(ota_core_test PRIVATE ${BOOT_FLAGS} -nostartfiles --specs=nosys.specs
+        -T${CMAKE_CURRENT_SOURCE_DIR}/tests/qemu_test.ld -Wl,--gc-sections
+        -Wl,-Map=${CMAKE_BINARY_DIR}/ota_core_test.map)
+    set_target_properties(ota_core_test PROPERTIES SUFFIX ".elf"
+        LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/qemu_test.ld)
+endif()

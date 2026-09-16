@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "embedded-docs": {
-      "command": "d:\\pro\\test\\tools\\mcp_serve.bat",
-      "args": []
-    }
-  }
-}
