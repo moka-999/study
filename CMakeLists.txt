@@ -1,25 +1,31 @@
 cmake_minimum_required(VERSION 3.22)
 
 #
-# This file is generated only once,
-# and is not re-generated if converter is called multiple times.
+# 此文件仅首次生成，
+# 后续运行转换器不会重新覆盖。
 #
-# User is free to modify the file as much as necessary
+# 自定义源文件和构建配置统一在此维护。
 #
 
-# Setup compiler settings
+# 配置C语言标准。
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
 
-# Define the build type
+# 未明确指定时使用调试构建。
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Debug")
 endif()
 
-# Set the project name
+# App工程及默认产物名称。
 set(CMAKE_PROJECT_NAME test)
+
+# App地址修正实验属于App工程，不把FreeRTOS/LwIP等源码复制进独立B工程。
+# 默认关闭；实验镜像不是已实现下载/回滚的正式OTA镜像。
+option(ENABLE_OTA_RELOCATION_PROBE "Build isolated App relocation probe" OFF)
+option(ENABLE_OTA_BOOT "Require B journal and healthy-start confirmation" OFF)
+set(OTA_APP_BASE "0x08020000" CACHE STRING "OTA probe slot address")
 
 # 仅用于阿波罗 V2 逻辑分析仪验收；默认关闭，正式镜像绝不跳过 DDR 器件访问。
 option(ENABLE_PWR_WAVE_TEST "Build Apollo V2 pwr_ctrl waveform image" OFF)
@@ -36,18 +42,18 @@ option(ENABLE_DRIVER_MOCK_TEST "Build isolated TPS/PAC/AD/MCP mock self-test ima
 # 仅用于阿波罗 V2 实脚 SPI2 波形验收；循环输出 AD7124 典型事务。
 option(ENABLE_AD7124_WAVE_TEST "Build isolated Apollo V2 AD7124 SPI waveform image" OFF)
 
-# 仅用于阿波罗 V2 真实以太网验收PC固定头+cJSON；合法帧原样回显，不定义业务语义。
-option(ENABLE_PC_PROTOCOL_NET_TEST "Build isolated PC protocol TCP echo test image" OFF)
+# 阿波罗 V2 PC业务网络验收；沿用正式分发，隔离RK任务。
+option(ENABLE_PC_PROTOCOL_NET_TEST "Build isolated PC protocol TCP business test image" OFF)
 
 # 固件身份由构建系统统一提供，禁止在 C 源文件中散落手写版本字符串。
 set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
 set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
 set(FIRMWARE_VERSION_PATCH 0 CACHE STRING "Firmware semantic version patch")
 
-# Enable compile command to ease indexing with e.g. clangd
+# 导出编译命令，供clangd等索引工具使用。
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
-# Core project settings
+# 初始化工程与工具链。
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
@@ -56,23 +62,27 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 # 版本字符串使用配置时刻。重新配置即可刷新；打包清单与固件共用该值。
 string(TIMESTAMP FIRMWARE_BUILD_TIME_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
 
-# Enable CMake support for ASM and C languages
+# 启用汇编和C语言编译。
 enable_language(C ASM)
 
-# Create an executable object type
+# 创建App可执行目标。
 add_executable(${CMAKE_PROJECT_NAME})
 
-# Add STM32CubeMX generated sources
+# 引入CubeMX生成的外设及第三方库目标。
 add_subdirectory(cmake/stm32cubemx)
 
-# Link directories setup
+if(ENABLE_OTA_RELOCATION_PROBE)
+    target_compile_definitions(STM32_Drivers PRIVATE OTA_RELOCATION_PROBE=1)
+endif()
+
+# 自定义库目录；没有额外目录时保持空列表。
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined library search paths
+    # 需要额外库搜索目录时在此补充。
 )
 
-# Add sources to executable
+# 将自定义源文件加入App目标。
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
+    # 项目自有源文件。
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/uart_router.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/board_identity.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/uart_hw.c
@@ -86,6 +96,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/spi_hw.c
     # PC-MCU 与 MCU-RK 是两套独立协议，源码目录必须保持物理隔离。
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_dispatch.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_ota.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_protocol.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_state_machine.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_test_message.c
@@ -110,6 +121,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_layout.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/IIC/myiic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/LED/led.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/result_led.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/MCP4725/mcp4725.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PCF8574/pcf8574.c
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/PAC1934/pac1934.c
@@ -117,6 +129,17 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/WDT/wdt.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/cJSON/cJSON.c
 )
+
+if(ENABLE_OTA_BOOT)
+    if(NOT ENABLE_OTA_RELOCATION_PROBE OR ENABLE_PC_PROTOCOL_NET_TEST OR ENABLE_FLASH_SELF_TEST OR
+       ENABLE_DRIVER_MOCK_TEST OR ENABLE_AD7124_WAVE_TEST OR ENABLE_DRIVER_SELF_TEST OR
+       ENABLE_PWR_WAVE_TEST OR ENABLE_RESULT_LED_WAVE_TEST)
+        message(FATAL_ERROR "OTA App requires slot-limited build and all normal critical tasks")
+    endif()
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE App/ota/ota_app.c App/ota/ota_install.c
+        App/ota/boot_record.c App/ota/boot_health.c)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ENABLE_OTA_BOOT=1)
+endif()
 
 # Mock任务体只进入隔离测试镜像，正式固件不编译测试代码。
 if(ENABLE_DRIVER_MOCK_TEST)
@@ -132,10 +155,11 @@ if(ENABLE_AD7124_WAVE_TEST)
     )
 endif()
 
-# Add include paths
+# 配置自定义头文件搜索目录。
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined include paths
+    # 自定义模块头文件目录。
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/ota
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pc
@@ -154,9 +178,15 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/cJSON
 )
 
-# Add project symbols (macros)
+# 配置项目编译宏。
+# 正式/网络镜像使用V2六路排针模拟结果灯；隔离自检及波形镜像保留各自GPIO归属。
+if(NOT (ENABLE_PWR_WAVE_TEST OR ENABLE_RESULT_LED_WAVE_TEST OR
+        ENABLE_FLASH_SELF_TEST OR ENABLE_DRIVER_MOCK_TEST OR ENABLE_AD7124_WAVE_TEST))
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ENABLE_V2_RESULT_LED=1)
+endif()
+
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined symbols
+    # 各隔离验证功能的编译开关。
     $<$<BOOL:${ENABLE_PWR_WAVE_TEST}>:ENABLE_PWR_WAVE_TEST=1>
     $<$<BOOL:${ENABLE_RESULT_LED_WAVE_TEST}>:ENABLE_RESULT_LED_WAVE_TEST=1>
     $<$<BOOL:${ENABLE_FLASH_SELF_TEST}>:ENABLE_FLASH_SELF_TEST=1>
@@ -178,14 +208,14 @@ set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/BSP/Flash/flash_layout.c
     FIRMWARE_TARGET="apollo-v2-h743"
 )
 
-# Remove wrong libob.a library dependency when using cpp files
+# 移除工具链可能误检出的ob库依赖。
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 
-# Add linked libraries
+# 连接生成层目标及其传递依赖。
 target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 
-    # Add user defined libraries
+    # 需要额外库时在此补充。
 )
 
 # 生成精确的裸镜像、CRC32清单和76字节版本载荷；不向固件中加入OTA行为。

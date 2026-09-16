@@ -85,9 +85,9 @@ void StartAd7124WaveTask(void *argument)
         (void)ad7124_set_mode(&adc, AD7124_MODE_IDLE);
         vTaskDelay(pdMS_TO_TICKS(AD_WAVE_TRANSACTION_GAP_MS));
 
-        /* 配置CH0：MOSI应为09 80 11（AIN0相对AVSS，使用SETUP0）。 */
+        /* 配置CH0：MOSI应为09 80 01（原理图AIN0-AIN1，使用SETUP0）。 */
         (void)ad7124_config_channel(&adc, 0U, 1U, 0U,
-                                    AD7124_AIN_AIN0, AD7124_AIN_AVSS);
+                                    AD7124_AIN_AIN0, AD7124_AIN_AIN1);
         vTaskDelay(pdMS_TO_TICKS(AD_WAVE_TRANSACTION_GAP_MS));
 
         /* 读DATA+STATUS：MOSI应为42 00 00 00 00。 */

@@ -57,6 +57,7 @@ typedef struct {
     uint8_t tps_status;
     uint8_t count;
     uint8_t read_before_wait;
+    uint8_t fail_at_operation; /* 从1计数，0不注入；仅影响寄存器读/写。 */
 } mock_i2c_t;
 
 typedef struct {
@@ -114,6 +115,9 @@ static int mock_i2c_read_bytes(i2c_if_t *interface, uint8_t address,
 {
     mock_i2c_t *mock = (mock_i2c_t *)interface->handle;
     mock_i2c_record(mock, MOCK_OP_READ, address, reg, 0U, length);
+    if (mock->fail_at_operation != 0U && mock->count == mock->fail_at_operation) {
+        return IF_ERR;
+    }
     memset(buffer, 0, length);
 
     if (reg == PAC1934_REG_PRODUCT_ID && length == 1U) {
@@ -152,8 +156,11 @@ static int mock_i2c_read_reg(i2c_if_t *interface, uint8_t address,
 static int mock_i2c_write_reg(i2c_if_t *interface, uint8_t address,
                               uint8_t reg, uint8_t value)
 {
-    mock_i2c_record((mock_i2c_t *)interface->handle, MOCK_OP_WRITE,
-                    address, reg, value, 1U);
+    mock_i2c_t *mock = (mock_i2c_t *)interface->handle;
+    mock_i2c_record(mock, MOCK_OP_WRITE, address, reg, value, 1U);
+    if (mock->fail_at_operation != 0U && mock->count == mock->fail_at_operation) {
+        return IF_ERR;
+    }
     return IF_OK;
 }
 
@@ -375,11 +382,13 @@ static void test_pac1934(void)
     pac1934_measurement_t measurement[4];
     mock_i2c_reset(&mock);
     s_pac_waited_ms = 0U;
+    mock_check(PAC1934_ADDR_B1 == 0x16U,
+               "PAC器件层使用未左移的7位地址0x16");
 
-    pac1934_t pac = {.bus = &mock.interface, .addr = 0x2CU,
+    pac1934_t pac = {.bus = &mock.interface, .addr = PAC1934_ADDR_B1,
                      .rsense_uohm = 10000U, .wait_ms = mock_pac_wait};
     mock_check(pac1934_init(&pac, 0x07U, 0U) == IF_OK, "PAC初始化");
-    mock_check(mock_i2c_has_write(&mock, 0x2CU, 0x1CU, 0x80U),
+    mock_check(mock_i2c_has_write(&mock, PAC1934_ADDR_B1, 0x1CU, 0x80U),
                "PAC CH4关闭位位于bit4");
     mock_check(mock_i2c_has_command(&mock, PAC1934_REG_REFRESH), "PAC REFRESH命令");
     mock_check(pac1934_read_all(&pac, channel) == IF_OK, "PAC三通道读取");
@@ -409,7 +418,10 @@ static void test_ad7124(void)
     static const uint8_t reset_packet[8] = {0xFF, 0xFF, 0xFF, 0xFF,
                                              0xFF, 0xFF, 0xFF, 0xFF};
     static const uint8_t adc_ctrl_packet[3] = {0x01, 0x05, 0x80};
-    static const uint8_t channel0_packet[3] = {0x09, 0x80, 0x11};
+    static const uint8_t channel0_packet[3] = {0x09, 0x80, 0x01};
+    static const uint8_t channel1_packet[3] = {0x0A, 0x90, 0x43};
+    static const uint8_t channel2_packet[3] = {0x0B, 0xA0, 0x85};
+    static const uint8_t config0_packet[3] = {0x19, 0x00, 0x50};
     mock_spi_t mock;
     mock_spi_reset(&mock);
 
@@ -420,8 +432,12 @@ static void test_ad7124(void)
                "AD7124 64个1复位");
     mock_check(mock_spi_has_packet(&mock, adc_ctrl_packet, sizeof(adc_ctrl_packet)),
                "AD7124 ADC_CTRL编码");
-    mock_check(mock_spi_has_packet(&mock, channel0_packet, sizeof(channel0_packet)),
-               "AD7124 AIN0到AVSS映射");
+    mock_check(mock_spi_has_packet(&mock, channel0_packet, sizeof(channel0_packet)) &&
+               mock_spi_has_packet(&mock, channel1_packet, sizeof(channel1_packet)) &&
+               mock_spi_has_packet(&mock, channel2_packet, sizeof(channel2_packet)),
+               "AD7124原理图三路差分通道映射");
+    mock_check(mock_spi_has_packet(&mock, config0_packet, sizeof(config0_packet)),
+               "AD7124内部基准且接地负端不开缓冲");
 
     int32_t raw[3] = {0};
     uint8_t got = 0U;
@@ -561,7 +577,7 @@ static void test_lpddr_power_idd_bias_flow(void)
                "LPDDR上电完成后允许独立步进拉偏");
 
     s_pac_waited_ms = 0U;
-    pac1934_t pac = {.bus = &i2c4_if, .addr = 0x2CU,
+    pac1934_t pac = {.bus = &i2c4_if, .addr = PAC1934_ADDR_B1,
                      .rsense_uohm = 10000U, .wait_ms = mock_pac_wait};
     mock_check(pac1934_init(&pac, 0x07U, 0U) == IF_OK &&
                pac1934_measure_all(&pac, idd) == IF_OK &&
@@ -627,6 +643,108 @@ static void test_lpddr_power_idd_bias_flow(void)
     i2c4_if = saved_i2c4;
 }
 
+/*
+ * 仅在隔离Mock镜像运行：零延时为推进状态机的虚拟参数，不是B1时序推荐。
+ * 验证正式C实现的目标快照、非OFF拒绝、运行拉偏隔离及9个I2C故障点。
+ */
+static void test_lpddr_training_startup(void)
+{
+    const pwr_ctrl_config_t config = { .rail_order = PWR_CTRL_RAIL_ORDER_4V0_FIRST };
+    const uint16_t target[DDR_RAIL_COUNT] = {1820U, 1080U, 620U};
+    const uint16_t invalid[DDR_RAIL_COUNT] = {1805U, 1100U, 600U};
+    const uint16_t overflow[DDR_RAIL_COUNT] = {3360U, 1100U, 600U};
+    const int16_t bias[DDR_RAIL_COUNT] = {2, 1, -1};
+    uint16_t borrowed[DDR_RAIL_COUNT];
+    i2c_if_t saved_i2c1 = i2c1_if;
+    i2c_if_t saved_i2c2 = i2c2_if;
+    i2c_if_t saved_i2c4 = i2c4_if;
+    mock_i2c_t mock;
+
+    mock_i2c_reset(&mock);
+    i2c1_if = mock.interface;
+    i2c2_if = mock.interface;
+    i2c4_if = mock.interface;
+    pwr_ctrl_init(NULL);
+    mock_check(pwr_ctrl_request_training_on(DDR_MEMORY_LPDDR4X, target, 0U) ==
+                   PWR_CTRL_ERR_NOT_CONFIGURED && mock.count == 0U,
+               "自定义训练目标不能绕过未配置时序门禁");
+    pwr_ctrl_init(&config);
+    mock_check(pwr_ctrl_request_training_on((ddr_memory_type_t)-1, target, 0U) == PWR_CTRL_ERR_PARAM &&
+               pwr_ctrl_request_training_on((ddr_memory_type_t)2, target, 0U) == PWR_CTRL_ERR_PARAM &&
+               pwr_ctrl_request_training_on(DDR_MEMORY_LPDDR4X, NULL, 0U) == PWR_CTRL_ERR_PARAM &&
+               pwr_ctrl_request_training_on(DDR_MEMORY_LPDDR4X, invalid, 0U) == PWR_CTRL_ERR_PARAM &&
+               pwr_ctrl_request_training_on(DDR_MEMORY_LPDDR4X, overflow, 0U) == PWR_CTRL_ERR_PARAM &&
+               pwr_ctrl_get_state() == PWR_CTRL_STATE_OFF && mock.count == 0U &&
+               bsp_gpio_get(GPIO_FUNC_PWR_4V0_EN) == 0U,
+               "训练请求拒绝非法类型/空参数/步进/越界且不打开电源");
+
+    memcpy(borrowed, target, sizeof(borrowed));
+    mock_check(pwr_ctrl_request_training_on(DDR_MEMORY_LPDDR4X, borrowed, 0U) == PWR_CTRL_OK &&
+               mock.count == 0U, "训练目标在开电前复制，TPS未就绪时不写总线");
+    memset(borrowed, 0, sizeof(borrowed));
+    mock_check(pwr_ctrl_request_training_on(DDR_MEMORY_LPDDR4, target, 0U) == PWR_CTRL_ERR_BUSY,
+               "上电过渡态不允许替换训练目标");
+    for (uint8_t step = 0U; step < 3U; step++) pwr_ctrl_process(0U);
+    mock_check(pwr_ctrl_get_state() == PWR_CTRL_STATE_ON && mock.count == 9U &&
+               mock_i2c_has_write(&mock, TPS62868_ADDR_VDD1, TPS62868_REG_VOUT1, 0x66U) &&
+               mock_i2c_has_write(&mock, TPS62868_ADDR_VDD2, TPS62868_REG_VOUT1, 0x88U) &&
+               mock_i2c_has_write(&mock, TPS62868_ADDR_VDDQ, TPS62868_REG_VOUT1, 0x2CU) &&
+               !mock_i2c_has_write(&mock, TPS62868_ADDR_VDD1, TPS62868_REG_VOUT1, 0x64U),
+               "直接写1.82/1.08/0.62V，不先写标称，也不借用已释放请求缓冲");
+    mock_check(pwr_ctrl_request_training_on(DDR_MEMORY_LPDDR4, target, 0U) == PWR_CTRL_ERR_BUSY &&
+               mock.count == 9U && ddr_power_get_memory_type() == DDR_MEMORY_LPDDR4X,
+               "ON时拒绝新训练请求，不转成实时调压");
+    mock_check(pwr_ctrl_apply_ddr_steps(bias) == PWR_CTRL_OK &&
+               ddr_power_get_mv(DDR_RAIL_VDD1) == 1840U, "仍可独立验证运行期拉偏");
+    (void)pwr_ctrl_request_off(0U);
+    pwr_ctrl_process(0U);
+    pwr_ctrl_process(0U);
+    (void)pwr_ctrl_request_on(0U);
+    for (uint8_t step = 0U; step < 3U; step++) pwr_ctrl_process(0U);
+    mock_check(ddr_power_get_mv(DDR_RAIL_VDD1) == target[0] &&
+               ddr_power_get_mv(DDR_RAIL_VDD2) == target[1] &&
+               ddr_power_get_mv(DDR_RAIL_VDDQ) == target[2],
+               "再次冷启动恢复选定训练值，运行拉偏不污染训练目标");
+
+    for (uint8_t failure = 1U; failure <= 9U; failure++) {
+        pwr_ctrl_init(&config);
+        (void)pwr_ctrl_select_memory_type(DDR_MEMORY_LPDDR4X);
+        mock_i2c_reset(&mock);
+        mock.fail_at_operation = failure;
+        (void)pwr_ctrl_request_training_on(DDR_MEMORY_LPDDR4X, target, 0U);
+        for (uint8_t step = 0U; step < 3U; step++) pwr_ctrl_process(0U);
+        mock_check(pwr_ctrl_get_state() == PWR_CTRL_STATE_FAULT && mock.count == failure &&
+                   bsp_gpio_get(GPIO_FUNC_PWR_4V0_EN) == 0U &&
+                   bsp_gpio_get(GPIO_FUNC_PWR_3V3_EN) == 0U &&
+                   bsp_gpio_get(GPIO_FUNC_PWR_DDR_EN) == 0U &&
+                   ddr_power_get_mv(DDR_RAIL_VDD1) == DDR_VDD1_DEFAULT_MV &&
+                   pwr_ctrl_request_training_on(DDR_MEMORY_LPDDR4X, target, 0U) == PWR_CTRL_ERR_FAULT,
+                   "9个事务逐点故障：立即停止、全关、不提交成功电压缓存、不自动重试");
+        pwr_ctrl_clear_fault();
+        mock.count = 0U;
+        mock.fail_at_operation = 0U;
+        (void)pwr_ctrl_request_training_on(DDR_MEMORY_LPDDR4X, target, 0U);
+        for (uint8_t step = 0U; step < 3U; step++) pwr_ctrl_process(0U);
+        mock_check(pwr_ctrl_get_state() == PWR_CTRL_STATE_ON && mock.count == 9U,
+                   "故障解除后显式重试重新配置全部三轨");
+    }
+
+    pwr_ctrl_init(&config);
+    (void)pwr_ctrl_select_memory_type(DDR_MEMORY_LPDDR4);
+    mock_i2c_reset(&mock);
+    (void)pwr_ctrl_request_on(0U);
+    for (uint8_t step = 0U; step < 3U; step++) pwr_ctrl_process(0U);
+    mock_check(ddr_power_get_mv(DDR_RAIL_VDD1) == 1800U &&
+               ddr_power_get_mv(DDR_RAIL_VDDQ) == 1100U,
+               "旧类型选择入口显式撤销自定义训练目标，兼容标称启动");
+
+    pwr_ctrl_init(NULL);
+    (void)pwr_ctrl_select_memory_type(DDR_MEMORY_LPDDR4X);
+    i2c1_if = saved_i2c1;
+    i2c2_if = saved_i2c2;
+    i2c4_if = saved_i2c4;
+}
+
 static void mock_write_be16(uint8_t *target, uint16_t value)
 {
     target[0] = (uint8_t)(value >> 8);
@@ -667,7 +785,7 @@ static void test_pc_protocol_and_json(void)
     mock_write_be32(&packet[0], packet_length);
     mock_write_be16(&packet[4], PC_PROTOCOL_VERSION);
     mock_write_be16(&packet[6], PC_PROTOCOL_FLAG_JSON);
-    mock_write_be16(&packet[8], 0x0102U);
+    mock_write_be16(&packet[8], 0U);
     mock_write_be16(&packet[10], 0x0304U);
     mock_write_be32(&packet[12], 0x11223344UL);
     mock_write_be16(&packet[16], 0U);
@@ -693,7 +811,7 @@ static void test_pc_protocol_and_json(void)
                "PC状态机正文收齐后进入FRAME_READY");
     mock_check(pc_sm_get_frame(&stream, &frame) == 0 &&
                frame.length == packet_length && frame.version == 1U &&
-               frame.flag == 8U && frame.service_id == 0x0102U &&
+               frame.flag == 8U && frame.service_id == 0U &&
                frame.command_id == 0x0304U &&
                frame.sequence == 0x11223344UL && frame.reserved == 0U,
                "PC协议18字节大端头解码");
@@ -911,15 +1029,15 @@ static void test_pc_test_json_contract(void)
     static const char trailing_comma_json[] =
         "{\"algorithmName\":\"algorithmName\",\"algorithmIndex\":1,}";
     static const pc_chip_test_result_t results[] = {
-        {.site_id = "", .mirror_index = 1U, .test_status = 1},
-        {.site_id = "", .mirror_index = 1U, .test_status = 1},
-        {.site_id = "", .mirror_index = 1U, .test_status = 1},
+        {.site_id = "", .mirror_index = 1U, .test_status = 1, .result_desc = ""},
+        {.site_id = "", .mirror_index = 1U, .test_status = 1, .result_desc = "读写校验通过"},
+        {.site_id = "", .mirror_index = 1U, .test_status = 1, .result_desc = NULL},
     };
     static const char expected_result_json[] =
         "{\"algorithmName\":\"algorithmName\",\"algorithmIndex\":1,"
-        "\"testResults\":[{\"siteId\":\"\",\"mirrorIndex\":1,\"testStatus\":1},"
-        "{\"siteId\":\"\",\"mirrorIndex\":1,\"testStatus\":1},"
-        "{\"siteId\":\"\",\"mirrorIndex\":1,\"testStatus\":1}]}";
+        "\"testResults\":[{\"siteId\":\"\",\"mirrorIndex\":1,\"resultDesc\":\"\",\"testStatus\":1},"
+        "{\"siteId\":\"\",\"mirrorIndex\":1,\"resultDesc\":\"读写校验通过\",\"testStatus\":1},"
+        "{\"siteId\":\"\",\"mirrorIndex\":1,\"resultDesc\":\"\",\"testStatus\":1}]}";
     cJSON *root = NULL;
     pc_test_start_view_t request;
     /* cJSON文档要求PrintPreallocated容量比实际JSON至少多5字节。 */
@@ -960,17 +1078,14 @@ static void test_pc_test_json_contract(void)
                cJSON_PrintPreallocated(root, result_json,
                                        sizeof(result_json), 0) != 0 &&
                strcmp(result_json, expected_result_json) == 0,
-               "TEST_RESULT_REPORT三项结果JSON生成");
+               "TEST_RESULT_REPORT含resultDesc：空串、中文和NULL默认值");
 
-    const pc_protocol_frame_t pc_request = {
-        .service_id = 0x0100U,
-        .sequence = 0x12345678UL,
-    };
+    const uint32_t mcu_sequence = 7U;
     pc_sm_t response_stream;
     pc_protocol_frame_t response_frame;
     pc_sm_feed_result_t response_feed = PC_SM_FEED_MORE;
     mock_check(pc_protocol_build_response(
-                   &pc_request, PC_COMMAND_TEST_RESULT_REPORT,
+                   PC_COMMAND_TEST_RESULT_REPORT, mcu_sequence,
                    (const uint8_t *)result_json, strlen(result_json),
                    response_packet, sizeof(response_packet),
                    &response_length) == 0,
@@ -981,10 +1096,10 @@ static void test_pc_test_json_contract(void)
     }
     mock_check(response_feed == PC_SM_FEED_FRAME_READY &&
                pc_sm_get_frame(&response_stream, &response_frame) == 0 &&
-               response_frame.service_id == pc_request.service_id &&
+               response_frame.service_id == 0U &&
                response_frame.command_id == PC_COMMAND_TEST_RESULT_REPORT &&
-               response_frame.sequence == pc_request.sequence,
-               "PC响应原样回显请求Seq且不使用RK Seq");
+               response_frame.sequence == mcu_sequence,
+               "PC响应使用ServiceID=0和MCU独立Seq");
     cJSON_Delete(root);
 }
 
@@ -1002,31 +1117,43 @@ static void test_pc_dispatch(void)
         pc_dispatch_result_t expected;
         const char *label;
     } cases[] = {
-        {PC_COMMAND_CLIENT_HEARTBEAT, "{\"state\":1}", PC_DISPATCH_ERROR,
-         "PC查表拒绝携带字段的心跳"},
-        {PC_COMMAND_QUERY_TESTER_INFO, "{\"extra\":1}", PC_DISPATCH_ERROR,
-         "PC查表拒绝非空信息查询，不访问Flash"},
-        {PC_COMMAND_SERVER_HEARTBEAT, "{}", PC_DISPATCH_ERROR,
-         "PC查表拒绝反向MCU心跳"},
-        {PC_COMMAND_TESTER_INFO_RESP, "{}", PC_DISPATCH_ERROR,
-         "PC查表拒绝反向测试仪信息响应"},
+        {PC_COMMAND_CLIENT_HEARTBEAT, "{\"state\":1}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表用0x0006拒绝携带字段的心跳"},
+        {PC_COMMAND_QUERY_TESTER_INFO, "{\"extra\":1}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表用0x0006拒绝非空信息查询，不访问Flash"},
+        {PC_COMMAND_SERVER_HEARTBEAT, "{}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表用0x0006拒绝反向MCU心跳"},
+        {PC_COMMAND_TESTER_INFO_RESP, "{}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表用0x0006拒绝反向测试仪信息响应"},
         {PC_COMMAND_START_TEST, "{\"algorithmName\":\"demo\",\"algorithmIndex\":1}",
          PC_DISPATCH_NO_RESPONSE, "PC查表校验合法START_TEST，不提前回复"},
-        {PC_COMMAND_START_TEST, "{}", PC_DISPATCH_ERROR,
-         "PC查表拒绝START_TEST缺失必填字段"},
+        {PC_COMMAND_START_TEST, "{}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表用0x0006拒绝START_TEST缺失必填字段"},
         {PC_COMMAND_START_TEST, "{\"algorithmName\":\"demo\",\"algorithmIndex\":1.5}",
-         PC_DISPATCH_ERROR, "PC查表拒绝非整数algorithmIndex"},
-        {0xFFFFU, "{}", PC_DISPATCH_NO_RESPONSE,
-         "PC查表未命中时不伪造响应"},
-        {0xFFFFU, "{\"extra\":1}", PC_DISPATCH_NO_RESPONSE,
-         "PC未知命令仍接受合法非空对象"},
+         PC_DISPATCH_RESPONSE_READY, "PC查表用0x0006拒绝非整数algorithmIndex"},
+        {PC_COMMAND_POWER_ON, "{}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表处理上电业务结果"},
+        {PC_COMMAND_POWER_OFF, "{}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表处理OFF幂等下电"},
+        {PC_COMMAND_RESET_RK, "{}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表拒绝复位已关闭RK"},
+        {PC_COMMAND_SET_BOOT_MODE, "{\"bootMode\":\"emmc\"}",
+         PC_DISPATCH_RESPONSE_READY, "PC查表处理Boot模式写入结果"},
+        {PC_COMMAND_QUERY_BOOT_MODE, "{}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表处理Boot模式查询结果"},
+        {PC_COMMAND_BOOT_MODE_RESP, "{}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表拒绝反向Boot响应"},
+        {0xFFFFU, "{}", PC_DISPATCH_RESPONSE_READY,
+         "PC查表未命中返回notSupported"},
+        {0xFFFFU, "{\"extra\":1}", PC_DISPATCH_RESPONSE_READY,
+         "PC未知命令合法对象返回notSupported"},
         {0xFFFFU, "[]", PC_DISPATCH_ERROR,
          "PC未知命令也必须使用JSON对象"},
         {PC_COMMAND_CLIENT_HEARTBEAT, "{", PC_DISPATCH_ERROR,
          "PC查表前拒绝非法JSON"},
     };
     pc_protocol_frame_t request = {
-        .service_id = 0x1234U,
+        .service_id = 0U,
         .command_id = PC_COMMAND_CLIENT_HEARTBEAT,
         .sequence = 0x55667788UL,
         .json = empty_json,
@@ -1037,7 +1164,7 @@ static void test_pc_dispatch(void)
     pc_protocol_frame_t response_frame;
     pc_sm_feed_result_t feed = PC_SM_FEED_MORE;
 
-    mock_check(pc_dispatch_handle(&request, &response) ==
+    mock_check(pc_dispatch_handle(&request, 9U, &response) ==
                    PC_DISPATCH_RESPONSE_READY &&
                response.length != 0U,
                "PC dispatch生成心跳响应");
@@ -1048,12 +1175,12 @@ static void test_pc_dispatch(void)
     }
     mock_check(feed == PC_SM_FEED_FRAME_READY &&
                pc_sm_get_frame(&response_sm, &response_frame) == 0 &&
-               response_frame.service_id == request.service_id &&
+               response_frame.service_id == 0U &&
                response_frame.command_id == PC_COMMAND_SERVER_HEARTBEAT &&
-               response_frame.sequence == request.sequence &&
+               response_frame.sequence == 9U &&
                response_frame.json_length == sizeof(empty_json) &&
                memcmp(response_frame.json, empty_json, sizeof(empty_json)) == 0,
-               "PC dispatch响应命令并回显ServiceID/Seq");
+               "PC dispatch响应命令使用ServiceID=0和MCU独立Seq");
 
     for (size_t i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
         request.command_id = cases[i].command_id;
@@ -1061,20 +1188,23 @@ static void test_pc_dispatch(void)
         request.json_length = (uint32_t)strlen(cases[i].json);
         /* 模拟前一帧留下的有效长度，确保错误/无响应不会发送旧PDU。 */
         response.length = 123U;
-        mock_check(pc_dispatch_handle(&request, &response) == cases[i].expected &&
-                   response.length == 0U,
+        mock_check(pc_dispatch_handle(&request, 10U + (uint32_t)i,
+                                      &response) == cases[i].expected &&
+                   (cases[i].expected == PC_DISPATCH_RESPONSE_READY
+                        ? response.length > PC_PROTOCOL_HEADER_SIZE
+                        : response.length == 0U),
                    cases[i].label);
     }
 
-    mock_check(pc_dispatch_handle(NULL, &response) == PC_DISPATCH_ERROR &&
-               pc_dispatch_handle(&request, NULL) == PC_DISPATCH_ERROR,
+    mock_check(pc_dispatch_handle(NULL, 1U, &response) == PC_DISPATCH_ERROR &&
+               pc_dispatch_handle(&request, 1U, NULL) == PC_DISPATCH_ERROR,
                "PC dispatch拒绝空参数");
 
     /* 分发器本身不保存上次处理结果；错误帧之后再次调用仍可处理合法命令。 */
     request.command_id = PC_COMMAND_CLIENT_HEARTBEAT;
     request.json = empty_json;
     request.json_length = sizeof(empty_json);
-    mock_check(pc_dispatch_handle(&request, &response) == PC_DISPATCH_RESPONSE_READY &&
+    mock_check(pc_dispatch_handle(&request, 30U, &response) == PC_DISPATCH_RESPONSE_READY &&
                response.length == PC_PROTOCOL_HEADER_SIZE + sizeof(empty_json),
                "PC查表错误路径后再次处理合法心跳");
 }
@@ -1319,6 +1449,7 @@ void StartDriverMockTestTask(void *argument)
     test_ad7124();
     test_memory_monitor();
     test_lpddr_power_idd_bias_flow();
+    test_lpddr_training_startup();
     test_pc_protocol_and_json();
     test_pc_state_table_boundaries();
     test_pc_test_json_contract();

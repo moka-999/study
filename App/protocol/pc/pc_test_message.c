@@ -83,6 +83,8 @@ cJSON *pc_test_result_create(const char *algorithm_name,
             !cJSON_AddStringToObject(entry, "siteId", results[i].site_id) ||
             !cJSON_AddNumberToObject(entry, "mirrorIndex",
                                     results[i].mirror_index) ||
+            !cJSON_AddStringToObject(entry, "resultDesc",
+                                    results[i].result_desc ? results[i].result_desc : "") ||
             !cJSON_AddNumberToObject(entry, "testStatus",
                                     results[i].test_status)) {
             cJSON_Delete(entry);

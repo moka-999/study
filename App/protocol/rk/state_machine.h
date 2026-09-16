@@ -53,22 +53,46 @@ typedef struct {
 
 /* ── API ── */
 
-/* 初始化状态机 */
+/**
+ * @brief 清零并初始化RK字节流状态机为IDLE。
+ * @param[out] sm 非NULL实例；函数不做空指针检查。
+ */
 void tlv_sm_init(tlv_sm_t *sm);
 
-/* 喂入一个字节：0=继续，1=边界/CRC校验通过，-1=帧错误(已自动复位)。
- * 返回1后仍须检查get_frame返回值；CRC正确不保证内部TLV有效。 */
+/**
+ * @brief 消费一个RK串口字节并更新最后接收tick。
+ * @param[in,out] sm 非NULL已初始化实例，任务上下文串行访问。
+ * @param[in] byte 下一个接收字节。
+ * @return 0继续（包括头CRC/长度错误后的重同步）；1帧边界及CRC通过；
+ *         -1缓冲溢出、帧CRC或尾错误且已复位。
+ * @note 返回1后必须在下一字节前调用get_frame并检查结果；CRC正确不保证
+ *       内部TLV有效。本入口不校验sm是否为NULL。
+ */
 int  tlv_sm_feed(tlv_sm_t *sm, uint8_t byte);
 
-/* 仅在feed返回1后、下一字节喂入前调用；sm必须是有效实例。
- * 返回>=0为输出单元数（未知Type可全部跳过）；-1为TLV解包失败，输出清零。 */
+/**
+ * @brief 解包刚刚由feed收齐的RK帧。
+ * @param[in] sm 非NULL实例，必须紧跟feed返回1且在下一字节之前调用。
+ * @param[out] frame 非NULL输出；解包失败时整份清零。
+ * @return >=0为输出单元数，允许未知Type被全部跳过；-1参数或TLV结构错误。
+ * @note 不额外判断帧是否就绪；成功结果复制载荷，不依赖sm后续生命周期。
+ */
 int tlv_sm_get_frame(tlv_sm_t *sm, tlv_frame_t *frame);
 
-/* 超时复位：半帧状态下，自最后字节起超过timeout_ms → 强制归IDLE
- * 返回: 1=已复位, 0=未超时 */
+/**
+ * @brief 检查半帧的字节间超时并按需复位。
+ * @param[in,out] sm 非NULL实例，任务上下文调用。
+ * @param[in] timeout_ms 超时阈值，内部用pdMS_TO_TICKS转换。
+ * @return 1非IDLE状态距最后字节已达到阈值并复位；0无需复位。
+ * @note 这是字节间间隔，不是整帧耗时；本函数不检查空指针。
+ */
 int  tlv_sm_check_timeout(tlv_sm_t *sm, uint32_t timeout_ms);
 
-/* 强制复位 */
+/**
+ * @brief 放弃RK收帧进度并回到IDLE。
+ * @param[in,out] sm 非NULL实例；函数不做空指针检查。
+ * @note 仅重置state/pos/expect，保留缓冲供成功feed后立即取帧。
+ */
 void tlv_sm_reset(tlv_sm_t *sm);
 
 #endif

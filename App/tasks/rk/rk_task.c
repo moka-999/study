@@ -26,6 +26,7 @@
  */
 #include "main.h"
 #include "FreeRTOS.h"
+#include "ota_app.h"
 #include "task.h"
 #include "queue.h"
 #include "uart_router.h"
@@ -54,10 +55,15 @@ typedef struct {
 /* 仅本任务读写，无需跨任务锁；心跳不占用pending槽。 */
 static rk_pending_t _pending[RK_PENDING_CAPACITY];
 
-/* ═══════════════════════════════════════════════════════════════════
- * 待确认队列管理
- * ═══════════════════════════════════════════════════════════════════ */
-
+/**
+ * @brief 将已发送RK帧复制到首个空闲pending槽，供超时重传。
+ * @param[in] frame 非NULL完整帧，在调用期间有效。
+ * @param[in] len 帧字节数，调用方保证不超过TLV_FRAME_MAX。
+ * @param[in] seq RK响应匹配序号。
+ * @param[in] pc_seq 历史PC–TLV队列关联值，不是新PC响应Seq。
+ * @return 槽索引0..RK_PENDING_CAPACITY-1；无槽返回-1。
+ * @note 仅RK任务访问，不检查输入指针/长度；成功后原帧缓冲可复用。
+ */
 static int _pending_add(const uint8_t *frame, uint16_t len,
                          uint64_t seq, uint64_t pc_seq)
 {
@@ -76,7 +82,11 @@ static int _pending_add(const uint8_t *frame, uint16_t len,
     return -1;
 }
 
-/* 是否有空闲 pending 槽 (方案B: 转发前先确认能登记跟踪, 避免"发出去了却没人认领") */
+/**
+ * @brief 检查是否还有可登记的RK命令跟踪槽。
+ * @return 1有空槽；0已满，此时任务暂不取走队列命令。
+ * @note 仅RK任务读写pending，此检查本身不保留槽位。
+ */
 static int _pending_has_slot(void)
 {
     for (int i = 0; i < RK_PENDING_CAPACITY; i++) {
@@ -85,6 +95,14 @@ static int _pending_has_slot(void)
     return 0;
 }
 
+/**
+ * @brief 按RK Seq查找并立即释放pending，取回历史关联值。
+ * @param[in] seq 待匹配RK序号。
+ * @param[out] pc_seq 非NULL输出；未匹配时保持原值。
+ * @return 1匹配并释放；0无匹配或输出为NULL。
+ * @note 不核对CmdID；首个匹配单元即消耗槽，结果队列投递发生在释放之后。
+ *       当前未实现多阶段结果或队列满时保留结果的生命周期。
+ */
 static int _pending_take(uint64_t seq, uint64_t *pc_seq)
 {
     /* 当前只按RK Seq匹配，不核对CmdID；首个匹配单元即释放pending。
@@ -100,6 +118,13 @@ static int _pending_take(uint64_t seq, uint64_t *pc_seq)
     return 0;
 }
 
+/**
+ * @brief 查找第一个达到重传/放弃跟踪阈值的槽。
+ * @param[in] now 当前FreeRTOS tick，不是毫秒；与sent_tick使用同一时基。
+ * @return 首个超时槽索引；没有返回-1。
+ * @note 不修改槽。重试阈值500/1000/2000ms；3次重试用尽后再等500ms，
+ *       上层才放弃跟踪。按槽顺序检查，不是按最早到期排序。
+ */
 static int _pending_check_timeout(uint32_t now)
 {
     for (int i = 0; i < RK_PENDING_CAPACITY; i++) {
@@ -119,10 +144,13 @@ static int _pending_check_timeout(uint32_t now)
     return -1;
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- * 主任务
- * ═══════════════════════════════════════════════════════════════════ */
-
+/**
+ * @brief RK通信任务入口，消费串口帧并管理历史命令队列与重传。
+ * @param[in] argument 未使用，可为NULL。
+ * @note 启动前须创建pcToRk_Queue并注册/启动UART槽0。任务独占pending；
+ *       CRC就绪后仍检查整帧TLV结构。结果队列尚未接正式PC JSON消费，
+ *       不能将本任务运行解释为PC–RK业务闭环完成；循环等待10ms，不正常返回。
+ */
 void StartRkTask(void *argument)
 {
     uint8_t    buf[UART_RX_BUF_SIZE];
@@ -239,6 +267,7 @@ void StartRkTask(void *argument)
             }
         }
 
+        ota_app_progress(OTA_TASK_RK);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

@@ -76,7 +76,22 @@ def verify_source_contract() -> None:
     monitor_task = (ROOT / "App/tasks/common/monitor_task.c").read_text(encoding="utf-8")
     mock = (ROOT / "App/tasks/test/driver_mock_test.c").read_text(encoding="utf-8")
 
-    assert "memcpy(_mv, nominal" in power, "每次上电必须恢复器件标称三轨"
+    initialize = power.split("int ddr_power_init(void)", 1)[1].split("int ddr_power_set(", 1)[0]
+    assert "_nominal_mv[" not in initialize, "上电不能覆盖本次显式训练目标"
+    assert "tps62868_set_vout1(&_ddr[rail], _training_mv[rail])" in initialize
+    assert "memcpy(_mv, _training_mv" in initialize, "全部写入成功才提交目标缓存"
+    assert "r = IF_ERR" not in initialize and "continue;" not in initialize, \
+        "初始化不得在首个I2C错误后继续写其它轨"
+    assert initialize.index("return IF_ERR;") < initialize.index("memcpy(_mv, _training_mv")
+    runtime = power.split("int ddr_power_set(", 1)[1]
+    assert "_training_mv" not in runtime, "运行期拉偏不得更改训练目标"
+    request = state.split("pwr_ctrl_result_t pwr_ctrl_request_training_on(", 1)[1].split(
+        "pwr_ctrl_result_t pwr_ctrl_request_off(", 1)[0]
+    assert request.index("s_state != PWR_CTRL_STATE_OFF") < request.index("ddr_power_configure_training")
+    assert request.index("ddr_power_configure_training") < request.index("pwr_ctrl_request_on(now_ms)")
+    assert "(uint32_t)type > DDR_MEMORY_LPDDR4X" in power, "负枚举值不能索引标称表"
+    assert "test_lpddr_training_startup();" in mock and "failure <= 9U" in mock, \
+        "C Mock须覆盖自定义训练目标与9个逐事务失败点（此脚本不执行C）"
     assert "steps[rail] * DDR_VOLTAGE_STEP_MV" in power, "拉偏必须以标称值为基准20mV步进"
     assert "JESD建议值或三路相对电压拦截" in power, "极限测试不应被工作区限制"
     assert power.index("candidate[DDR_RAIL_VDD1] >") < power.index("candidate[DDR_RAIL_VDD2] !=")
@@ -108,7 +123,8 @@ def main() -> None:
     verify_all_20mv_steps_and_tps_encoding()
     verify_pac_idd_conversion()
     verify_source_contract()
-    print("LPDDR4/4X: all 20mV voltage steps, TPS encoding, PAC IDD and power-flow contracts PASS")
+    print("LPDDR4/4X: all 20mV steps, TPS encoding, PAC IDD and training-target source contracts PASS")
+    print("New C Mock cases are checked for inclusion here, not executed by this Python test")
     print("Boundary: RK creates JEDEC IDD/CKE conditions; MCU sequences rails and samples them")
 
 

@@ -13,4 +13,11 @@
 
 extern flash_if_t flash_if;
 
+/** 创建唯一Flash事务锁，必须在调度前调用；0成功，失败不得创建Flash访问任务。 */
+int flash_transaction_prepare(void);
+/** 任务上下文获取事务锁并首次初始化QSPI；timeout_ms有限等待，0成功。 */
+int flash_transaction_begin(uint32_t timeout_ms);
+/** 仅由成功begin的任务调用；保护完整load/修改/save，不只是单次总线读写。 */
+void flash_transaction_end(void);
+
 #endif

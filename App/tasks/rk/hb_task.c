@@ -12,6 +12,7 @@
  * ===================================================================
  */
 #include "FreeRTOS.h"
+#include "ota_app.h"
 #include "task.h"
 #include "uart_router.h"
 #include "frame.h"
@@ -44,6 +45,7 @@ void StartHbTask(void *argument)
             }
         }
 
+        ota_app_progress(OTA_TASK_HB);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

@@ -237,17 +237,17 @@ static void _test_ddr_power(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * PAC1934T 电流/功率采样验证 (I2C4, 0x2C)
+ * PAC1934T 电流/功率采样验证（I2C4，7位地址0x16）
  * ═══════════════════════════════════════════════════════════════════ */
 
 
 static void _test_pac1934(void)
 {
-    _uart_puts("--- PAC1934T Test (I2C4 0x2C) ---\r\n");
+    _uart_puts("--- PAC1934T Test (I2C4 7-bit 0x16) ---\r\n");
 
     static pac1934_t pac;
     pac.bus = &i2c4_if;
-    pac.addr = 0x2C;
+    pac.addr = PAC1934_ADDR_B1;
     pac.rsense_uohm = 10000;   /* 0.01Ω */
     pac.wait_ms = _pac_wait_ms;
 

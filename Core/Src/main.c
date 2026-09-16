@@ -33,6 +33,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "pwr_ctrl.h"
+#include "result_led.h"
 #if defined(ENABLE_RESULT_LED_WAVE_TEST) && ENABLE_RESULT_LED_WAVE_TEST
 extern void result_led_wave_early_init(void);
 #endif
@@ -69,6 +70,52 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#if defined(ENABLE_V2_RESULT_LED) && ENABLE_V2_RESULT_LED
+/*
+ * V2没有B1的PG0-PG5结果灯网络，正式/网络镜像复用已通过波形验收的六路排针：
+ * PD7/PD3、PD2/PC12、PC11/PC10分别模拟LPDDR0、LPDDR1、eMCP的FAIL/PASS。
+ * 这些引脚可能与摄像头、LCD、SD扩展复用，运行本镜像时不得连接对应模块。
+ */
+static const result_led_board_map_t s_v2_result_led_map = {
+  .pairs = {
+    [RESULT_LED_LPDDR0] = {
+      .fail_port = GPIOD, .fail_pin = GPIO_PIN_7,
+      .pass_port = GPIOD, .pass_pin = GPIO_PIN_3,
+    },
+    [RESULT_LED_LPDDR1] = {
+      .fail_port = GPIOD, .fail_pin = GPIO_PIN_2,
+      .pass_port = GPIOC, .pass_pin = GPIO_PIN_12,
+    },
+    [RESULT_LED_EMCP] = {
+      .fail_port = GPIOC, .fail_pin = GPIO_PIN_11,
+      .pass_port = GPIOC, .pass_pin = GPIO_PIN_10,
+    },
+  },
+};
+
+static void v2_result_led_init(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+
+  for (uint32_t target = 0U; target < RESULT_LED_TARGET_COUNT; target++) {
+    const result_led_pin_pair_t *pair = &s_v2_result_led_map.pairs[target];
+    HAL_GPIO_WritePin(pair->fail_port, pair->fail_pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(pair->pass_port, pair->pass_pin, GPIO_PIN_RESET);
+    gpio.Pin = pair->fail_pin;
+    HAL_GPIO_Init(pair->fail_port, &gpio);
+    gpio.Pin = pair->pass_pin;
+    HAL_GPIO_Init(pair->pass_port, &gpio);
+  }
+  if (result_led_init(&s_v2_result_led_map) != HAL_OK)
+    Error_Handler();
+}
+#endif
 
 /* USER CODE END 0 */
 
@@ -119,6 +166,10 @@ int main(void)
    * 部分高阻引脚会被Apollo V2板上外部网络拉高，形成数秒假亮窗口。
    */
   result_led_wave_early_init();
+#endif
+#if defined(ENABLE_V2_RESULT_LED) && ENABLE_V2_RESULT_LED
+  /* 正式/网络镜像在任务启动前建立全灭基线和三组替代GPIO映射。 */
+  v2_result_led_init();
 #endif
   /*
    * 未确认 PC6/PC7 真板时序前不加载默认配置，电源保持安全关闭。

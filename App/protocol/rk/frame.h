@@ -82,7 +82,13 @@ typedef struct tlv_frame {
     uint64_t   sequence;
 } tlv_frame_t;
 
-/* ── 从共享 buffer 获取 TLV 单元参数指针 ── */
+/**
+ * @brief 获取已解包单元参数在frame内的借用指针。
+ * @param[in] f 有效解包结果，非NULL。
+ * @param[in] u 属于f且偏移/长度有效的单元，非NULL。
+ * @return f->payload内的参数起点，有效字节数为u->data_len，不可释放。
+ * @note 此内联访问器不校验指针或边界；f修改或失效后指针不得继续使用。
+ */
 static inline const uint8_t *tlv_unit_get_data(const tlv_frame_t *f,
                                                 const tlv_unit_t *u)
 {
@@ -104,38 +110,63 @@ typedef struct {
 
 /* ── 打包 API ── */
 
-/* 打包命令帧: Type=0x5000, Value=[cmd:2B][data:N]
-   seq:     MCU→RK 序列号
-   返回:    帧总长度, 0=缓冲区不够 */
+/**
+ * @brief 打包一个Type=0x5000的MCU到RK命令帧。
+ * @param[in] cmd RK命令号，写入Value前两字节。
+ * @param[in] data 至少可读data_len字节；长度为0时可为NULL。
+ * @param[in] data_len 参数字节数，调用方须保证不超过TLV_CMD_DATA_MAX。
+ * @param[in] seq 独立RK序号；重传沿用原序号。
+ * @param[out] out 非NULL输出，不得与data重叠。
+ * @param[in] out_max out容量，单位字节；完整帧需要22 + data_len字节。
+ * @return 完整帧字节数；容量不足返回0且不写输出。
+ * @note 当前仅检查计算后的容量，未检查空指针或data_len协议上限；必须先
+ *       满足上述前提，避免16位长度运算回绕。此API不发送帧。
+ */
 int tlv_pack_cmd(uint16_t cmd,
                  const uint8_t *data, uint16_t data_len,
                  uint64_t seq,
                  uint8_t *out, uint16_t out_max);
 
-/* 打包心跳帧: Type=0x0000, Value 为空
-   返回: 帧总长度, 0=缓冲区不够 */
+/**
+ * @brief 打包Type=0x0000、空Value的RK心跳帧。
+ * @param[in] seq 独立RK序号。
+ * @param[out] out 非NULL输出缓冲；函数未做空指针校验。
+ * @param[in] out_max 缓冲字节容量。
+ * @return 20成功；容量不足返回0且不写输出。
+ */
 int tlv_pack_heartbeat(uint64_t seq,
                        uint8_t *out, uint16_t out_max);
 
 /* ── 解包 API ── */
 
-/* 解包：frame_buf从Seq起始，调用方保证可读长度至少为8+frame_len字节。
- * frame_len为Len字段值（仅TLV字节数），帧CRC/尾由状态机在此前校验。
- * 返回：>=0为输出单元数；未知Type可被跳过，因此0也是合法结果。
- *       -1为参数、TLV结构或容量错误；out非NULL时整份输出清零。
- * 任一TLV损坏均拒绝整帧，不暴露已解析的前缀。线上所有TLV（含未知Type
- * 和心跳）合计不得超过16个；纯心跳输出保持合并为一个心跳单元。
+/**
+ * @brief 解包RK TLV载荷，任一单元结构损坏时拒绝整帧。
+ * @param[in] frame_buf 从Seq起始，非NULL且至少可读8 + frame_len字节。
+ * @param[in] frame_len Len字段，即TLV区字节数，范围4..1024，不含Seq。
+ * @param[out] out 非NULL完整结果，参数数据复制到其payload，不借用输入。
+ * @return >=0为输出单元数，未知Type全部跳过时允许0；-1表示参数/结构/容量
+ *         错误，此时out非NULL则整份清零，不交付已解析前缀。
+ * @note 调用方先校验帧CRC和尾；所有线上TLV（含未知Type/心跳）合计1..16个。
+ *       无命令时多个心跳合并为一个；输入不得与out重叠。
  */
 int tlv_unpack(const uint8_t *frame_buf, uint16_t frame_len,
                tlv_frame_t *out);
 
 /* ── 工具 ── */
 
-/* 从帧 buf[1:3] 提取 Length (BigEndian → host) */
+/**
+ * @brief 从两个大端字节读取TLV区长度。
+ * @param[in] buf 指向Length字段本身，至少可读2字节，不是整帧起点。
+ * @return 主机字节序长度值；不做空指针或协议范围检查。
+ */
 static inline uint16_t tlv_get_length(const uint8_t *buf)
 { return ((uint16_t)buf[0] << 8) | buf[1]; }
 
-/* 提取 8 字节序列号 (BigEndian → host) */
+/**
+ * @brief 从八个大端字节读取RK序号。
+ * @param[in] buf 指向Seq字段，非NULL且至少可读8字节。
+ * @return 主机字节序uint64_t序号；不检查输入边界。
+ */
 uint64_t tlv_get_sequence(const uint8_t *buf);
 
 #endif

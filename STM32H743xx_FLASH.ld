@@ -62,7 +62,9 @@ RAM_D3 (xrw)      : ORIGIN = 0x38000000, LENGTH = 64K
 ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
 /* App 区: 0x08020000 起 (预留 128KB Bootloader @ 0x08000000, H743 扇区=128KB)
  * 在线升级方案见 doc/driver_tasks.md §11, Bootloader 待 B2 联调后开发 */
-FLASH (rx)      : ORIGIN = 0x08020000, LENGTH = 1920K
+/* 仅隔离实验由--defsym传入槽地址；正常App维持原A1布局和1920 KiB上限。 */
+FLASH (rx)      : ORIGIN = DEFINED(OTA_APP_BASE) ? OTA_APP_BASE : 0x08020000,
+                 LENGTH = DEFINED(OTA_APP_BASE) ? 896K : 1920K
 }
 
 /* Highest address of the user mode stack */

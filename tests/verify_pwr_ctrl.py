@@ -104,14 +104,32 @@ def verify_source_contract() -> None:
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
 
     assert "pwr_ctrl_init(NULL);" in main, "启动时必须保持未配置和默认关闭"
-    assert "pwr_ctrl_process(HAL_GetTick());" in freertos, "状态机缺少周期推进入口"
-    assert "ddr_power_init()" in source, "PG11 使能后必须配置 DDR 三轨"
+    assert "monitor_power_process(HAL_GetTick());" in freertos, "状态机必须通过事务锁周期推进"
+    assert "ddr_power_init()" in source, "TPS可访问后必须配置DDR训练目标"
     assert "force_all_rails_off();" in source, "故障路径缺少统一关断"
     assert "vTaskDelay(" not in source and "osDelay(" not in source, "轨间等待禁止使用任务延时"
     assert "PWR_CTRL_ERR_NOT_CONFIGURED" in header, "未确认时序必须拒绝上电"
     assert "HAL_Drv/pwr_ctrl.c" in cmake, "pwr_ctrl 未加入固件构建"
     assert gpio_map.index("HAL_GPIO_WritePin") < gpio_map.index("HAL_GPIO_Init"), \
         "电源使能脚必须先预置低电平，再切换为输出，避免启动毛刺"
+
+    monitor = (ROOT / "App/tasks/common/monitor_task.c").read_text(encoding="utf-8")
+    for name in ("monitor_request_power_on", "monitor_request_power_off",
+                 "monitor_request_training_power_on"):
+        body = monitor.split(f"pwr_ctrl_result_t {name}(", 1)[1].split("\n}", 1)[0]
+        assert "memory_io_take_for_power(&now_ms)" in body, "电源请求必须补偿锁等待"
+    assert "*now_ms += (uint32_t)(HAL_GetTick() - lock_start_ms);" in monitor
+
+
+def verify_lock_wait_does_not_consume_rail_delay() -> None:
+    """取锁尚未开电，不能把等锁时间算进第一轨的建立延时。"""
+
+    for requested_at in (100, 0xFFFFFFF0):
+        acquired_at = (requested_at + 400) & 0xFFFFFFFF
+        corrected_start = (requested_at +
+                           ((acquired_at - requested_at) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        assert ((acquired_at - corrected_start) & 0xFFFFFFFF) == 0
+        assert (((acquired_at + 5) - corrected_start) & 0xFFFFFFFF) == 5
 
 
 def verify_wave_image_contract() -> None:
@@ -205,6 +223,7 @@ def main() -> None:
     verify_four_volt_first_sequence()
     verify_alternate_order_and_fault()
     verify_wave_image_timeline()
+    verify_lock_wait_does_not_consume_rail_delay()
     print("pwr_ctrl: production/wave-image contracts and 4 state-machine scenarios PASS")
     print("Timing values are test-only; B1 PC6/PC7 order remains explicitly unconfigured")
 

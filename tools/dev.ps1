@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet('build', 'rebuild', 'style-test', 'protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build')]
+    [ValidateSet('build', 'rebuild', 'style-test', 'protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build', 'ota-probe')]
     [string]$Task = 'build'
 )
 
@@ -51,6 +51,20 @@ function Find-Python {
     throw 'Python not found. Install Python 3 or add python.exe to PATH.'
 }
 
+if ($Task -eq 'ota-probe') {
+    # App双地址验证归App工程；独立B工程不再携带App、RTOS、网络及业务源码。
+    $python = Find-Python
+    $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe'
+    $cmake = Find-BundledExe 'cmake' 'cmake.exe'
+    $ninja = Find-BundledExe 'ninja' 'ninja.exe'
+    foreach ($probeConfig in @('Debug', 'Release')) {
+        & $python -B -X utf8 (Join-Path $repo 'tests\verify_ota_relocation.py') `
+            --compiler $compiler --cmake $cmake --ninja $ninja --build-type $probeConfig
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    exit 0
+}
+
 if ($Task -eq 'style-test') {
     $python = Find-Python
     & $python -B -X utf8 (Join-Path $repo 'tests\verify_code_boundaries.py')
@@ -100,8 +114,8 @@ if (Test-Path -LiteralPath $cache) {
 if (-not $ninja) {
     $ninja = Find-BundledExe 'ninja' 'ninja.exe'
 }
-# A restricted shell may not enumerate the STM32Cube bundle directory.
-# Reuse the absolute tool path from the configured production build cache.
+# 受限终端可能无法枚举STM32Cube工具目录。
+# 此时复用既有正式构建缓存中的工具绝对路径。
 if (-not $ninja) {
     $referenceCache = Join-Path $repo 'build_debug\CMakeCache.txt'
     if (Test-Path -LiteralPath $referenceCache) {

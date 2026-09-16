@@ -108,9 +108,9 @@ def run(host: str, port: int) -> int:
         "algorithmName": "algorithmName",
         "algorithmIndex": 1,
         "testResults": [
-            {"siteId": "站点1", "mirrorIndex": 1, "testStatus": 1},
-            {"siteId": "", "mirrorIndex": 1, "testStatus": 1},
-            {"siteId": "", "mirrorIndex": 1, "testStatus": 1},
+            {"siteId": "站点1", "mirrorIndex": 1, "resultDesc": "读写校验通过", "testStatus": 1},
+            {"siteId": "", "mirrorIndex": 1, "resultDesc": "", "testStatus": 1},
+            {"siteId": "", "mirrorIndex": 1, "resultDesc": "", "testStatus": 1},
         ],
     }, ensure_ascii=False, separators=(",", ":")).encode()
     second = frame(result_body, command=0x0105, sequence=101)

@@ -262,47 +262,215 @@ typedef struct {
  * 读写缓冲由调用方持有，函数返回后可复用；len单位为字节。
  * IF_OK表示本次操作完成；ID/实测值验收仍需真实器件，Mock不代表校准。
  */
+/**
+ * @brief 发送64个高电平数据时钟复位ADC，等待1ms后尝试读STATUS。
+ * @param[in,out] d 非NULL句柄，含有效SPI send及CS端口；wait_ms可为NULL。
+ * @return 参数错误为IF_ERR；否则返回复位序列的SPI发送结果。
+ * @note 当前不根据STATUS读取或POR_FLAG判定成功；缓存模式置IDLE。
+ *       返回IF_OK只代表序列发送成功，不证明复位完成。
+ */
 int  ad7124_reset(ad7124_t *d);
+
+/**
+ * @brief 读取ID并按0x04/0x06/0x07整字节白名单校验。
+ * @param[in,out] d 非NULL且SPI/CS有效；读成功后保存d->id。
+ * @return IF_OK读到支持ID；IF_ERR访问失败或ID不在白名单。
+ * @note ID不支持时仍保存实际读到的值，供诊断。
+ */
 int  ad7124_read_id(ad7124_t *d);
+
+/**
+ * @brief 在一次CS低电平事务内同步读取寄存器数据。
+ * @param[in] d 非NULL、SPI transfer和CS有效的句柄。
+ * @param[in] reg 寄存器地址，发送时仅保留低6位。
+ * @param[out] buf 非NULL、至少len字节；失败保持原值。
+ * @param[in] len 读取字节数1..4，须匹配寄存器及DATA_STATUS配置。
+ * @return IF_OK成功；IF_ERR参数或SPI访问失败。
+ * @note 不验证CS端口或寄存器实际宽度；CS在传输失败后也释放。
+ */
 int  ad7124_read_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len);
+
+/**
+ * @brief 在一次CS低电平事务内同步写入寄存器数据。
+ * @param[in] d 非NULL、SPI send和CS有效的句柄。
+ * @param[in] reg 寄存器地址，仅保留低6位。
+ * @param[in] buf 非NULL、至少len字节，按高字节在前提供，函数不修改。
+ * @param[in] len 写入字节数1..4，调用方须匹配寄存器实际宽度。
+ * @return 参数无效返回IF_ERR；否则透传SPI发送结果。
+ * @note 不更新软件模式/通道缓存，也不验证寄存器内容；原始写后须保持缓存一致。
+ */
 int  ad7124_write_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len);
 
-/* ── 初始化 (B1: 3通道 VDD1/VDD2/VDDQ, CH3 原理图空置) ── */
+/**
+ * @brief 复位并配置三路DDR采样，使用内部2.5V基准和连续模式。
+ * @param[in,out] d 非NULL、SPI和CS已绑定的句柄；成功后num_ch为3。
+ * @return IF_OK初始化操作完成；IF_ERR参数、ID或任一配置访问失败。
+ * @note 同步调用，失败可能已更新部分硬件/缓存，不能按就绪设备使用。
+ *       默认CH0..2对应AIN0/1、2/3、4/5；保持既有正端缓冲、负端AGND配置。
+ */
 int  ad7124_init(ad7124_t *d);
 
-/* ── 工作模式切换 ── */
+/**
+ * @brief 写入固定ADC_CTRL基底及MODE，并在成功后更新模式缓存。
+ * @param[in,out] d 非NULL且SPI/CS有效的句柄。
+ * @param[in] mode AD7124_MODE_*模式，调用方须提供支持值。
+ * @return IF_OK写入成功；IF_ERR参数无效，或透传SPI错误。
+ * @note 本实现整寄存器写入内部时钟、全功率、内部基准和DATA_STATUS，
+ *       不保留其他ADC_CTRL选项；模式按低4位编码，不等待转换/校准结束。
+ */
 int  ad7124_set_mode(ad7124_t *d, uint8_t mode);
 
-/* ── 通道/配置 (setup 0-7 共用同一编号的 CFGx + FILTERx + OFFSETx + GAINx) ── */
+/**
+ * @brief 配置一个硬件通道的使能、setup及正负输入映射。
+ * @param[in] d SPI/CS有效的设备句柄。
+ * @param[in] ch 通道编号0..15。
+ * @param[in] enable 0禁用，非0使能。
+ * @param[in] setup 共用配置组0..7。
+ * @param[in] ainp 正输入选择，低5位编码，调用方保证器件支持。
+ * @param[in] ainm 负输入选择，低5位编码，调用方保证接线/器件支持。
+ * @return IF_OK写入成功；IF_ERR编号/接口无效，或底层SPI错误。
+ * @note 不更新d->num_ch；批量读取仍要求连续编号和软件通道数与硬件一致。
+ */
 int  ad7124_config_channel(ad7124_t *d, uint8_t ch,
                            uint8_t enable, uint8_t setup,
                            uint8_t ainp, uint8_t ainm);
+
+/**
+ * @brief 依次写CFGx和FILTERx，保留OFFSET/GAIN校准寄存器。
+ * @param[in] d SPI/CS有效的设备句柄。
+ * @param[in] setup 配置组0..7，被关联到该组的通道共用。
+ * @param[in] pga 增益编码0..7，对应1..128倍。
+ * @param[in] bipolar 0单极性，非0双极性。
+ * @param[in] ref_sel 基准编码0..3。
+ * @param[in] filter 当前为8位原始值，直接与FS位或合并；不能承载高位滤波宏。
+ * @param[in] fs 速率字段，调用方应传1..2047；当前仅拒绝大于2047。
+ * @return IF_OK两项写入完成；IF_ERR参数无效，或透传底层访问错误。
+ * @note 第二次写失败时CFG可能已生效；本通用接口打开所有输入/基准缓冲，
+ *       不等同于init中针对B1负端接地的配置。
+ */
 int  ad7124_config_setup(ad7124_t *d, uint8_t setup,
                          uint8_t pga, uint8_t bipolar,
                          uint8_t ref_sel,
                          uint8_t filter, uint16_t fs);
 
-/* ── 校准 ── */
+/**
+ * @brief 尝试执行单通道内部满量程及零位校准，再恢复连续模式。
+ * @param[in,out] d 非NULL、已配置的句柄，SPI/CS须有效。
+ * @param[in] ch 校准通道0..7；调用方须确保更高通道未启用。
+ * @return ch大于7返回IF_ERR；当前其余路径返回IF_OK。
+ * @note 当前未检查保存/配置/恢复寄存器的返回值，轮询耗尽也未报超时，
+ *       因此IF_OK不能证明校准成功或原通道状态已恢复。不得依此通过硬件验收。
+ */
 int  ad7124_calibrate(ad7124_t *d, uint8_t ch);
 
-/* ── 数据读取 ── */
+/**
+ * @brief 等待数据就绪并读取单通道24位原始码。
+ * @param[in] d 非NULL且已配置DATA_STATUS的设备，SPI/CS有效。
+ * @param[in] ch 目标硬件通道；连续模式按返回状态匹配，其他模式接受当前结果。
+ * @param[out] raw 非NULL输出；成功为0..0xFFFFFF，超时置0，IO失败可能保留旧值。
+ * @return IF_OK读到结果；IF_ERR访问失败；IF_TIMEOUT轮询耗尽或未找到目标通道。
+ * @note 未校验d/raw空指针。连续模式最多尝试8次转换，每次最多500轮1ms等待，
+ *       另有SPI耗时；结果不作符号扩展，双极性使用offset-binary换算。
+ */
 int  ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw);
+
+/**
+ * @brief 读取单通道并换算为整数毫伏，不补偿前端分压。
+ * @param[in] d 非NULL、已配置DATA_STATUS的有效设备。
+ * @param[in] ch 通道编号，匹配规则同ad7124_read_ch。
+ * @param[in] vref 实际基准电压，单位V。
+ * @param[in] pga 增益编码0..7，须与硬件一致。
+ * @param[in] bipolar 0单极性，非0双极性，须与硬件一致。
+ * @param[out] mv 非NULL，成功写入mV，读取失败保持原值。
+ * @return 透传read_ch结果：IF_OK、IF_ERR或IF_TIMEOUT。
+ * @note 未校验输出指针；等待行为同read_ch。
+ */
 int  ad7124_read_ch_mv(ad7124_t *d, uint8_t ch, float vref, uint8_t pga,
                        uint8_t bipolar, int32_t *mv);
+
+/**
+ * @brief 轮询DATA_STATUS并按硬件通道号收集原始码。
+ * @param[in] d 非NULL有效设备；启用通道应连续为0..num_ch-1，num_ch不超过8。
+ * @param[out] raw 非NULL、至少max_ch项，按实际通道号写入，未收到项保持原值。
+ * @param[in] max_ch 输出项数，内部取其与num_ch较小值。
+ * @param[out] got 可为NULL；实际收到的不同通道数，不是连续有效前缀长度。
+ * @return 收到至少一通道即IF_OK；一个都未收到则IF_TIMEOUT（包括IO失败）。
+ * @note 不检查d/raw空指针；完整快照须有足够容量且got等于num_ch。
+ *       最多num_ch * 4次转换尝试，每次最多500轮1ms等待，另有SPI耗时。
+ */
 int  ad7124_read_all(ad7124_t *d, int32_t *raw, uint8_t max_ch, uint8_t *got);
+
+/**
+ * @brief 批量读取并按每通道增益/极性换算为毫伏。
+ * @param[in] d 非NULL有效设备，通道配置前提同read_all。
+ * @param[out] mv 非NULL、至少max_ch项；成功路径按0..*got-1写入。
+ * @param[in] max_ch 输出项数，应至少为d->num_ch且不超过临时数组容量16。
+ * @param[out] got 必须非NULL；返回实际收集数。
+ * @param[in] vref 实际基准电压，单位V。
+ * @param[in] pga 每通道增益编码数组，至少max_ch项；NULL默认全部0。
+ * @param[in] bipolar 每通道极性数组，至少max_ch项；NULL默认全部单极性。
+ * @return 透传read_all结果，IF_OK不保证收齐通道。
+ * @note 当前按数量换算前缀，但read_all可能稀疏收集；缺通道时可能读取未
+ *       初始化的局部raw项，输出不能使用。此为现有实现缺陷，不能仅靠检查
+ *       返回值解决，后续应修正有效通道跟踪/换算路径。
+ */
 int  ad7124_read_all_mv(ad7124_t *d, int32_t *mv, uint8_t max_ch, uint8_t *got,
                         float vref, const uint8_t *pga, const uint8_t *bipolar);
+
+/**
+ * @brief 读取24位ERROR寄存器，供器件诊断。
+ * @param[in] d SPI/CS有效的设备句柄。
+ * @param[out] err_flags 非NULL，成功写入错误位，失败保持原值。
+ * @return IF_OK读取成功；IF_ERR读取失败。
+ * @note 未校验err_flags空指针；读取具有清除器件错误状态的副作用。
+ */
 int  ad7124_read_error(ad7124_t *d, uint32_t *err_flags);
 
-/* ── 转换 (芯片到货后根据实际分压比调整 vref/系数) ── */
+/**
+ * @brief 将24位ADC码换算为ADC输入电压。
+ * @param[in] raw 0..0xFFFFFF原始码，双极性为offset-binary，不能先符号扩展。
+ * @param[in] vref 实际基准电压，单位V，须有限且大于0。
+ * @param[in] pga 增益编码0..7，实现按低3位索引。
+ * @param[in] bipolar 0单极性，非0双极性。
+ * @return 电压，单位V。
+ * @note 纯计算，不检查输入范围；调用方保证换算结果在返回类型可表示范围内。
+ */
 float  ad7124_raw_to_voltage(int32_t raw, float vref, uint8_t pga, uint8_t bipolar);
+
+/**
+ * @brief 将24位ADC码换算为ADC输入电压。
+ * @param[in] raw 0..0xFFFFFF原始码，双极性为offset-binary，不能先符号扩展。
+ * @param[in] vref 实际基准电压，单位V，须有限且大于0。
+ * @param[in] pga 增益编码0..7，实现按低3位索引。
+ * @param[in] bipolar 0单极性，非0双极性。
+ * @return 电压，单位mV；浮点到整数向零截断。
+ * @note 纯计算，不检查输入范围；调用方保证换算结果在返回类型可表示范围内。
+ */
 int32_t ad7124_raw_to_mv(int32_t raw, float vref, uint8_t pga, uint8_t bipolar);
 
-/* ── 带前端分压换算（B1: AIN输入经100R+10K分压，divider=1.01）──
- *   V_src = V_ADC × divider,  divider = (100+10000)/10000 = 1.01
- *   1.0 = 无分压 (与 raw_to_voltage/mv 等价) */
+/**
+ * @brief 将24位ADC码换算为分压前电源电压。
+ * @param[in] raw 0..0xFFFFFF原始码，双极性为offset-binary，不能先符号扩展。
+ * @param[in] vref 实际基准电压，单位V，须有限且大于0。
+ * @param[in] pga 增益编码0..7，实现按低3位索引。
+ * @param[in] bipolar 0单极性，非0双极性。
+ * @param[in] divider 前端分压还原倍率，须有限且大于0；1为无分压，B1为1.01。
+ * @return 电压，单位V。
+ * @note 纯计算，不检查输入范围；调用方保证换算结果在返回类型可表示范围内。
+ */
 float  ad7124_raw_to_voltage_div(int32_t raw, float vref, uint8_t pga,
                                  uint8_t bipolar, float divider);
+
+/**
+ * @brief 将24位ADC码换算为分压前电源电压。
+ * @param[in] raw 0..0xFFFFFF原始码，双极性为offset-binary，不能先符号扩展。
+ * @param[in] vref 实际基准电压，单位V，须有限且大于0。
+ * @param[in] pga 增益编码0..7，实现按低3位索引。
+ * @param[in] bipolar 0单极性，非0双极性。
+ * @param[in] divider 前端分压还原倍率，须有限且大于0；1为无分压，B1为1.01。
+ * @return 电压，单位mV；浮点到整数向零截断。
+ * @note 纯计算，不检查输入范围；调用方保证换算结果在返回类型可表示范围内。
+ */
 int32_t ad7124_raw_to_mv_div(int32_t raw, float vref, uint8_t pga,
                              uint8_t bipolar, float divider);
 

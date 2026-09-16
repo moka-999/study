@@ -1,5 +1,5 @@
 /*
- * B1 系统电源状态机实现
+ * Apollo V2电源状态机实现（B1使用独立工程的实际电源时序）
  *
  * 安全原则：
  * 1. 初始化和任何 DDR 配置失败都把 PC6/PC7/PG11 收敛到低电平。
@@ -64,7 +64,7 @@ static void enter_fault(void)
 
 pwr_ctrl_result_t pwr_ctrl_configure(const pwr_ctrl_config_t *config)
 {
-    if (!config || config->rail_order > PWR_CTRL_RAIL_ORDER_3V3_FIRST)
+    if (!config || (uint32_t)config->rail_order > PWR_CTRL_RAIL_ORDER_3V3_FIRST)
         return PWR_CTRL_ERR_PARAM;
     if (s_state != PWR_CTRL_STATE_OFF)
         return PWR_CTRL_ERR_BUSY;
@@ -103,6 +103,23 @@ pwr_ctrl_result_t pwr_ctrl_request_on(uint32_t now_ms)
     return PWR_CTRL_OK;
 }
 
+pwr_ctrl_result_t pwr_ctrl_request_training_on(
+    ddr_memory_type_t type, const uint16_t mv[DDR_RAIL_COUNT], uint32_t now_ms)
+{
+    if (!s_configured) return PWR_CTRL_ERR_NOT_CONFIGURED;
+    if (s_state == PWR_CTRL_STATE_FAULT) return PWR_CTRL_ERR_FAULT;
+    if (s_state != PWR_CTRL_STATE_OFF) return PWR_CTRL_ERR_BUSY;
+
+    /*
+     * 先完整校验/复制训练目标，再开第一轨。ON时即使目标相同也不走此入口，
+     * 更不能用新目标覆盖运行中的电压；电源变化的冷重启编排由业务层负责。
+     */
+    if (ddr_power_configure_training(type, mv) != IF_OK) {
+        return PWR_CTRL_ERR_PARAM;
+    }
+    return pwr_ctrl_request_on(now_ms);
+}
+
 pwr_ctrl_result_t pwr_ctrl_request_off(uint32_t now_ms)
 {
     if (s_state == PWR_CTRL_STATE_OFF)
@@ -133,10 +150,16 @@ pwr_ctrl_result_t pwr_ctrl_select_memory_type(ddr_memory_type_t type)
 
 pwr_ctrl_result_t pwr_ctrl_apply_ddr_steps(const int16_t steps[DDR_RAIL_COUNT])
 {
+    uint16_t targets[DDR_RAIL_COUNT];
+
     if (s_state == PWR_CTRL_STATE_FAULT) return PWR_CTRL_ERR_FAULT;
     if (s_state != PWR_CTRL_STATE_ON) return PWR_CTRL_ERR_BUSY;
 
-    if (ddr_power_apply_steps(steps) != IF_OK) {
+    if (ddr_power_build_step_targets(ddr_power_get_memory_type(), steps,
+                                     targets) != IF_OK) {
+        return PWR_CTRL_ERR_PARAM;
+    }
+    if (ddr_power_set(DDR_RAIL_MASK_ALL, targets) != IF_OK) {
         enter_fault();
         return PWR_CTRL_ERR_FAULT;
     }
@@ -155,7 +178,7 @@ void pwr_ctrl_process(uint32_t now_ms)
 
     case PWR_CTRL_STATE_WAIT_SECOND_RAIL:
         if (delay_elapsed(now_ms, s_config.second_to_ddr_delay_ms)) {
-            /* 三颗 TPS62868 的 VIN 来自 4.0V，因此 PG11 必须最后使能。 */
+            /* V2仅模拟独立DDR使能；不可照搬到PG11串联位为NC的B1。 */
             bsp_gpio_set(GPIO_FUNC_PWR_DDR_EN, 1);
             enter_state(PWR_CTRL_STATE_WAIT_DDR_READY, now_ms);
         }
@@ -170,7 +193,7 @@ void pwr_ctrl_process(uint32_t now_ms)
              */
             enter_state(PWR_CTRL_STATE_ON, now_ms);
 #else
-            /* EN 拉高后寄存器才可访问；任一轨初始化失败都视为整机上电失败。 */
+            /* TPS可访问后直接写本次训练目标；任一事务失败立即全关。 */
             if (ddr_power_init() != IF_OK) {
                 enter_fault();
             } else {

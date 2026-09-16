@@ -40,6 +40,10 @@
 #include "uart_router.h"
 #include "pwr_ctrl.h"
 #include "pc_protocol.h"
+#include "monitor_task.h"
+#include "result_led.h"
+#include "ota_app.h"
+#include "flash_bsp.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -104,6 +108,14 @@ void MX_FREERTOS_Init(void) {
    * 当前固件统一放置在 AXI SRAM 的堆规划。
    */
   pc_json_configure_allocator(pvPortMalloc, vPortFree);
+  if (flash_transaction_prepare() != 0) Error_Handler();
+  ota_app_prepare();
+#if (!defined(ENABLE_FLASH_SELF_TEST) || !ENABLE_FLASH_SELF_TEST) && \
+    (!defined(ENABLE_DRIVER_MOCK_TEST) || !ENABLE_DRIVER_MOCK_TEST) && \
+    (!defined(ENABLE_AD7124_WAVE_TEST) || !ENABLE_AD7124_WAVE_TEST)
+  if (!monitor_task_prepare())
+    Error_Handler();
+#endif
 
   /* USER CODE END Init */
 
@@ -164,11 +176,12 @@ void MX_FREERTOS_Init(void) {
   xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
 #elif defined(ENABLE_PC_PROTOCOL_NET_TEST) && ENABLE_PC_PROTOCOL_NET_TEST
   /*
-   * PC协议网络验收镜像只保留LWIP、TCP回显任务和喂狗任务，不启动RK、
-   * 监测及心跳业务，确保抓到的流量只属于18字节头+cJSON测试。
+   * PC协议网络验收镜像保留LWIP、TCP、缓存监测和结果灯业务，不启动RK
+   * 或自主波形任务，确保控制只来自18字节头+cJSON请求。
    */
   xTaskCreate(StartTcpServerTask, "pcNetTest", 4096, NULL, 5,
               &tcpClientTaskHandle);
+  xTaskCreate(StartMonitorTask, "monitor", 512, NULL, 2, &monitorTaskHandle);
   xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
 #else
   /* creation of ledBlinkTask */
@@ -189,14 +202,13 @@ void MX_FREERTOS_Init(void) {
   xTaskCreate(StartHbTask, "hb", 1024, NULL, 3, NULL);
   rkToPc_Queue  = xQueueCreate(8, sizeof(rk_msg_t));   /* RK→PC 上报队列     */
   pcToRk_Queue  = xQueueCreate(8, sizeof(pc2rk_msg_t)); /* PC→RK 命令转发队列 */
-  /* 看门狗喂狗: 优先级 25, 高于 defaultTask(24) 确保 MX_LWIP_Init 阻塞时仍能喂狗 */
-  xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
+  /* OTA确认需读写256B日志及校验缓冲，留4KiB栈；不再无条件给卡死任务喂狗。 */
+  xTaskCreate(StartWdtFeedTask, "wdtFeed", 1024, NULL, 25, NULL);
 
 
 
 
 
-  
 #if defined(ENABLE_DRIVER_SELF_TEST) && ENABLE_DRIVER_SELF_TEST
   /* 驱动自检仅用于开发镜像，生产构建默认不创建。 */
   extern void StartTestTask(void *argument);
@@ -242,7 +254,12 @@ void StartDefaultTask(void *argument)
   for(;;)
   {
     /* 非阻塞推进电源状态机；未配置时保持 OFF，不产生 GPIO 翻转。 */
-    pwr_ctrl_process(HAL_GetTick());
+    monitor_power_process(HAL_GetTick());
+    ota_app_progress(OTA_TASK_DEFAULT);
+#if defined(ENABLE_V2_RESULT_LED) && ENABLE_V2_RESULT_LED
+    /* 网络命令改变业务状态，本任务只负责推进共享500ms闪烁相位。 */
+    result_led_process(HAL_GetTick());
+#endif
     osDelay(1);
   }
   /* USER CODE END StartDefaultTask */
@@ -252,13 +269,13 @@ void StartDefaultTask(void *argument)
 /* USER CODE BEGIN Application */
 /* 正式任务位于App/tasks/{pc,rk,common}，隔离验证任务位于App/tasks/test。 */
 
-/* 看门狗喂狗任务: 最高优先级, 2s 周期 */
+/* 最高优先级每500ms检查关键任务进展；OTA失去健康后停止喂狗，交B统计失败。 */
 void StartWdtFeedTask(void *argument)
 {
   (void)argument;
   for (;;) {
-    wdt_feed();
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    if (ota_app_watchdog_tick()) wdt_feed();
+    vTaskDelay(pdMS_TO_TICKS(500));
   }
 }
 

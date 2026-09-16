@@ -13,7 +13,9 @@
  * B1 正式引脚 (原理图 20260811 版确认):
  *   PWR_4V0_EN  PC6  → MP8759 EN (VCC4V0_SYS, 4.0V), 默认 OFF
  *   PWR_3V3_EN  PC7  → RT8070 EN (VCC3V3_SYS, 3.3V), 默认 OFF
- *   PWR_DDR_EN  PG11 → TPS62868×3 EN (VDD1/VDD2/VDDQ), 默认 OFF
+ *   PWR_DDR_EN  PG11 → TPS EN防御性预留；0831图串联位NC，无实际总闸效果
+ *   B1三轨随PC6产生4V自动启动；本文件的三段控制仅用于V2软件/GPIO验证，
+ *   最终B1按独立工程的pwr_ctrl执行，不复制V2的独立PG11等待阶段。
  *
  *   (B1 MCU不负责加热；加热由B2 MCU统一控制)
  *
@@ -47,13 +49,27 @@ typedef enum {
     GPIO_FUNC_COUNT,
 } gpio_func_t;
 
-/* ── 初始化: 全部配置为推挽输出, 初始低电平 (默认 OFF) ── */
+/**
+ * @brief 将电源使能脚预置为低，再配置成推挽输出。
+ * @note GPIO时钟须已开启，且在既有TIM8初始化后调用；会接管PC6/PC7/PG11。
+ *       由pwr_ctrl初始化调用，重复执行会立即关闭所有使能。
+ */
 void bsp_gpio_init(void);
 
-/* ── 电平控制: level 0=低 1=高 ── */
+/**
+ * @brief 按板级功能映射设置GPIO电平。
+ * @param[in] func 有效gpio_func_t；大于等于GPIO_FUNC_COUNT时忽略。
+ * @param[in] level 0输出低，非0输出高。
+ * @note 不执行电源时序/互锁，业务通过pwr_ctrl访问，避免绕过安全关断。
+ */
 void bsp_gpio_set(gpio_func_t func, uint8_t level);
 
-/* ── 电平读取 ── */
+/**
+ * @brief 读取映射引脚的GPIO输入电平。
+ * @param[in] func 有效gpio_func_t。
+ * @return 1高；0低或功能编号超出范围。
+ * @note GPIO电平不等于被控电源实际电压，不替代ADC回读。
+ */
 uint8_t bsp_gpio_get(gpio_func_t func);
 
 #endif

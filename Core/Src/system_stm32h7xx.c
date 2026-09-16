@@ -306,7 +306,13 @@ void SystemInit (void)
 
   /* Configure the Vector Table location -------------------------------------*/
 #if defined(USER_VECT_TAB_ADDRESS)
+#if defined(OTA_RELOCATION_PROBE)
+  /* 实验App使用向量表符号，让VTOR地址一起进入修正表；正常镜像仍按原配置。 */
+  extern const uint32_t g_pfnVectors[];
+  SCB->VTOR = (uint32_t)g_pfnVectors;
+#else
   SCB->VTOR = VECT_TAB_BASE_ADDRESS | VECT_TAB_OFFSET; /* Vector Table Relocation in Internal D1 AXI-RAM or in Internal FLASH */
+#endif
 #endif /* USER_VECT_TAB_ADDRESS */
 
 #endif /*DUAL_CORE && CORE_CM4*/

@@ -8,7 +8,7 @@
  *   读寄存器: CS↓ → [cmd_rd] [dummy] → (收) [echo] [reg_data_MSB..LSB] → CS↑
  *   复位:     CS↓ → 64 SCLK w/ DIN=HIGH (8×0xFF) → CS↑ → Delay 1ms
  *
- * 寄存器大小 (读/写时截断到硬件宽度):
+ * 寄存器大小（调用方须传匹配的len，通用读写接口不自动推断宽度）:
  *   8-bit:  STATUS, ID, MCLK_COUNT
  *   16-bit: ADC_CTRL, IO_CTRL2, CHx, CFGx
  *   24-bit: DATA, IO_CTRL1, ERROR, ERROR_EN, FILTERx, OFFSETx, GAINx
@@ -105,7 +105,7 @@ int ad7124_reset(ad7124_t *d)
     _cs_high(d);
     _wait_ms(d, 1);
 
-    /* 验证复位: 读 STATUS, 检查 POR_FLAG */
+    /* 尝试读STATUS以清POR事件；当前未用读取结果或POR_FLAG判定复位成功。 */
     uint8_t st;
     if (ad7124_read_reg(d, AD7124_REG_STATUS, &st, 1) == IF_OK) {
         /* POR_FLAG=1 表示复位成功, 读 STATUS 自动清除 */
@@ -171,7 +171,7 @@ int ad7124_config_channel(ad7124_t *d, uint8_t ch,
  *   pga:      增益 0-7 → 1,2,4,8,16,32,64,128
  *   bipolar:  1=双极性, 0=单极性
  *   ref_sel:  基准选择 (AD7124_REF_xxx)
- *   filter:   滤波器类型 (AD7124_FILT_xxx)
+ *   filter:   当前仅8位并直接合并到FILTERx，无法承载高位AD7124_FILT宏
  *   fs:       输出速率选择 (1-2047)
  * ===================================================================
  * 注: OFFSET/GAIN 校准值保持默认 (上电自动加载工厂校准值).
@@ -201,13 +201,14 @@ int ad7124_config_setup(ad7124_t *d, uint8_t setup,
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * 初始化：复位 → 读ID → 配置3通道（B1/MB360原理图20260811，AIN0/2/4）
- *   CH0: AIN0 ↔ AVSS → VCC_1V8_S3_LPDDR4X (VDD1, 1.8V, TPS62868 U4025)
- *   CH1: AIN2 ↔ AVSS → VDD2_DDR_S3       (VDD2, 1.1V, TPS62868 U4026)
- *   CH2: AIN4 ↔ AVSS → VDDQ_DDR          (VDDQ, 0.6V, TPS62868 U4027)
- *   AIN1/3/5 = AGND, AIN6/7 = NC (原理图)
+ * 初始化：复位 → 读ID → 配置3路原理图差分通道
+ *   CH0: AIN0 - AIN1 → VCC_1V8_S3_LPDDR4X (VDD1, 1.8V, TPS62868 U4025)
+ *   CH1: AIN2 - AIN3 → VDD2_DDR_S3       (VDD2, 1.1V, TPS62868 U4026)
+ *   CH2: AIN4 - AIN5 → VDDQ_DDR          (VDDQ, 0.6V, TPS62868 U4027)
+ *   AIN1/3/5由原理图接AGND，AIN6/7未使用。
  *
- *   默认: 外部基准 REFIN1 (2.5V), SINC4, 50Hz ODR, 增益=1, 单极性 (unipolar)
+ *   默认: 内部2.5V基准, SINC4, 50Hz ODR, 增益=1, 单极性 (unipolar)
+ *   原因: 20260831版B1原理图中REFIN1+串联的FB2306标为NC，外部基准未接入。
  *   单极性理由: DDR 电压全正 (0.6~1.8V), unipolar 满量程 0~2.5V 分辨率翻倍
  *              (24-bit 全用 vs bipolar 有效 23-bit), 更符合老化拉偏精度需求
  *   使能 DATA_STATUS: 读 DATA 时状态字节附加在数据后 (第4字节)
@@ -215,16 +216,19 @@ int ad7124_config_setup(ad7124_t *d, uint8_t setup,
 
 int ad7124_init(ad7124_t *d)
 {
-    /* B1原理图：CH0→AIN0，CH1→AIN2，CH2→AIN4（AIN1/3/5=AGND）。 */
+    /* 正负端一一按B1原理图配对，不用内部AVSS代替板上AGND回路。 */
     static const uint8_t b1_ainp[3] = {
         AD7124_AIN_AIN0, AD7124_AIN_AIN2, AD7124_AIN_AIN4
+    };
+    static const uint8_t b1_ainm[3] = {
+        AD7124_AIN_AIN1, AD7124_AIN_AIN3, AD7124_AIN_AIN5
     };
 
     if (!d || !d->spi) return IF_ERR;
     if (ad7124_reset(d) != IF_OK) return IF_ERR;
     if (ad7124_read_id(d) != IF_OK) return IF_ERR;
 
-    /* ADC_CTRL: 内部时钟, 外部基准 REFIN1 (见 CFGx REF_SEL), 连续模式, 全功率, DATA_STATUS */
+    /* ADC_CTRL同时使能内部2.5V基准；CFGx再显式选择该内部基准。 */
     if (_wr16(d, AD7124_REG_ADC_CTRL,
               AD7124_ADC_CLK_SEL(AD7124_CLK_INT) |
               AD7124_ADC_POWER_MODE(AD7124_PWR_FULL) |
@@ -237,20 +241,22 @@ int ad7124_init(ad7124_t *d)
     d->num_ch = 3;  /* B1本板的3路DDR电压回读 */
 
     for (int ch = 0; ch < d->num_ch; ch++) {
-        /* CHx_MAP：使能，AIN(b1_ainp)对AVSS，setup=ch。 */
+        /* CHx_MAP：使能原理图对应的AIN正/负端，setup=ch。 */
         if (_wr16(d, AD7124_REG_CH0 + ch,
                   AD7124_CH_ENABLE | AD7124_CH_AINP(b1_ainp[ch]) |
-                  AD7124_CH_AINM(AD7124_AIN_AVSS) |
+                  AD7124_CH_AINM(b1_ainm[ch]) |
                   AD7124_CH_SETUP(ch)) != IF_OK)
             return IF_ERR;
 
-        /* CFGx: 单极性, gain=1, 外部基准 REFIN1, 缓冲器使能
+        /* CFGx: 单极性, gain=1, 内部2.5V基准, 仅使能正端输入缓冲。
+         * 最新B1原理图的FB2306为NC，不能选择悬空的REFIN1作为转换基准。
+         * AIN1/3/5直接AGND；增益1时负端缓冲要求输入高于AVSS 100mV，
+         * 因此必须关闭AIN_BUFM。内部基准直接调制器，也不需要REFIN缓冲器。
          * (单极性: AIN 范围 0~VREF/gain, DDR 电压全正用满 24-bit 分辨率) */
         if (_wr16(d, AD7124_REG_CFG0 + ch,
                   AD7124_CFG_PGA(0) |
-                  AD7124_CFG_REF_SEL(AD7124_REF_EXT1) |
-                  AD7124_CFG_REF_BUFP | AD7124_CFG_REF_BUFM |
-                  AD7124_CFG_AIN_BUFP | AD7124_CFG_AIN_BUFM) != IF_OK)
+                  AD7124_CFG_REF_SEL(AD7124_REF_INT) |
+                  AD7124_CFG_AIN_BUFP) != IF_OK)
             return IF_ERR;
 
         /* FILTERx: SINC4, FS=384 → fADC = 614400/(32*384) ≈ 50Hz */
@@ -336,7 +342,7 @@ int ad7124_calibrate(ad7124_t *d, uint8_t ch)
  *   读 DATA 返回 4 字节: [DATA23:16] [DATA15:8] [DATA7:0] [STATUS]
  *   (STATUS 附加在数据之后, CH_ACTIVE 字段指示当前通道)
  *
- * 连续模式: 自动轮询使能的通道, 最多等 4 次 RDY 找到目标通道.
+ * 连续模式: 自动轮询使能的通道, 最多尝试8次转换寻找目标通道.
  * 单次模式: 目标通道已选中, 直接读.
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -386,11 +392,11 @@ int ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw)
  * 用法:
  *   int32_t raw[4]; uint8_t got;
  *   ad7124_read_all(&adc, raw, 4, &got);
- *   // raw[0..got-1] 有效, got == d->num_ch 表示全部收齐
+ *   // 容量足够且got == d->num_ch才是完整快照；got不是连续前缀长度。
  *
- * 连续模式: 轮询 RDY, 读 DATA+STATUS, 按 CH_ACTIVE 归位
- *           全部 num_ch 个通道都有结果后返回.
- * 单次模式: 退化, 只读当前通道.
+ * 轮询RDY并按CH_ACTIVE归位，收齐或尝试耗尽后返回；收到任意一通道即
+ * 返回IF_OK。部分结果可能稀疏，当前API未返回有效通道掩码，不能按got
+ * 直接消费raw前缀。单次模式也沿用这一轮询流程，不主动启动下一次转换。
  * ═══════════════════════════════════════════════════════════════════ */
 
 int ad7124_read_all(ad7124_t *d, int32_t *raw, uint8_t max_ch, uint8_t *got)
@@ -418,7 +424,7 @@ int ad7124_read_all(ad7124_t *d, int32_t *raw, uint8_t max_ch, uint8_t *got)
 
         uint8_t active_ch = rx[3] & 0x0F;   /* STATUS 在最后 (DATA_STATUS) */
 
-        /* 忽略溢出/错误状态 */
+        /* 这里只过滤通道编号，尚未检查STATUS中的ERROR_FLAG。 */
         if (active_ch >= d->num_ch || active_ch >= max_ch) continue;
         if (ch_mask & (1 << active_ch)) continue;  /* 已有 */
 
@@ -481,14 +487,7 @@ float ad7124_raw_to_voltage(int32_t raw, float vref, uint8_t pga, uint8_t bipola
 /* ═══════════════════════════════════════════════════════════════════
  * 原始值 → mV (int32_t, 整数, 协议上报用)
  *
- * 芯片到货后: 如果前端有分压电阻, vref 参数应传分压后的等效基准.
- *            例如 1.8V rail 经 1/2 分压 → vref = 2.5 * 2 = 5.0
- * ═══════════════════════════════════════════════════════════════════ */
-
-/* ═══════════════════════════════════════════════════════════════════
- * 原始值 → mV (int32_t, 整数, 协议上报用)
- *
- * vref 传基准电压 (REFIN1 = 2.5V); 若前端有分压, 用 _div 系列传 divider:
+ * vref 传实际基准电压（B1使用内部2.5V）；若前端有分压, 用 _div 系列传 divider:
  *   B1: AIN输入经100R+10K分压 → V_src = V_ADC × (100+10000)/10000
  *       = V_ADC × 1.01  → divider = AD7124_DIV_100R_10K
  * ═══════════════════════════════════════════════════════════════════ */
@@ -532,6 +531,8 @@ int ad7124_read_all_mv(ad7124_t *d, int32_t *mv, uint8_t max_ch, uint8_t *got,
     int32_t raw[16];
     int r = ad7124_read_all(d, raw, max_ch, got);
     if (r != IF_OK) return r;
+    /* 已知限制：got是收集数量，raw按通道号稀疏写入；缺通道时这里可能
+     * 读取未初始化项。当前接口须修正有效通道跟踪，不能把IF_OK当成收齐。 */
     for (uint8_t i = 0; i < *got; i++) {
         uint8_t p = pga     ? pga[i]    : 0;
         uint8_t b = bipolar ? bipolar[i] : 0;   /* 默认unipolar（B1全是正电压轨）。 */

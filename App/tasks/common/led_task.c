@@ -11,6 +11,12 @@
 #include "task.h"
 #include "led.h"
 
+/**
+ * @brief FreeRTOS存活指示任务入口，周期翻转心跳灯。
+ * @param[in] argument 未使用，可为NULL。
+ * @note 调用前须初始化LED GPIO；每500ms翻转一次（完整明灭约1s）。
+ *       仅表示任务得到调度，不证明网络/RK或其他业务健康，不正常返回。
+ */
 void StartLedBlinkTask(void *argument)
 {
   (void)argument;

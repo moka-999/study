@@ -45,35 +45,104 @@
 
 /* ── API ── */
 
-/* 初始化：复位器件、进入 4 字节地址模式并确认 QE 位。 */
+/**
+ * @brief 复位W25Q256，进入四字节地址模式并使能/确认QE位。
+ * @return 0成功；-1关键命令、状态访问或QE确认失败。
+ * @note 须先完成MX_QUADSPI_Init；同步调用，独占QSPI设备，不验证JEDEC型号。
+ *       配置QE时可能调用osDelay等待，须在允许RTOS等待的上下文使用。
+ */
 int qspi_init(void);
 
-/* 诊断: 读取 QSPI 外设寄存器 (CR, SR, CCR, DCR) */
+/**
+ * @brief 读取STM32 QSPI外设寄存器供诊断。
+ * @param[out] cr CR输出，可为NULL跳过。
+ * @param[out] sr SR输出，可为NULL跳过。
+ * @param[out] ccr CCR输出，可为NULL跳过。
+ * @param[out] dcr DCR输出，可为NULL跳过。
+ * @note 顺序读寄存器，不是原子快照，不发送Flash命令。
+ */
 void qspi_dump_regs(uint32_t *cr, uint32_t *sr, uint32_t *ccr, uint32_t *dcr);
 
-/* 读 JEDEC ID (3 字节: 制造商 + 类型 + 容量), 单线 */
+/**
+ * @brief 单线读取JEDEC的制造商、类型和容量三个字节。
+ * @param[out] id 非NULL、至少3字节；仅返回0时有效。
+ * @return 0成功；-1参数或HAL传输错误。
+ * @note 不解释ID、不判断型号兼容；同步独占访问QSPI。
+ */
 int qspi_read_jedec_id(uint8_t *id);
 
-/* 读状态寄存器, 单线 */
+/**
+ * @brief 以单线命令读取一个Flash状态字节。
+ * @param[in] cmd READ_STATUS1/2/3命令码，调用方保证合法。
+ * @param[out] sr 非NULL输出，仅返回0时有效。
+ * @return 0成功；-1参数或HAL传输错误。
+ * @note 不校验命令白名单，调用方不可传写入/擦除等其他指令。
+ */
 int qspi_read_status(uint8_t cmd, uint8_t *sr);
 
-/* 等待 Flash 空闲 (轮询 BUSY 位) */
+/**
+ * @brief 轮询SR1 BUSY位，忙时通过osDelay(1)让出执行。
+ * @param[in] timeout_ms 当前实现的最大轮询次数，按每轮1tick等待近似毫秒。
+ * @return 0观察到空闲；-1读状态失败；-2循环次数耗尽，参数0也直接返回-2。
+ * @note 单位近似依赖1kHz内核tick；每轮另有HAL耗时，不是严格墙钟超时。
+ *       必须在可调用osDelay的任务上下文使用，返回超时不表示器件已停止操作。
+ */
 int qspi_wait_busy(uint32_t timeout_ms);
 
-/* 扇区擦除 (4KB)，地址必须 4KB 对齐且位于器件范围内。 */
+/**
+ * @brief 擦除一个4KiB单元并等待BUSY清除。
+ * @param[in] addr Flash字节地址，须小于W25Q_CAPACITY且按W25Q_SECTOR_SIZE对齐。
+ * @return 0擦除等待完成；-1地址/命令错误；-2等待次数耗尽。
+ * @note 整个单元内容会丢失，不做数据保留；调用方确认范围并串行化事务。
+ *       超时后不能假定擦除未发生或设备已空闲，等待约束见qspi_wait_busy。
+ */
 int qspi_erase_sector(uint32_t addr);
 
-/* 块擦除 (32KB/64KB)，地址必须按对应块大小对齐。 */
+/**
+ * @brief 擦除一个32KiB单元并等待BUSY清除。
+ * @param[in] addr Flash字节地址，须小于W25Q_CAPACITY且按W25Q_BLOCK32_SIZE对齐。
+ * @return 0擦除等待完成；-1地址/命令错误；-2等待次数耗尽。
+ * @note 整个单元内容会丢失，不做数据保留；调用方确认范围并串行化事务。
+ *       超时后不能假定擦除未发生或设备已空闲，等待约束见qspi_wait_busy。
+ */
 int qspi_erase_block32(uint32_t addr);
+
+/**
+ * @brief 擦除一个64KiB单元并等待BUSY清除。
+ * @param[in] addr Flash字节地址，须小于W25Q_CAPACITY且按W25Q_BLOCK64_SIZE对齐。
+ * @return 0擦除等待完成；-1地址/命令错误；-2等待次数耗尽。
+ * @note 整个单元内容会丢失，不做数据保留；调用方确认范围并串行化事务。
+ *       超时后不能假定擦除未发生或设备已空闲，等待约束见qspi_wait_busy。
+ */
 int qspi_erase_block64(uint32_t addr);
 
-/* 整片擦除, 耗时 ~60-200s */
+/**
+ * @brief 发出整片32MiB擦除并同步等待完成。
+ * @return 0等待到空闲；-1命令失败；-2等待次数耗尽。
+ * @note 破坏全部Flash数据，调用前必须获得整片擦除授权并确认无须保留的
+ *       元数据；不是常规记录更新接口。采用200000次等待上限，见qspi_wait_busy。
+ */
 int qspi_erase_chip(void);
 
-/* 页写入 (1~256 字节，不能跨页)，四线数据；长度 0 直接成功。 */
+/**
+ * @brief 在单个256字节页内编程并等待完成，不自动擦除。
+ * @param[in] addr Flash字节地址，整个范围须位于器件内且不能跨页。
+ * @param[in] data 至少len字节；len为0时允许NULL。
+ * @param[in] len 0..256字节，0时不访问硬件直接成功。
+ * @return 0成功；-1参数/传输错误；-2编程等待次数耗尽。
+ * @note NOR只能从1写成0，需要0变1时须先擦除；不验证回读，不保证失败时
+ *       未写入。调用方须独占整个事务，输入在返回前保持有效。
+ */
 int qspi_write_page(uint32_t addr, const uint8_t *data, uint16_t len);
 
-/* 读取数据（不可越过 32 MiB 末尾）；长度 0 直接成功。 */
+/**
+ * @brief 四线读取W25Q256指定范围到调用方缓冲。
+ * @param[in] addr Flash字节地址，整个范围不得超过32MiB。
+ * @param[out] buf 至少len字节；len为0时允许NULL。
+ * @param[in] len 字节数，0时直接成功，不检查地址。
+ * @return 0成功；-1参数或HAL错误，失败时输出内容不保证完整。
+ * @note 须先完成QE/四字节模式初始化；同步独占访问，返回后缓冲可复用。
+ */
 int qspi_read_data(uint32_t addr, uint8_t *buf, uint32_t len);
 
 #endif

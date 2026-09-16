@@ -95,7 +95,7 @@ int pac1934_read_ch(pac1934_t *d, uint8_t ch, pac1934_chan_t *out)
     return IF_OK;
 }
 
-/* ── 刷新并读取全部 4 通道 (REFRESH 后需 ≥1ms 再读, 由调用方延时) ── */
+/* REFRESH_V后由本函数调用wait_ms等待1ms，再逐通道读取。 */
 int pac1934_read_all(pac1934_t *d, pac1934_chan_t *ch)
 {
     if (!d || !ch || !d->wait_ms || d->active_mask == 0U) return IF_ERR;

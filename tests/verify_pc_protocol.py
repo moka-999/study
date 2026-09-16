@@ -42,6 +42,8 @@ class StreamModel:
             raise ProtocolError("version")
         if len(self.buffer) == 8 and struct.unpack_from(">H", self.buffer, 6)[0] != FLAG_JSON:
             raise ProtocolError("flag")
+        if len(self.buffer) == 10 and struct.unpack_from(">H", self.buffer, 8)[0] != 0:
+            raise ProtocolError("service")
         if self.expected and len(self.buffer) == self.expected:
             return bytes(self.buffer)
         return None
@@ -73,8 +75,8 @@ def main() -> None:
     body_a = json.dumps({"board": "B1", "ip": "192.168.1.201"},
                         ensure_ascii=False, separators=(",", ":")).encode()
     body_b = "{\"message\":\"中文UTF-8\"}".encode()
-    frame_a = build_frame(body_a, 0x0102, 0x0304, 0x11223344)
-    frame_b = build_frame(body_b, 0x0102, 0x0305, 0x11223345)
+    frame_a = build_frame(body_a, 0, 0x0304, 0x11223344)
+    frame_b = build_frame(body_b, 0, 0x0305, 0x11223345)
 
     # 每字节一次送入，覆盖任意位置半包。
     stream = StreamModel()
@@ -111,7 +113,7 @@ def main() -> None:
     passed += 1
 
     fields = struct.unpack(">IHHHHIH", decoded[0][:HEADER_SIZE])
-    assert fields == (len(frame_a), 1, 8, 0x0102, 0x0304, 0x11223344, 0)
+    assert fields == (len(frame_a), 1, 8, 0, 0x0304, 0x11223344, 0)
     assert json.loads(decoded[0][HEADER_SIZE:].decode("utf-8"))["board"] == "B1"
     passed += 1
 
@@ -119,7 +121,9 @@ def main() -> None:
     expect_protocol_error(struct.pack(">I", MAX_PDU + 1), "最大Length")
     expect_protocol_error(struct.pack(">IH", HEADER_SIZE, 2), "Version")
     expect_protocol_error(struct.pack(">IHH", HEADER_SIZE, VERSION, 7), "Flag")
-    passed += 4
+    expect_protocol_error(struct.pack(">IHHH", HEADER_SIZE, VERSION, FLAG_JSON, 1),
+                          "ServiceID")
+    passed += 5
 
     # 字段刚到齐时就拒绝，不因拆分状态处理函数而延迟到整帧结束。
     for invalid, reject_at in ((struct.pack(">I", MAX_PDU + 1), 4),
@@ -161,6 +165,7 @@ def main() -> None:
     assert "cJSON_ParseWithLengthOpts" in source
     assert "PC_JSON_ERROR_DUPLICATE_KEY" in source
     assert "utf8_is_valid" in source
+    assert "json_string_lexemes_are_safe" in source
     passed += 1
 
     # PC字节流状态机必须独立于JSON/组帧模块，正式任务只调用状态机API。
@@ -208,6 +213,8 @@ def main() -> None:
                        "pc_dispatch.c").read_text(encoding="utf-8")
     assert "pc_json_parse_object" in dispatch_source
     assert "pc_protocol_build_response" in dispatch_source
+    assert '"requestCommandId"' in dispatch_source
+    assert '"commandId"' not in dispatch_source
     assert "PC_COMMAND_QUERY_TESTER_INFO" in dispatch_source
     assert "pc_tester_info_load" in dispatch_source
     assert '"testerName"' in dispatch_source
@@ -236,7 +243,17 @@ def main() -> None:
     assert routes["PC_COMMAND_START_TEST"] == "handle_start_test"
     assert routes["PC_COMMAND_SERVER_HEARTBEAT"] == "reject_response_command"
     assert routes["PC_COMMAND_TESTER_INFO_RESP"] == "reject_response_command"
-    assert "s_command_table[i].handler(request, root, response)" in dispatch_source
+    assert routes["PC_COMMAND_SET_DDR_CONFIG"] == "handle_set_ddr_config"
+    assert routes["PC_COMMAND_POWER_ON"] == "handle_power_on"
+    assert routes["PC_COMMAND_POWER_OFF"] == "handle_power_off"
+    assert routes["PC_COMMAND_RESET_RK"] == "handle_reset_rk"
+    assert routes["PC_COMMAND_SET_BOOT_MODE"] == "handle_set_boot_mode"
+    assert routes["PC_COMMAND_QUERY_BOOT_MODE"] == "handle_query_boot_mode"
+    assert routes["PC_COMMAND_BOOT_MODE_RESP"] == "reject_response_command"
+    assert routes["PC_COMMAND_QUERY_POWER_MONITOR"] == "handle_query_power_monitor"
+    assert routes["PC_COMMAND_SET_RESULT_INDICATOR"] == "handle_set_result_indicator"
+    assert routes["PC_COMMAND_QUERY_INDICATOR_STATUS"] == "handle_query_indicator_status"
+    assert "s_command_table[i].handler(request, mcu_tx_sequence" in dispatch_source
     passed += 1
 
     tester_store_source = (ROOT / "App" / "protocol" / "pc" /
@@ -271,6 +288,15 @@ def main() -> None:
     assert "PC_COMMAND_CLIENT_HEARTBEAT   0x0002U" in command_header
     assert "PC_COMMAND_QUERY_TESTER_INFO  0x0101U" in command_header
     assert "PC_COMMAND_TESTER_INFO_RESP   0x0102U" in command_header
+    assert "PC_COMMAND_SET_DDR_CONFIG      0x0509U" in command_header
+    assert "PC_COMMAND_POWER_ON            0x0501U" in command_header
+    assert "PC_COMMAND_POWER_OFF           0x0502U" in command_header
+    assert "PC_COMMAND_RESET_RK            0x0505U" in command_header
+    assert "PC_COMMAND_SET_BOOT_MODE       0x0506U" in command_header
+    assert "PC_COMMAND_QUERY_BOOT_MODE     0x0507U" in command_header
+    assert "PC_COMMAND_BOOT_MODE_RESP      0x0508U" in command_header
+    assert "PC_COMMAND_QUERY_POWER_MONITOR 0x0601U" in command_header
+    assert "PC_COMMAND_SET_RESULT_INDICATOR    0x0701U" in command_header
     passed += 1
 
     # 测试仪信息必须由0x0101查询触发，不允许连接建立后主动推送。
@@ -281,9 +307,9 @@ def main() -> None:
     }
     tester_response = build_frame(
         json.dumps(tester_info, separators=(",", ":")).encode(),
-        service=0x1234, command=0x0102, sequence=0x55667788)
+        service=0, command=0x0102, sequence=1)
     tester_fields = struct.unpack(">IHHHHIH", tester_response[:HEADER_SIZE])
-    assert tester_fields[3:] == (0x1234, 0x0102, 0x55667788, 0)
+    assert tester_fields[3:] == (0, 0x0102, 1, 0)
     assert json.loads(tester_response[HEADER_SIZE:]) == tester_info
     accept_block = tcp_source.split("accept(listenfd, NULL, NULL);", 1)[1]
     before_recv = accept_block.split("recv(connfd, rx, sizeof(rx), 0);", 1)[0]
@@ -293,11 +319,12 @@ def main() -> None:
     request = json.loads('{"algorithmName":"algorithmName","algorithmIndex":1}')
     result = json.loads(
         '{"algorithmName":"algorithmName","algorithmIndex":1,'
-        '"testResults":[{"siteId":"","mirrorIndex":1,"testStatus":1}]}'
+        '"testResults":[{"siteId":"","mirrorIndex":1,"resultDesc":"","testStatus":1}]}'
     )
     assert isinstance(request["algorithmName"], str)
     assert isinstance(request["algorithmIndex"], int)
     assert isinstance(result["testResults"], list)
+    assert result["testResults"][0]["resultDesc"] == ""
     try:
         json.loads('{"algorithmName":"algorithmName","algorithmIndex":1,}')
     except json.JSONDecodeError:
@@ -309,15 +336,19 @@ def main() -> None:
     assert '"algorithmName"' in business_source
     assert '"algorithmIndex"' in business_source
     assert '"testResults"' in business_source
+    assert '"resultDesc"' in business_source
     passed += 1
 
-    # MCU响应必须回显PC请求Seq；RK的u64 Seq不参与PC头部组帧。
+    # MCU响应使用本连接自己的Seq；PC请求Seq和RK u64 Seq都不参与响应头。
     response = build_frame(result_body := json.dumps(
         result, ensure_ascii=False, separators=(",", ":")).encode(),
-        service=0x0102, command=0x0105, sequence=0x11223344)
+        service=0, command=0x0105, sequence=1)
     response_fields = struct.unpack(">IHHHHIH", response[:HEADER_SIZE])
     assert response_fields[4] == 0x0105
-    assert response_fields[5] == fields[5] == 0x11223344
+    assert response_fields[3] == 0 and response_fields[5] == 1
+    assert "write_be16(&output[8], 0U);" in source
+    assert "write_be32(&output[12], mcu_tx_sequence);" in source
+    assert "request->sequence" not in source
     assert json.loads(result_body.decode("utf-8"))["algorithmIndex"] == 1
     passed += 1
 

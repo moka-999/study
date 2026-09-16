@@ -15,16 +15,41 @@
 
 #include <stdint.h>
 
-/* 查表 CRC16 (初始调用, init=0xFFFF) */
+/**
+ * @brief 查表计算初值0xFFFF的Modbus CRC-16。
+ * @param[in] data 至少可读len字节；仅len为0时可为NULL。
+ * @param[in] len 数据字节数。
+ * @return CRC值；len为0时返回0xFFFF。
+ * @note 不校验数据指针；返回值是校验值，不是错误码。
+ */
 uint16_t crc16_modbus(const uint8_t *data, uint16_t len);
 
-/* 流式续算: 在已有 crc 值上继续计算 (用于非连续数据段) */
+/**
+ * @brief 在上一段CRC上续算，可跨不连续缓冲区。
+ * @param[in] crc 上一段返回的CRC，首段可用0xFFFF。
+ * @param[in] data 至少可读len字节；仅len为0时可为NULL。
+ * @param[in] len 数据字节数。
+ * @return 续算CRC；len为0时原样返回crc。
+ * @note 不校验数据指针；返回值是校验值，不是错误码。
+ */
 uint16_t crc16_modbus_continue(uint16_t crc, const uint8_t *data, uint16_t len);
 
-/* 单次调用: 对完整数据段计算 CRC16 并重置上下文 */
+/**
+ * @brief 单次计算Modbus CRC-16，等价于crc16_modbus。
+ * @param[in] data 至少可读len字节；仅len为0时可为NULL。
+ * @param[in] len 数据字节数。
+ * @return CRC值；len为0时返回0xFFFF，无共享上下文。
+ * @note 不校验数据指针；返回值是校验值，不是错误码。
+ */
 uint16_t crc16_modbus_once(const uint8_t *data, uint16_t len);
 
-/* 逐位法 (备选/自测用, 不依赖查表) */
+/**
+ * @brief 逐位计算Modbus CRC-16，供交叉校验。
+ * @param[in] data 至少可读len字节；仅len为0时可为NULL。
+ * @param[in] len 数据字节数。
+ * @return CRC值；len为0时返回0xFFFF。
+ * @note 不校验数据指针；返回值是校验值，不是错误码。
+ */
 uint16_t crc16_modbus_bitwise(const uint8_t *data, uint16_t len);
 
 #endif
