@@ -2,6 +2,9 @@
 #define OTA_APP_H
 #include <stdint.h>
 
+/** 单次write解码后的文件字节上限；不是整帧长度。PC须同时满足4096字节PDU上限。 */
+#define OTA_DOWNLOAD_BLOCK_BYTES 3000U
+
 enum { OTA_TASK_DEFAULT = 0, OTA_TASK_TCP, OTA_TASK_MONITOR, OTA_TASK_RK, OTA_TASK_HB };
 
 #if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
@@ -43,7 +46,8 @@ typedef struct {
 
 /**
  * 所有下载接口由唯一TCP任务顺序调用。begin同ID/长度幂等；write只允许顺序块
- * 或紧邻上一成功块的原样重试。解码后每块1..1024字节，不保存整个包到RAM。
+ * 或紧邻上一成功块的原样重试。解码后每块1..OTA_DOWNLOAD_BLOCK_BYTES字节，
+ * 不要求页/扇区对齐，也不保存整个包到RAM；底层逐页写入并读回校验。
  * finish完整校验并提交READY；无论应答送达与否，看门狗任务在提交后约4秒复位。
  */
 ota_download_result_t ota_download_begin(uint32_t package_id, uint32_t package_bytes);

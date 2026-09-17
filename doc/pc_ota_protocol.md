@@ -1,6 +1,6 @@
 # PC MCU OTA 协议设计
 
-日期：2026-09-16。本文已接入启用`ENABLE_OTA_BOOT`的V2固件，并完成0.1.3→0.1.4真实TCP升级；普通/隔离镜像未启用完整Boot合同则返回notSupported。实测范围与未验收项见[网络验证记录](ota_network_validation_20260916.md)。PC 对接摘要见 [PC 协议 4.26 至 4.28](pc_tcp_protocol_spec.md#426-mcu固件升级请求0x0901)；Boot 安装与回滚见 [OTA 设计](ota_design.md)。
+更新：2026-09-17，V2/B1单块原始文件数据上限由1024改为3000字节，完整PDU仍不超过4096字节。V2实测升级至0.1.6及B1离线验证见[本次记录](ota_chunk_3000_validation_20260917.md)，历史网络证据见[旧版记录](ota_network_validation_20260916.md)。普通/隔离镜像未启用完整Boot合同则返回notSupported。PC 对接摘要见 [PC 协议 4.26 至 4.28](pc_tcp_protocol_spec.md#426-mcu固件升级请求0x0901)；Boot 安装与回滚见 [OTA 设计](ota_design.md)。
 
 本次只设计本颗 STM32 的 App 升级。沿用 TCP 8888、单客户端、18 字节大端头、JSON、4096 字节完整帧上限及双方独立发送 Seq。PC 只发送一个 `.ota` 文件；App 下载到 W25Q256，B 安装非活动槽。PC 不传槽号、擦写地址或强制降级开关，不在线更新 B、稳定版或 FRU。
 
@@ -27,7 +27,8 @@ PC 不发送 0902/0903，反向请求回 0006/invalidDirection。未知 action �
 | packageId | 8 个大写十六进制字符 | 升级包头 CRC32 的数值编码，不带 0x；例如 5A1B2C3D |
 | packageSize | JSON 整数，116..2097152 | `.ota` 文件总字节数，包含包头、版本、修正表和一个镜像；下限仅为接收边界，不代表 116 字节就是合法包 |
 | offset | JSON 整数，0..packageSize-1 | Base64 解码后的文件字节偏移；从文件首字节算，不是 Flash 地址 |
-| data | Base64 字符串，最长 1368 字符 | 解码后 1..1024 字节；通常每块 1024，末块按实际长度 |
+| data | Base64 字符串，最长 4000 字符 | 解码后1..3000字节；每块不超过begin返回的blockSize，末块按实际长度 |
+| blockSize | JSON整数，当前3000 | begin成功响应公布的原始数据单块上限；旧版可能返回1024，PC以响应为准 |
 | nextOffset | JSON 整数，0..packageSize | MCU 已连续写入并读回验证的字节数，也是下一块起点 |
 | firmwareVersion | 字符串 major.minor.patch | 固件版本，不是 testerVersion 硬件版本；每段为 0..65535 的十进制整数 |
 
@@ -40,6 +41,8 @@ packageId 标识发布文件，不是随机会话号或历史升级次数。同�
 复用启动记录中现有的 package_header_crc32，可以在复位后查询当前镜像的包标识，不为一次传输新增持久化流水。没有有效包标识的旧镜像返回 activePackageId=null，不能用全零冒充未知值；00000000 仍是合法 CRC 编码。
 
 Base64 使用 [RFC 4648 §4](https://www.rfc-editor.org/rfc/rfc4648.html#section-4) 标准字母表、必要的等号填充、不换行；拒绝空白、非法字符、错误填充和非规范编码。每块独立编码，不把整文件 Base64 后任意截字符串。解码后长度检查与完整 PDU ≤4096 两个限制同时成立，不另外增加每块 CRC。
+
+PC使用紧凑JSON，不对Base64中的`+`、`/`等字符额外转义；发送前检查UTF-8编码后的头部加正文总长。3000字节原始数据编码为4000字符，最长合法偏移下整帧4086字节；不补齐4096、不把3000误写成3KiB（3072）。较小块仍合法，末块不补零。单块超过3000回invalidArgument，整帧声明超过4096按公共帧规则断连。
 
 ## 3 请求与响应
 
@@ -56,7 +59,7 @@ Base64 使用 [RFC 4648 §4](https://www.rfc-editor.org/rfc/rfc4648.html#section
 0902 成功：
 
 ```json
-{"action":"begin","packageId":"5A1B2C3D","status":"completed","state":"receiving","blockSize":1024,"nextOffset":0}
+{"action":"begin","packageId":"5A1B2C3D","status":"completed","state":"receiving","blockSize":3000,"nextOffset":0}
 ```
 
 只有当前 App 健康确认、测试空闲、RK/DDR 已安全 OFF、Flash 可用且没有其他升级操作时才受理。不得代替尚未完成的 RK 安全下电握手。PC 先单独协调 B2 维护，再调用 begin；B1 不控制或代理温控。
@@ -75,7 +78,7 @@ Base64 使用 [RFC 4648 §4](https://www.rfc-editor.org/rfc/rfc4648.html#section
 {"action":"write","packageId":"5A1B2C3D","status":"completed","state":"receiving","offset":0,"nextOffset":4}
 ```
 
-先完整验证 JSON、Base64、包标识、长度及偏移，再调用存储层。必须满足 bytes ≤ packageSize-offset，按减法校验防止无符号加法溢出；不要求 256/1024 字节对齐。第一次收到完整 116 字节前缀后尽早核对标识、声明长度、板型和版本，finish 仍重新完整校验。
+先完整验证 JSON、Base64、包标识、长度及偏移，再调用存储层。必须满足 bytes ≤ packageSize-offset，按减法校验防止无符号加法溢出；不要求256字节页或4096字节扇区对齐。第一次收到完整116字节前缀后尽早核对标识、声明长度、板型和版本，finish仍重新完整校验。
 
 只有写入和读回都通过才推进确认偏移。正常请求要求 offset==nextOffset。仅允许立即前一个完整成功块重复：offset、解码后长度以及 W25 中的内容完全相同，返回同一 offset/nextOffset，不重复擦写。更早的块或跳偏移回 offsetMismatch；上一个块同位置内容不同回 dataMismatch，保留有效进度。错误应答带 nextOffset 供查询，不授权 PC 不经核对地跳块。
 
@@ -217,7 +220,7 @@ PC 还须核对版本与所选文件一致，然后才显示升级成功。该�
 
 特别注意：当前 `ota_app_is_confirmed()` 把“有下载会话”也视为不可接收新业务，不能直接把其返回 0 映射成“当前镜像不健康”。查询需分别表达启动健康与下载占用。现有响应缓冲为 384 字节，本设计的最大组合须检查可容纳，不能按接收上限4096误认为发送缓冲也是4096。
 
-本轮不改变W25布局、不移植B1。包头早期检查复用B/App共享校验器，只读前116字节；finish仍重新完整验证，不能以早检成功代替镜像/修正表CRC。
+本次分块调整不改变W25布局、896KiB App上限或`.ota`文件格式。包头早期检查复用B/App共享校验器，只读前116字节；finish仍重新完整验证，不能以早检成功代替镜像/修正表CRC。
 
 ## 7 验收清单
 

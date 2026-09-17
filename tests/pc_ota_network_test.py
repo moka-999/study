@@ -22,10 +22,18 @@ class Client:
         self.connection, self.events = connection, events
         self.tx, self.rx = 100, 1
 
-    def call(self, body, *, command=0x0901, expect=0x0902, error=None, split=False):
+    def call(self, body, *, command=0x0901, expect=0x0902, error=None, split=False,
+             pdu_bytes=None, heartbeat=False):
         payload = json.dumps(body, separators=(",", ":")).encode()
+        if pdu_bytes is not None:
+            assert 18 + len(payload) <= pdu_bytes <= 4096
+            payload += b" " * (pdu_bytes - 18 - len(payload))
         wire = make_frame(command, payload, self.tx)
         assert len(wire) <= 4096
+        request_bytes = len(wire)
+        if heartbeat:
+            wire += make_frame(0x0002, b"{}", self.tx + 1)
+        started = time.monotonic()
         if split:
             for first, last in ((0, 3), (3, 18), (18, 97), (97, len(wire))):
                 if first < len(wire):
@@ -33,6 +41,17 @@ class Client:
                     time.sleep(0.015)
         else:
             self.connection.sendall(wire)
+        result = self.receive(body, command, expect, error)
+        self.events[-1].update(requestBytes=request_bytes,
+                               elapsedMs=round((time.monotonic() - started) * 1000, 3))
+        if "data" in body:
+            self.events[-1]["base64Chars"] = len(body["data"])
+        if heartbeat:
+            self.receive({}, 0x0002, 0x0001, None)
+        return result
+
+    def receive(self, body, command, expect, error):
+        """按帧接收独立递增响应；粘包中的心跳也必须正常返回。"""
         header = struct.unpack(">IHHHHIH", recv_exact(self.connection, 18))
         assert 18 <= header[0] <= 4096, header
         response = json.loads(recv_exact(self.connection, header[0] - 18))
@@ -55,6 +74,7 @@ def main():
     parser.add_argument("--package", type=Path)
     parser.add_argument("--exercise", action="store_true", help="写下载区并验证拒绝/取消/超时，不提交升级")
     parser.add_argument("--upgrade", action="store_true", help="传完整包、提交并等待重启后0903")
+    parser.add_argument("--expect-block-size", type=int, help="核对本次固件公布的单块上限；默认按begin协商，兼容旧版1024")
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     if args.report.exists():
@@ -99,18 +119,27 @@ def main():
 
         def upload(c, *, corrupt=False):
             _, response = c.call(begin)
-            assert response["nextOffset"] == 0 and response["blockSize"] == 1024
-            for offset in range(0, len(package), 1024):
-                raw = package[offset:offset + 1024]
+            assert response["nextOffset"] == 0
+            size = block_size(response)
+            for offset in range(0, len(package), size):
+                raw = package[offset:offset + size]
                 if corrupt and offset + len(raw) == len(package):
                     raw = raw[:-1] + bytes([raw[-1] ^ 1])
-                _, response = c.call(block(offset, raw), split=offset == 0)
+                _, response = c.call(block(offset, raw), split=offset == 0, heartbeat=offset == size)
                 assert response["offset"] == offset and response["nextOffset"] == offset + len(raw), response
                 if offset == 0:
                     _, repeat = c.call(block(offset, raw))
                     assert repeat["nextOffset"] == len(raw)
-                if offset % 32768 == 0:
+                if offset == 0 or offset // 32768 != (offset + len(raw)) // 32768 or offset + len(raw) == len(package):
                     print(f"传输 {offset + len(raw)}/{len(package)} 字节", flush=True)
+
+        def block_size(response):
+            size = response["blockSize"]
+            assert type(size) is int and 1 <= size <= 3000, response
+            if args.expect_block_size is not None:
+                assert size == args.expect_block_size, response
+            report["blockSize"] = size
+            return size
 
         if args.exercise:
             with connected() as c:
@@ -120,22 +149,24 @@ def main():
                 c.call(dict(begin, packageSize=True), expect=6, error="invalidArgument")
                 c.call(dict(begin, extra=0), expect=6, error="invalidArgument")
                 c.call(dict(begin, packageId="aabbccdd"), expect=6, error="invalidArgument")
-                c.call(begin)
+                _, response = c.call(begin)
+                size = block_size(response)
                 c.call(begin)
                 for data in ("", "Zh==", "Zm9=", "Zg==AAAA", "====", "AA_A", "AA A"):
                     c.call(dict(block(0, b"x"), data=data), expect=6, error="invalidArgument")
                 c.call(block(1, package[:4]), expect=6, error="offsetMismatch")
-                c.call(block(0, package[:1024]), split=True)
-                c.call(block(0, package[:1024]))
-                c.call(block(0, bytes([package[0] ^ 1]) + package[1:1024]), expect=6, error="dataMismatch")
+                c.call(block(0, package[:size + 1]), expect=6, error="invalidArgument")
+                c.call(block(0, package[:size]), split=True, pdu_bytes=4096)
+                c.call(block(0, package[:size]), heartbeat=True)
+                c.call(block(0, bytes([package[0] ^ 1]) + package[1:size]), expect=6, error="dataMismatch")
                 c.call({"action": "finish", "packageId": package_id}, expect=6, error="invalidState")
                 _, response = c.call({"action": "query"})
-                assert response["download"]["receivedBytes"] == 1024
+                assert response["download"]["receivedBytes"] == size
                 c.call({}, command=0x0501, expect=6, error="otaNotReady")
                 c.call({}, command=0x0002, expect=1)
                 c.call({"action": "cancel", "packageId": package_id})
                 c.call({"action": "cancel", "packageId": package_id})
-                passed("字段/Base64/错序/重复块/取消/维护门/心跳")
+                passed(f"字段/Base64/{size + 1}超限拒绝/4096整帧半包/粘包/重复块/取消/维护门/心跳")
                 c.call(begin)
                 c.call(block(0, package[:64]))
             with connected() as c:
@@ -153,6 +184,16 @@ def main():
                 _, response = c.call({"action": "query"})
                 assert response["state"] == "failed" and response["firmwareVersion"] == status["firmwareVersion"]
                 passed("完整坏包CRC拒绝，仍运行原版本")
+            # 只发送声明4097字节的头，状态机必须立即断开，不等待正文或访问Flash。
+            with connected() as c:
+                c.connection.sendall(struct.pack(">IHHHHIH", 4097, 1, 8, 0, 0x0901, 100, 0))
+                try:
+                    assert c.connection.recv(1) == b"", "超长帧未断开"
+                except ConnectionResetError:
+                    pass
+            with connected() as c:
+                c.call({}, command=0x0002, expect=1)
+                passed("4097字节PDU立即拒绝，重连心跳恢复")
         if args.upgrade:
             with connected() as c:
                 upload(c)

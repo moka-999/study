@@ -11,7 +11,8 @@ import struct
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = struct.Struct(">IHHHHIH")
 MAX_PACKAGE = 2097152
-MAX_BLOCK = 1024
+MAX_BLOCK = 3000
+MAX_BASE64 = 4 * ((MAX_BLOCK + 2) // 3)
 FIELDS = {
     "begin": {"action", "packageId", "packageSize"},
     "write": {"action", "packageId", "offset", "data"},
@@ -51,7 +52,7 @@ def request_valid(body):
         offset, encoded = body["offset"], body["data"]
         if type(offset) is not int or not 0 <= offset < MAX_PACKAGE:
             return False
-        if not isinstance(encoded, str) or not 1 <= len(encoded) <= 1368:
+        if not isinstance(encoded, str) or not 1 <= len(encoded) <= MAX_BASE64:
             return False
         try:
             raw = base64.b64decode(encoded, validate=True)
@@ -87,13 +88,13 @@ def main():
                 assert len(packet) <= 384, ("响应缓冲超限", name)
             examples += 1
 
-    block = bytes(range(256)) * 4
+    block = (bytes(range(256)) * 12)[:MAX_BLOCK]
     encoded = base64.b64encode(block).decode("ascii")
-    write = {"action": "write", "packageId": "FFFFFFFF", "offset": 2096128, "data": encoded}
-    assert len(encoded) == 1368 and request_valid(write)
+    write = {"action": "write", "packageId": "FFFFFFFF", "offset": MAX_PACKAGE - MAX_BLOCK, "data": encoded}
+    assert len(encoded) == 4000 and request_valid(write)
     packet = frame(0x0901, 0xFFFFFFFF, write)
     assert HEADER.unpack(packet[:18]) == (len(packet), 1, 8, 0, 0x0901, 0xFFFFFFFF, 0)
-    assert len(packet) <= 4096
+    assert len(packet) == 4086
     assert base64.b64decode(json.loads(packet[18:])["data"]) == block
     assert len(frame(0x0901, 0, write)) == len(packet)
     assert request_valid({"action": "query", "packageId": "00000000"})
@@ -137,9 +138,14 @@ def main():
     assert (MAX_PACKAGE - 1) + 2 > MAX_PACKAGE
     assert not 2 <= MAX_PACKAGE - (MAX_PACKAGE - 1)
 
-    # 防止文档改回旧2048字节基线而未与下载后台同步。
+    # 单块只在公共头定义，PC公布值、解码缓冲和下载层必须使用同一上限。
     source = (ROOT / "App/ota/ota_app.c").read_text(encoding="utf-8")
-    assert "bytes > 1024U" in source
+    header = (ROOT / "App/ota/ota_app.h").read_text(encoding="utf-8")
+    protocol = (ROOT / "App/protocol/pc/pc_ota.c").read_text(encoding="utf-8")
+    assert re.search(r"#define\s+OTA_DOWNLOAD_BLOCK_BYTES\s+3000U", header)
+    assert "bytes > OTA_DOWNLOAD_BLOCK_BYTES" in source
+    assert "data[OTA_DOWNLOAD_BLOCK_BYTES]" in protocol
+    assert '"blockSize", OTA_DOWNLOAD_BLOCK_BYTES' in protocol
     assert "0x00200000" in (ROOT / "App/ota/ota_install.h").read_text(encoding="utf-8")
     for name in ("pc_ota_protocol.md", "pc_tcp_protocol_spec.md"):
         text = (ROOT / "doc" / name).read_text(encoding="utf-8")

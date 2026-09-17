@@ -12,7 +12,7 @@
 
 ## PC–MCU TCP协议框架
 
-OTA接口见[PC OTA协议设计](pc_ota_protocol.md)及PC协议4.26至4.28：0901/0902/0903、五种action和1024字节分块已接入OTA版V2，0.1.3→0.1.4真实网络升级及健康确认通过，见[验证记录](ota_network_validation_20260916.md)。B1及线上文档本轮未同步。
+OTA接口见[PC OTA协议](pc_ota_protocol.md)及PC协议4.26至4.28：V2/B1单块原始数据上限已调整为3000字节，整帧仍≤4096；PC按begin返回的blockSize兼容旧版1024。V2已通过真实网络升级至0.1.6及健康确认，B1只完成构建/离线验证；详见[2026-09-17验证记录](ota_chunk_3000_validation_20260917.md)。本地Word已同步并检查内容，本次视觉分页复核因WPS接口异常未完成；线上文档未改。
 
 PC工程师使用[最新版Word](pc_tcp协议.docx)：只写连接/报文、请求JSON、字段、响应和PC执行规则。[Markdown详细定义](pc_tcp_protocol_spec.md)、[内部JSON合同](pc_json_contract.md)及电源控制记录保留实现依据、开发状态和硬件验收要求，不把这些长篇说明直接复制进对外Word。8月31日规则为双方独立递增Seq、不回显，ServiceID固定0；固件迁移见任务9.6。
 Word最新版固定为`doc/pc_tcp协议.docx`，不再使用“修订版”“补齐”等后缀。每次更新前，把旧文件按其最后修改时间保存为`doc/history/pc_tcp/pc_tcp协议_yyyyMMdd_HHmmss.docx`；同秒重名时增加序号，禁止覆盖已有历史文件。历史版本见[归档记录](history/pc_tcp/README.md)。若文件正被用户编辑，先等待保存/关闭，不另造一个含糊的“最新版”。

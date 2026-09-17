@@ -6,6 +6,7 @@
 
 | 归档文件 | 原文件 | SHA-256 |
 |---|---|---|
+| [pc_tcp协议_20260916_144518.docx](pc_tcp协议_20260916_144518.docx) | pc_tcp协议.docx，2026-09-17调整为3000字节分块前 | feabcb54070302956a10193aa0aecb50415b5f4045a1ac7963c7bc992b4ce7c8 |
 | [pc_tcp协议_20260831_132525.docx](pc_tcp协议_20260831_132525.docx) | pc_tcp_protocol_spec.docx | 549d335aedb0efca76e71e196ca61e01e6f6742a725b8035b4af1c9696860f2f |
 | [pc_tcp协议_20260831_133233.docx](pc_tcp协议_20260831_133233.docx) | pc_tcp_protocol_spec_补齐指令标题.docx | eadcd09ea9bc59aa915723f8d9ec8bb3252bcdbf6ac1f92d9cb95c69cb1d3974 |
 | [pc_tcp协议_20260914_151651.docx](pc_tcp协议_20260914_151651.docx) | pc_tcp_protocol_spec_协议修订.docx，本次排版检查前 | 2580567620fa002a72605979f4f180c049b76b9002cce0998efda2096c1f2a7b |

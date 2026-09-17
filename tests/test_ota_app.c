@@ -129,9 +129,32 @@ static void expect_error(const char *json, const char *error)
     CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(body, "errorCode")->valuestring, error) == 0);
     cJSON_Delete(body);
 }
+
+/** 测试侧标准Base64编码；仅生成请求，不代替生产解码和Flash写入。 */
+static void make_write(char *json, size_t capacity, uint32_t id, uint32_t offset,
+                       const uint8_t *data, uint32_t bytes)
+{
+    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int prefix = snprintf(json, capacity,
+        "{\"action\":\"write\",\"packageId\":\"%08lX\",\"offset\":%lu,\"data\":\"",
+        (unsigned long)id, (unsigned long)offset);
+    CHECK(prefix > 0 && (size_t)prefix + 4U * ((bytes + 2U) / 3U) + 3U <= capacity);
+    char *out = json + prefix;
+    for (uint32_t i = 0; i < bytes; i += 3U) {
+        uint32_t left = bytes - i;
+        uint32_t value = (uint32_t)data[i] << 16U;
+        if (left > 1U) value |= (uint32_t)data[i + 1U] << 8U;
+        if (left > 2U) value |= data[i + 2U];
+        *out++ = alphabet[value >> 18U]; *out++ = alphabet[(value >> 12U) & 63U];
+        *out++ = left > 1U ? alphabet[(value >> 6U) & 63U] : '=';
+        *out++ = left > 2U ? alphabet[value & 63U] : '=';
+    }
+    memcpy(out, "\"}", 3U);
+}
+
 static void protocol_checks(uint32_t id, uint32_t length)
 {
-    char json[1800];
+    char json[PC_PROTOCOL_MAX_PDU];
     cJSON *body = request("{\"action\":\"query\",\"packageId\":\"11223344\"}", 0x0903U);
     CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(body, "confirmed"))); cJSON_Delete(body);
     expect_error("{\"action\":\"x\"}", "notSupported");
@@ -145,7 +168,9 @@ static void protocol_checks(uint32_t id, uint32_t length)
         expect_error(json, "invalidArgument");
     }
     (void)snprintf(json, sizeof(json), "{\"action\":\"begin\",\"packageId\":\"%08lX\",\"packageSize\":%lu}", (unsigned long)id, (unsigned long)length);
-    cJSON_Delete(request(json, 0x0902U));
+    body = request(json, 0x0902U);
+    CHECK(cJSON_GetObjectItemCaseSensitive(body, "blockSize")->valueint == OTA_DOWNLOAD_BLOCK_BYTES);
+    cJSON_Delete(body);
     cJSON_Delete(request(json, 0x0902U)); /* begin重试不能擦写。 */
     uint32_t before = writes;
     (void)snprintf(json, sizeof(json), "{\"action\":\"write\",\"packageId\":\"%08lX\",\"offset\":0,\"data\":\"T1RBMQ==\"}", (unsigned long)id);
@@ -168,6 +193,28 @@ static void protocol_checks(uint32_t id, uint32_t length)
     CHECK(ota_download_cancel(id) == OTA_DOWNLOAD_STATE);
     CHECK(ota_download_begin(id, length) == 0);
     ota_download_disconnected(); CHECK(!maintenance && ota_app_is_confirmed());
+    /* 最大块跨256字节页和4096字节扇区；重复块只能读比较，不能再次擦写。 */
+    CHECK(length > 3U * OTA_DOWNLOAD_BLOCK_BYTES && ota_download_begin(id, length) == 0);
+    uint32_t before_erase = erases;
+    for (uint32_t offset = 0; offset < 3U * OTA_DOWNLOAD_BLOCK_BYTES; offset += OTA_DOWNLOAD_BLOCK_BYTES) {
+        make_write(json, sizeof(json), id, offset, PACKAGE + offset, OTA_DOWNLOAD_BLOCK_BYTES);
+        CHECK(strlen(json) + PC_PROTOCOL_HEADER_SIZE <= PC_PROTOCOL_MAX_PDU);
+        body = request(json, 0x0902U);
+        CHECK(cJSON_GetObjectItemCaseSensitive(body, "nextOffset")->valuedouble == offset + OTA_DOWNLOAD_BLOCK_BYTES);
+        cJSON_Delete(body);
+        before = writes;
+        uint32_t duplicate_erases = erases;
+        cJSON_Delete(request(json, 0x0902U));
+        CHECK(writes == before && erases == duplicate_erases);
+    }
+    CHECK(erases == before_erase + 3U);
+    CHECK(memcmp(nor + OTA_DOWNLOAD_BASE, PACKAGE, 3U * OTA_DOWNLOAD_BLOCK_BYTES) == 0);
+    /* 3001字节原始数据虽能装入4096字节帧，仍须被分块业务上限拒绝。 */
+    make_write(json, sizeof(json), id, 3U * OTA_DOWNLOAD_BLOCK_BYTES, PACKAGE, OTA_DOWNLOAD_BLOCK_BYTES + 1U);
+    before = writes;
+    expect_error(json, "invalidArgument");
+    CHECK(writes == before);
+    CHECK(ota_download_cancel(id) == 0);
     /* 包ID为0合法，不能当作“没有ID”；这里只开启/取消，不伪造CRC为0的文件。 */
     CHECK(ota_download_begin(0U, length) == 0 && ota_download_cancel(0U) == 0);
     /* 前116字节即拒绝错误包，不必等整个下载结束；每次失败释放维护门。 */
@@ -222,12 +269,14 @@ void test_main(void)
     CHECK(ota_download_begin(id, length) == 0 && maintenance && erases == old_erases);
     CHECK(!ota_app_is_confirmed() && ota_download_begin(id, length) == 0);
     CHECK(ota_download_write(id, 1, PACKAGE, 1) != 0 && ota_download_write(id, 0, NULL, 1) != 0);
-    CHECK(ota_download_write(id, 0, PACKAGE, 1025) != 0 && ota_download_finish(id) != 0);
+    CHECK(ota_download_write(id, 0, PACKAGE, OTA_DOWNLOAD_BLOCK_BYTES + 1U) != 0 && ota_download_finish(id) != 0);
     CHECK(ota_download_cancel(id) == 0); CHECK(!maintenance && ota_app_is_confirmed());
     CHECK(ota_download_begin(id, length) == 0);
     if (CONFIG == 1U) bad_io = 1U;
     for (uint32_t offset = 0; offset < length;) {
-        uint32_t n = length - offset; if (n > 113U) n = 113U; /* 非页对齐的网络分块。 */
+        /* 先写113字节，再写3000字节满块；末块覆盖余数和未对齐边界。 */
+        uint32_t limit = offset == 0U ? 113U : OTA_DOWNLOAD_BLOCK_BYTES;
+        uint32_t n = length - offset; if (n > limit) n = limit;
         int result = ota_download_write(id, offset, PACKAGE + offset, n);
         if (CONFIG == 1U) {
             CHECK(result != 0 && !maintenance && ota_app_is_confirmed());

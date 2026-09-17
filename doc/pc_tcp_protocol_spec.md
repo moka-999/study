@@ -473,18 +473,18 @@ GPIO或LED编号。
 | packageId | string | 包头CRC32，8位大写十六进制，不带0x；非Seq，同一文件保持不变 |
 | packageSize | integer | `.ota`总字节数，116..2097152；begin必填 |
 | offset | integer | 文件原始字节偏移，从0开始；write必填 |
-| data | string | 独立块的标准Base64，无换行、有必要填充；解码后1..1024字节 |
+| data | string | 独立块的标准Base64，无换行、有必要填充；解码后1..3000字节，且不超过begin返回的blockSize |
 
 PC从文件偏移36..39读取小端u32包头CRC，并转为packageId；从偏移44/46/48读取三个小端u16组成目标版本major.minor.patch。文件数据原样编码传输，不随网络帧头转换字节序。示例ID、长度和版本仅演示格式；T1RBMQ==只有4字节，不能代替完整升级文件。
 
-每个操作只发送示例列出的字段。PC通常每块发送1024字节，末块发送剩余字节，完整帧仍≤4096字节。升级前停止测试、使RK/DDR安全下电，并单独协调B2维护，避免因B1保活中断而复位或断电；MCU仍独立检查升级条件。
+每个操作只发送示例列出的字段。每块原始数据不超过begin返回的blockSize（当前3000，旧版可能为1024），末块按剩余长度发送、不补零。使用紧凑JSON，Base64字符不额外转义；发送前检查UTF-8正文加18字节头≤4096字节，3000字节块的最大正常整帧为4086字节。升级前停止测试、使RK/DDR安全下电，并单独协调B2维护，避免因B1保活中断而复位或断电；MCU仍独立检查升级条件。
 
 ### 4.27 MCU固件升级响应（0x0902）
 
 begin成功返回块上限和起始偏移；重复相同begin不会清空已收进度：
 
 ```json
-{"action":"begin","packageId":"5A1B2C3D","status":"completed","state":"receiving","blockSize":1024,"nextOffset":0}
+{"action":"begin","packageId":"5A1B2C3D","status":"completed","state":"receiving","blockSize":3000,"nextOffset":0}
 ```
 
 write成功后返回本块offset和下一块nextOffset；PC按action、packageId及offset匹配，不按Seq匹配：
@@ -538,7 +538,7 @@ PC操作规则：
 5. 仅维护升级，普通路径拒绝同版本和降版；B、稳定版及板卡信息不由PC升级命令修改。CRC用于检测损坏，不作为身份认证。
 
 <!-- 内部接入状态留在Markdown，生成对外Word时不包含此段。 -->
-2026-09-16：启用完整OTA的V2固件已接入0901/0902/0903，并通过0.1.3→0.1.4真实TCP升级；未启用OTA的普通镜像回notSupported。详细合同见[OTA协议设计](pc_ota_protocol.md)，验收边界见[实测记录](ota_network_validation_20260916.md)。在线文档只读核对版本29，未修改。
+2026-09-17：V2/B1单块上限更新为3000字节，完整帧仍≤4096；V2已通过真实TCP升级至0.1.6及健康确认，B1只完成构建/离线验证。未启用OTA的普通镜像回notSupported。详细合同见[OTA协议](pc_ota_protocol.md)，验收边界见[本次记录](ota_chunk_3000_validation_20260917.md)。线上文档本轮未修改。
 
 ## 5. 业务命令补充格式
 
