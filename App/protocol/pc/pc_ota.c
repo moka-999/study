@@ -19,9 +19,15 @@ static pc_dispatch_result_t respond(uint16_t command, uint32_t sequence,
 
 #if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
 
+#define OTA_BASE64_MAX_CHARS (4U * ((OTA_DOWNLOAD_BLOCK_BYTES + 2U) / 3U))
+/* 紧凑JSON按最长u32偏移预算；实际线上长度仍由公共帧状态机检查，空白也计入。 */
+_Static_assert(PC_PROTOCOL_HEADER_SIZE + OTA_BASE64_MAX_CHARS +
+    sizeof("{\"action\":\"write\",\"packageId\":\"FFFFFFFF\",\"offset\":4294967295,\"data\":\"\"}") - 1U
+    <= PC_PROTOCOL_MAX_PDU, "OTA write整帧超出容量");
+
 typedef struct {
     uint32_t package_id, package_bytes, offset, bytes;
-    uint8_t data[1024];             /**< 单块缓冲；Base64解码完成才允许访问下载区。 */
+    uint8_t data[OTA_DOWNLOAD_BLOCK_BYTES]; /**< 单块缓冲；完整解码通过后才访问下载区。 */
     uint8_t has_id, has_offset;     /**< 只回显已通过类型/范围检查的关联字段。 */
 } ota_message_t;
 
@@ -96,13 +102,13 @@ static int base64_digit(char c)
     return -1;
 }
 
-/** 标准Base64，拒绝空白、URL变体、中间填充及非零填充位；最多输出1024字节。 */
+/** 标准Base64，拒绝空白、URL变体、中间填充及非零填充位；最多输出3000字节。 */
 static int decode_block(const cJSON *item, ota_message_t *m)
 {
     if (!cJSON_IsString(item) || !item->valuestring) return 0;
     const char *s = item->valuestring;
     size_t length = strlen(s);
-    if (length == 0U || length > 1368U || (length & 3U) != 0U) return 0;
+    if (length == 0U || length > OTA_BASE64_MAX_CHARS || (length & 3U) != 0U) return 0;
     m->bytes = 0U;
     for (size_t i = 0U; i < length; i += 4U) {
         int a = base64_digit(s[i]), b = base64_digit(s[i + 1U]);
@@ -218,7 +224,7 @@ pc_dispatch_result_t pc_ota_handle(const pc_protocol_frame_t *request, uint32_t 
         } else if (!error) {
             if (!cJSON_AddStringToObject(body, "status", action->execute == finish ? "accepted" : "completed") ||
                 !cJSON_AddStringToObject(body, "state", states[progress.state])) goto done;
-            if (action->execute == begin && !cJSON_AddNumberToObject(body, "blockSize", 1024U)) goto done;
+            if (action->execute == begin && !cJSON_AddNumberToObject(body, "blockSize", OTA_DOWNLOAD_BLOCK_BYTES)) goto done;
         }
         if (((!error && (action->execute == begin || action->execute == write_block)) ||
              (error && progress.state == OTA_DOWNLOAD_RECEIVING && message.has_id && message.package_id == progress.package_id)) &&

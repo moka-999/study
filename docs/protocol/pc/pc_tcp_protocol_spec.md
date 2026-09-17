@@ -468,7 +468,7 @@ AD7124或TPS。
 
 ### 4.26 MCU固件升级请求（0x0901）
 
-PC发送一个`.ota`文件，按begin/write/finish/query/cancel动作传输；每个write的data为最多1024字节原始内容的Base64字符串。MCU须已健康确认且电源OFF。完整字段及示例见[OTA协议](pc_ota_protocol.md)。B1与V2包不能混用。
+PC发送一个`.ota`文件，按begin/write/finish/query/cancel动作传输；每个write的data为最多3000字节原始内容的Base64字符串，且不超过begin返回的blockSize（旧版可能为1024）。使用紧凑JSON，Base64字符不额外转义，发送前检查18字节头加UTF-8正文≤4096字节；末块不补零。MCU须已健康确认且电源OFF。完整字段及示例见[OTA协议](pc_ota_protocol.md)。B1与V2包不能混用。
 
 ### 4.27 MCU固件升级响应（0x0902）
 

@@ -242,7 +242,7 @@ ota_download_result_t ota_download_write(uint32_t package_id, uint32_t offset,
     ota_download_result_t result = OTA_DOWNLOAD_OK;
     ota_download_poll();
     if (download_state != OTA_DOWNLOAD_RECEIVING || package_id != download_id || !safe_idle()) return OTA_DOWNLOAD_STATE;
-    if (data == NULL || bytes == 0U || bytes > 1024U || offset >= download_bytes || bytes > download_bytes - offset)
+    if (data == NULL || bytes == 0U || bytes > OTA_DOWNLOAD_BLOCK_BYTES || offset >= download_bytes || bytes > download_bytes - offset)
         return OTA_DOWNLOAD_ARGUMENT;
     int duplicate = offset == last_offset;
     if (duplicate && bytes != last_bytes) return OTA_DOWNLOAD_DATA;
