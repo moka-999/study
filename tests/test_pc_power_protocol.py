@@ -189,7 +189,19 @@ def main() -> None:
         body = monitor_task.split(f"pwr_ctrl_result_t {name}(", 1)[1].split("\n}", 1)[0]
         require("memory_io_take_for_power(&now_ms)" in body, "电源请求须补偿锁等待")
     require("monitor_request_training_power_on" not in dispatch,
-            "未冻结开始测试JSON和安全范围前不能直接接训练入口")
+            "RK执行和训练安全范围未接通，0103不得触发训练上电")
+    start_parser = (ROOT / "App/protocol/pc/pc_test_message.c").read_text(encoding="utf-8")
+    require(all(f'"{field}"' in start_parser for field in (
+        "algorithmType", "algorithmName", "algorithmIndex", "power", "reboot", "bootMode",
+        "memoryType", "vdd1Steps", "vdd2Steps", "vddqSteps")),
+        "0103完整启动请求字段未全部接入")
+    require("ddr_power_build_step_targets" in start_parser and "isfinite" in start_parser and
+            "pc_test_start_read_index" in dispatch and "build_command_failure_with_index" in dispatch,
+            "0103纯计算边界或合法index失败回带缺失")
+    start_handler = dispatch.split("static pc_dispatch_result_t handle_start_test(", 1)[1].split("\n}", 1)[0]
+    require('"notReady"' in start_handler and '"otaNotReady"' in start_handler and
+            "PC_DISPATCH_NO_RESPONSE" not in start_handler and "build_command_accepted" not in start_handler,
+            "0103在RK未接时必须诚实拒绝，不能静默或假报受理")
     require("result_led_get_all" in led_source and
             led_source.count("taskENTER_CRITICAL()") >= 4 and
             "s_states[target] == state" in led_source,

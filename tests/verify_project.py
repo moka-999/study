@@ -247,9 +247,11 @@ def main() -> int:
         "TPS62868_FACTOR_1X0")), "TPS三路地址或器件因子错误")
     require("PAC1934_ADDR_B1             0x16U" in pac_header and
             "总线上写地址字节0x2C、读地址字节0x2D" in pac_header and
-            "PAC1934_RSENSE_B1_UOHM      10000U" in pac_header and
+            "PAC1934_RSENSE_B1_UOHM      20000U" in pac_header and
             "PAC1934_CH_MASK_B1_RAILS    0x07" in pac_header,
             "PAC1934地址、采样电阻或三通道配置错误")
+    require("monitor->pac.rsense_uohm = PAC1934_RSENSE_B1_UOHM;" in monitor_source,
+            "B1采样必须使用2134版20mΩ板级值，不能落到通用10mΩ兼容值")
     require("&i2c1_if" in ddr_source and "&i2c2_if" in ddr_source and
             "&i2c4_if" in ddr_source,
             "VDD1/VDD2/VDDQ未分别绑定I2C1/I2C2/逻辑I2C4")

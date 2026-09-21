@@ -66,7 +66,24 @@ pwr_ctrl_result_t monitor_request_training_power_on(
 
 void monitor_power_process(uint32_t now_ms);
 
+/**
+ * @brief 在OFF状态持事务锁写Boot DAC，完整写成功才标记缓存有效。
+ * @param[in] mode 有效boot_mode_t，目标电压0..1800mV。
+ * @return OK写入成功；ERR_PARAM参数无效；ERR_BUSY锁忙；ERR_STATE状态不允许；
+ *         ERR_IO器件写失败。实际电压和RK启动介质仍须独立确认。
+ * @note 参数/忙/状态拒绝保留缓存；真正开始写入前使旧缓存失效，失败后
+ *       查询返回ERR_NOT_SET。不写EEPROM，不新增上电/下电自动DAC动作。
+ */
 monitor_boot_result_t monitor_set_boot_mode(boot_mode_t mode);
+/**
+ * @brief 读取最近可信的Boot配置缓存，target_mv是目标mV，不是实测电压。
+ * @param[out] mode 非NULL模式输出。
+ * @param[out] target_mv 非NULL目标mV输出。
+ * @return OK缓存有效；ERR_PARAM空指针；ERR_BUSY锁忙；ERR_NOT_SET未设置或
+ *         最近写失败；ERR_IO目标换算失败。
+ * @note 不回读DAC；未设置/锁忙时输出不变。MCU复位清空缓存；只重启RK
+ *       不清缓存，因为DAC由3V3_MCU供电。缓存不等于RK启动成功确认。
+ */
 monitor_boot_result_t monitor_get_boot_mode(boot_mode_t *mode,
                                             uint16_t *target_mv);
 

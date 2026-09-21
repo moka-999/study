@@ -1,5 +1,14 @@
 # B1 project rules
 
+## 20260920-2134原理图适配边界
+
+- PAC1934三路R7268/R7269/R7270均为20mΩ，生产采样必须显式使用板级20000µΩ，不能采用通用驱动的10mΩ兼容值。0602复用现有采样结果，不在JSON层再次乘除系数。
+- TPS料号、地址、20mV步进不变；U4025为56.2kΩ，U4026为86.6kΩ。TPS输出选装和实物阻值仍需验收，寄存器写成功不证明DDR实际已由TPS供电。
+- 用户接受共同4V上电后能及时完成调压的开发预设，暂不新增RK初始化前等待机制；这不批准具体毫秒延时或跳过初始化后的RK-ready。保留默认OFF和未配置时序门禁。
+- 0103已增加完整参数校验及带合法index的失败应答；RK业务未接时明确notReady，不触发Boot、电源或RK动作。安全训练范围、成功配置比较、自动冷重启与真正测试交接仍未实现，不能宣称完整开始测试闭环。
+- Boot实际写失败后缓存失效，0507返回notConfigured；参数/忙/状态拒绝不改旧缓存。查询仍不是DAC模拟电压回读。H13首次上电/掉电输入容限待硬件/RK确认，不自动写EEPROM或改成全时0V。
+- 适配及复跑记录见`docs/schematic_adaptation_20260921.md`；离线验证不能替代实板验收。
+
 ## OTA增量约束
 
 - 普通构建保持OTA关闭；`ENABLE_OTA_BOOT=ON`必须同时启用槽限/修正表构建，A1/A2共同上限896KiB，向量使用`g_pfnVectors`符号随镜像修正。
@@ -68,8 +77,8 @@
   Development assumes the RK806 automatic startup window is sufficient, as
   accepted on 2026-09-14; this is not measured timing approval. Keep default OFF,
   preserve the B1-specific PC6/PC7 sequence and optional PG11, and do not copy V2
-  waveform delays. Safe training limits, new PC fields, changed-power cold-cycle
-  orchestration and RK-ready confirmation still need business integration.
+  waveform delays. 新PC字段已完成严格解析；安全训练限值、配置变化后的冷重启
+  编排及RK就绪确认仍待接入，不能把字段解析当成成功训练。
 - W25Q256 now uses the 76-byte firmware payload and 224-byte FRU v2. The MCU-side
   device in the 2026-08-27 BRD is U2 on 3V3_MCU/QSPI-BK1; U4007 is RK-side FSPI
   and must not be used as MCU Flash evidence. Keep read
@@ -89,12 +98,10 @@
   now use independent per-connection u32 send counters with ServiceID fixed zero:
   first Seq is 1, successful sends advance it, reconnect resets it to 1, and
   UINT32_MAX wraps to 0. Request/RK Seq never enters an MCU send header.
-- Tester query 0x0101/0x0102 and empty-object heartbeat are integrated. The
-  typed JSON helper covers START_TEST 0x0103
-  (`algorithmName/algorithmIndex`) and TEST_RESULT_REPORT 0x0105
-  (`testResults[{siteId,mirrorIndex,testStatus}]`), but algorithm-to-RK dispatch
-  and result forwarding remain unimplemented. Business correlation and field
-  semantics remain pending; do not invent their ranges.
+- 测试仪查询0101/0102及空对象心跳已接入。0103必须携带算法大类/名称/index、
+  完整power、reboot及bootMode；字段解析及失败应答已实现，但算法到RK映射、
+  执行和最终结果转发仍未接入。0105旧结果构造器不代表新结果链路完成，
+  不能自行假定未知算法名称对应的RK编号。
 - PC heartbeat is frozen as client request 0x0002 with `{}` and server response
   0x0001 with `{}` using the MCU connection-local send Seq.
 - The local business now includes 0x0501/0x0502 power requests, 0x0503/0x0504

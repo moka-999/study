@@ -48,14 +48,15 @@ static pc_dispatch_result_t build_response(
  * 参数错误升级为TCP断连。失败固定status=failed；同步控制完成统一返回
  * status=completed，避免各命令自行发明应答外形。
  */
-static pc_dispatch_result_t build_command_failure(
+static pc_dispatch_result_t build_command_failure_with_index(
     const pc_protocol_frame_t *request,
     uint32_t mcu_tx_sequence,
     const char *error_code,
+    const uint32_t *algorithm_index,
     pc_dispatch_response_t *response)
 {
     cJSON *body = NULL;
-    char json[128] = {0};
+    char json[160] = {0};
     pc_dispatch_result_t result;
 
     if (!request || !error_code) return PC_DISPATCH_ERROR;
@@ -64,6 +65,7 @@ static pc_dispatch_result_t build_command_failure(
         !cJSON_AddNumberToObject(body, "requestCommandId", request->command_id) ||
         !cJSON_AddStringToObject(body, "status", "failed") ||
         !cJSON_AddStringToObject(body, "errorCode", error_code) ||
+        (algorithm_index && !cJSON_AddNumberToObject(body, "algorithmIndex", *algorithm_index)) ||
         !cJSON_PrintPreallocated(body, json, sizeof(json), 0)) {
         cJSON_Delete(body);
         return PC_DISPATCH_ERROR;
@@ -74,6 +76,17 @@ static pc_dispatch_result_t build_command_failure(
                             (uint32_t)strlen(json), response);
     cJSON_Delete(body);
     return result;
+}
+
+/* 非测试命令没有算法计划项编号，保留既有错误响应合同。 */
+static pc_dispatch_result_t build_command_failure(
+    const pc_protocol_frame_t *request,
+    uint32_t mcu_tx_sequence,
+    const char *error_code,
+    pc_dispatch_response_t *response)
+{
+    return build_command_failure_with_index(request, mcu_tx_sequence,
+                                            error_code, NULL, response);
 }
 
 static pc_dispatch_result_t build_command_status(
@@ -275,7 +288,7 @@ static pc_dispatch_result_t reject_response_command(
                                  "invalidDirection", response);
 }
 
-/* START_TEST当前只校验已冻结字段；投递RK和正式响应仍待业务适配。 */
+/* 完整校验启动请求，但RK执行与安全合同未接通前拒绝执行，绝不假报受理成功。 */
 static pc_dispatch_result_t handle_start_test(
     const pc_protocol_frame_t *request,
     uint32_t mcu_tx_sequence,
@@ -283,11 +296,17 @@ static pc_dispatch_result_t handle_start_test(
     pc_dispatch_response_t *response)
 {
     pc_test_start_view_t start;
+    uint32_t index;
+    const uint32_t *valid_index =
+        pc_test_start_read_index(root, &index) == PC_TEST_JSON_OK ? &index : NULL;
+    const char *error_code = "invalidArgument";
 
-    return pc_test_start_parse(root, &start) == PC_TEST_JSON_OK
-               ? PC_DISPATCH_NO_RESPONSE
-               : build_command_failure(request, mcu_tx_sequence,
-                                       "invalidArgument", response);
+    if (pc_test_start_parse(root, &start) == PC_TEST_JSON_OK) {
+        /* 这里只做纯计算；不选Boot、不改训练目标、不上电，也不投递RK。 */
+        error_code = ota_app_is_confirmed() ? "notReady" : "otaNotReady";
+    }
+    return build_command_failure_with_index(request, mcu_tx_sequence,
+                                            error_code, valid_index, response);
 }
 
 /*
@@ -769,7 +788,7 @@ static const pc_command_entry_t s_command_table[] = {
     {PC_COMMAND_COMMAND_RESP,      reject_response_command}, /* MCU -> PC，拒收。 */
     {PC_COMMAND_QUERY_TESTER_INFO, handle_query_tester_info}, /* PC -> MCU，读取FRU。 */
     {PC_COMMAND_TESTER_INFO_RESP,  reject_response_command}, /* MCU -> PC，拒收。 */
-    {PC_COMMAND_START_TEST,        handle_start_test},        /* 仅校验测试算法。 */
+    {PC_COMMAND_START_TEST,        handle_start_test},        /* 完整校验，未接RK则拒绝执行。 */
     {PC_COMMAND_POWER_ON,          handle_power_on},          /* 非阻塞上电请求。 */
     {PC_COMMAND_POWER_OFF,         handle_power_off},         /* 等待RK安全关机。 */
     {PC_COMMAND_QUERY_POWER_STATUS, handle_query_power_status}, /* PC -> MCU，只读。 */
@@ -803,14 +822,34 @@ pc_dispatch_result_t pc_dispatch_handle(
     response->length = 0U;
 
     /* 所有命令（包括未知命令）都先经过一次严格JSON对象校验。 */
-    if (pc_json_parse_object(request->json, request->json_length,
-                             &root, NULL) != PC_JSON_OK) {
+    pc_json_result_t json_result = pc_json_parse_object(
+        request->json, request->json_length, &root, NULL);
+    if (json_result != PC_JSON_OK) {
+        /*
+         * 0103重复键按业务参数错误应答；共享入口已经验证UTF-8、词法、语法和
+         * 对象边界，仅因重复键释放树。此错误分支重新取树，只提取唯一合法index，
+         * 绝不执行命令；其他命令仍沿用原有重复键断连合同。
+         */
+        if (request->command_id == PC_COMMAND_START_TEST &&
+            json_result == PC_JSON_ERROR_DUPLICATE_KEY) {
+            root = cJSON_ParseWithLengthOpts((const char *)request->json,
+                                             request->json_length, NULL, 0);
+            if (root) {
+                uint32_t index;
+                const uint32_t *valid_index =
+                    pc_test_start_read_index(root, &index) == PC_TEST_JSON_OK ? &index : NULL;
+                result = build_command_failure_with_index(request, mcu_tx_sequence,
+                                                           "invalidArgument", valid_index, response);
+                cJSON_Delete(root);
+                return result;
+            }
+        }
         return PC_DISPATCH_ERROR;
     }
 
     /* 试运行或升级维护期间不接新测试/上电/调压；查询、心跳和下电仍可用。 */
     if (!ota_app_is_confirmed() &&
-        (request->command_id == PC_COMMAND_START_TEST || request->command_id == PC_COMMAND_POWER_ON ||
+        (request->command_id == PC_COMMAND_POWER_ON ||
          request->command_id == PC_COMMAND_RESET_RK || request->command_id == PC_COMMAND_SET_BOOT_MODE ||
          request->command_id == PC_COMMAND_SET_DDR_CONFIG)) {
         cJSON_Delete(root);
