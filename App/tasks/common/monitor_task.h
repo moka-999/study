@@ -100,7 +100,8 @@ void monitor_power_process(uint32_t now_ms);
  * @return MONITOR_BOOT_OK写入成功；ERR_PARAM模式无效；ERR_BUSY锁失败；
  *         ERR_STATE非OFF；ERR_IO写入失败。
  * @note 取锁最多等待500ms；成功只代表写入，非VOUT实测或RK启动确认。
- *       失败不更新缓存，但I2C失败不能证明DAC硬件未受影响。
+ *       参数/忙/状态拒绝保留缓存；一旦开始写入先失效旧缓存，写失败后
+ *       查询返回ERR_NOT_SET，不能用之前的成功模式冒充当前硬件状态。
  */
 monitor_boot_result_t monitor_set_boot_mode(boot_mode_t mode);
 
@@ -109,9 +110,10 @@ monitor_boot_result_t monitor_set_boot_mode(boot_mode_t mode);
  * @param[out] mode 非NULL模式输出。
  * @param[out] target_mv 非NULL目标mV输出，不是实测电压。
  * @return MONITOR_BOOT_OK成功；ERR_PARAM空指针；ERR_BUSY取锁失败；
- *         ERR_NOT_SET尚未成功设置；ERR_IO目标换算失败。
+ *         ERR_NOT_SET尚未成功设置或最近写入失败；ERR_IO目标换算失败。
  * @note 任务上下文，取锁最多500ms；未设置/取锁失败时输出保持原值，
- *       换算失败时mode可能已写入。不从DAC寄存器回读。
+ *       换算失败时mode可能已写入。不从DAC寄存器回读，不证明实际启动介质。
+ *       MCU复位后缓存清空；只重启RK不清缓存，因为DAC由独立3V3_MCU供电。
  */
 monitor_boot_result_t monitor_get_boot_mode(boot_mode_t *mode,
                                             uint16_t *target_mv);

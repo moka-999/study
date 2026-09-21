@@ -223,8 +223,8 @@ void StartTcpServerTask(void *argument)
                             mcu_tx_sequence++;
                         }
                         /*
-                         * NO_RESPONSE目前用于START_TEST仅校验字段的路径，不代表
-                         * RK已经执行；本地控制及未知命令的应答由dispatch决定。
+                         * NO_RESPONSE仅保留给无同步应答的扩展路径；0103当前明确
+                         * 回复未就绪或参数错误，不代表RK已经执行。
                          */
                         TCP_DIAG(5, frame.command_id);
                         /* frame.json借用状态机缓冲，必须在处理完成后再reset。 */

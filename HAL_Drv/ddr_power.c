@@ -13,9 +13,9 @@
 
 /* 三路实例：地址按预期VSET贴装定义；启动值不等于本次训练目标。 */
 static tps62868_t _ddr[3] = {
-    /* VDD1: TPS628692A, 56.2k, factor 2 */ { .bus = NULL, .addr = TPS62868_ADDR_VDD1, .factor_x10 = TPS62868_FACTOR_2X0 },
-    /* VDD2: TPS628681A, 86.8k (TI 86.6k slot), factor 1 */ { .bus = NULL, .addr = TPS62868_ADDR_VDD2, .factor_x10 = TPS62868_FACTOR_1X0 },
-    /* VDDQ: TPS628681A, 15.4k, factor 1 */ { .bus = NULL, .addr = TPS62868_ADDR_VDDQ, .factor_x10 = TPS62868_FACTOR_1X0 },
+    /* VDD1：TPS628692A，56.2kΩ，电压倍率2。 */ { .bus = NULL, .addr = TPS62868_ADDR_VDD1, .factor_x10 = TPS62868_FACTOR_2X0 },
+    /* VDD2：TPS628681A，2134版原理图为86.6kΩ，电压倍率1。 */ { .bus = NULL, .addr = TPS62868_ADDR_VDD2, .factor_x10 = TPS62868_FACTOR_1X0 },
+    /* VDDQ：TPS628681A，15.4kΩ，电压倍率1。 */ { .bus = NULL, .addr = TPS62868_ADDR_VDDQ, .factor_x10 = TPS62868_FACTOR_1X0 },
 };
 
 static const uint16_t _nominal_mv[2][DDR_RAIL_COUNT] = {

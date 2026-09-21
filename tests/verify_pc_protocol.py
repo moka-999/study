@@ -337,6 +337,15 @@ def main() -> None:
     assert '"algorithmIndex"' in business_source
     assert '"testResults"' in business_source
     assert '"resultDesc"' in business_source
+    assert all(f'"{field}"' in business_source for field in (
+        "algorithmType", "power", "reboot", "bootMode", "memoryType",
+        "vdd1Steps", "vdd2Steps", "vddqSteps"))
+    assert "ddr_power_build_step_targets" in business_source
+    assert "isfinite" in business_source and "pc_test_start_read_index" in business_source
+    start_handler = dispatch_source.split("static pc_dispatch_result_t handle_start_test(", 1)[1].split("\n}", 1)[0]
+    assert '"notReady"' in start_handler and '"otaNotReady"' in start_handler
+    assert "PC_DISPATCH_NO_RESPONSE" not in start_handler
+    assert "build_command_failure_with_index" in start_handler
     passed += 1
 
     # MCU响应使用本连接自己的Seq；PC请求Seq和RK u64 Seq都不参与响应头。

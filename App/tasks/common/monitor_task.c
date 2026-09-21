@@ -142,6 +142,11 @@ monitor_boot_result_t monitor_set_boot_mode(boot_mode_t mode)
         xSemaphoreGive(s_memory_io_mutex);
         return MONITOR_BOOT_ERR_STATE;
     }
+    /*
+     * 从真正开始写DAC起，旧成功配置不再可信：总线报错也可能已经改变输出。
+     * 参数/忙/状态拒绝没有访问器件，仍保留旧缓存；仅完整写成功才恢复有效。
+     */
+    s_boot_mode_valid = 0U;
     if (mcp4725_set_boot_mode(&s_boot_dac, mode) != IF_OK) {
         xSemaphoreGive(s_memory_io_mutex);
         return MONITOR_BOOT_ERR_IO;

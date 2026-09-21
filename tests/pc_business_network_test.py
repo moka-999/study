@@ -82,6 +82,26 @@ def run(host: str, port: int) -> None:
         passed += 1
         mcu_seq += 1; pc_seq += 1
 
+        # 0103只验证协议软件接入；RK接口未定，合法请求也必须明确拒绝且不启动电源。
+        start_request = {
+            "algorithmType": "parametric", "algorithmName": "idd_0", "algorithmIndex": 7,
+            "power": {"memoryType": "LPDDR4X", "vdd1Steps": 0, "vdd2Steps": 0, "vddqSteps": 0},
+            "reboot": True, "bootMode": "emmc",
+        }
+        body = send_json(connection, 0x0103, start_request, pc_seq, mcu_seq, 0x0006)
+        assert body == {"requestCommandId": 259, "status": "failed", "errorCode": "notReady", "algorithmIndex": 7}
+        mcu_seq += 1; pc_seq += 1
+        body = send_json(connection, 0x0103, {"algorithmIndex": 8}, pc_seq, mcu_seq, 0x0006)
+        assert body == {"requestCommandId": 259, "status": "failed", "errorCode": "invalidArgument", "algorithmIndex": 8}
+        mcu_seq += 1; pc_seq += 1
+        connection.sendall(make_frame(0x0103, b'{"algorithmIndex":9,"algorithmIndex":10}', pc_seq))
+        fields, body = recv_frame(connection)
+        assert fields[3:6] == (0, 0x0006, mcu_seq)
+        assert body == {"requestCommandId": 259, "status": "failed", "errorCode": "invalidArgument"}
+        print("[PASS] 0103完整请求notReady、非法请求index回带和重复index拒绝；不执行RK")
+        passed += 3
+        mcu_seq += 1; pc_seq += 1
+
         body = send_json(connection, 0x0503, {}, pc_seq, mcu_seq, 0x0504)
         assert body == {"powerState": "off"}
         print("[PASS] 0x0503/0x0504读取OFF状态")

@@ -1025,7 +1025,9 @@ static void test_pc_state_table_boundaries(void)
 static void test_pc_test_json_contract(void)
 {
     static const char request_json[] =
-        "{\"algorithmName\":\"algorithmName\",\"algorithmIndex\":1}";
+        "{\"algorithmType\":\"parametric\",\"algorithmName\":\"algorithmName\",\"algorithmIndex\":1,"
+        "\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1Steps\":0,\"vdd2Steps\":0,\"vddqSteps\":0},"
+        "\"reboot\":true,\"bootMode\":\"emmc\"}";
     static const char trailing_comma_json[] =
         "{\"algorithmName\":\"algorithmName\",\"algorithmIndex\":1,}";
     static const pc_chip_test_result_t results[] = {
@@ -1126,7 +1128,12 @@ static void test_pc_dispatch(void)
         {PC_COMMAND_TESTER_INFO_RESP, "{}", PC_DISPATCH_RESPONSE_READY,
          "PC查表用0x0006拒绝反向测试仪信息响应"},
         {PC_COMMAND_START_TEST, "{\"algorithmName\":\"demo\",\"algorithmIndex\":1}",
-         PC_DISPATCH_NO_RESPONSE, "PC查表校验合法START_TEST，不提前回复"},
+         PC_DISPATCH_RESPONSE_READY, "PC查表拒绝只有旧两字段的START_TEST"},
+        {PC_COMMAND_START_TEST,
+         "{\"algorithmType\":\"parametric\",\"algorithmName\":\"idd_0\",\"algorithmIndex\":1,"
+         "\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1Steps\":0,\"vdd2Steps\":0,\"vddqSteps\":0},"
+         "\"reboot\":false,\"bootMode\":\"emmc\"}",
+         PC_DISPATCH_RESPONSE_READY, "完整START_TEST在RK未接时明确拒绝，不访问硬件"},
         {PC_COMMAND_START_TEST, "{}", PC_DISPATCH_RESPONSE_READY,
          "PC查表用0x0006拒绝START_TEST缺失必填字段"},
         {PC_COMMAND_START_TEST, "{\"algorithmName\":\"demo\",\"algorithmIndex\":1.5}",
