@@ -5,7 +5,7 @@
 /*
  * 心跳方向固定：PC(Client)发送0x0002，MCU(Server)回复0x0001。
  * 两端JSON包体都必须是空对象{}；MCU响应使用本连接自己的发送Seq。
- * PC若反向发送0x0001，返回0x0006/invalidDirection，不因该业务错误断连。
+ * PC若反向发送0x0001，MCU返回0x0006/invalidDirection，不因方向错误断连。
  */
 #define PC_COMMAND_SERVER_HEARTBEAT   0x0001U
 #define PC_COMMAND_CLIENT_HEARTBEAT   0x0002U
@@ -21,7 +21,8 @@
 
 /*
  * 第一组测试业务命令：0x0103由PC下发算法，0x0105由MCU上报测试结果。
- * 当前只冻结JSON外形；ServiceID、site/mirror/status值域和请求响应关系仍待评审。
+ * 外部已启动模式已接入功能测试；受理用0x0006，最终结论用0x0105。
+ * siteId来自FRU；B2与芯片未分配时分别用0和空串，不把RK die当B2编号。
  */
 #define PC_COMMAND_START_TEST          0x0103U
 #define PC_COMMAND_TEST_RESULT_REPORT  0x0105U
@@ -46,9 +47,9 @@
 #define PC_COMMAND_QUERY_INDICATOR_STATUS  0x0702U
 #define PC_COMMAND_INDICATOR_STATUS_RESP   0x0703U
 
-/* MCU升级：0901为PC五动作请求；0902为进度应答；0903仅目标镜像健康后返回。 */
-#define PC_COMMAND_MCU_OTA_REQUEST  0x0901U
-#define PC_COMMAND_MCU_OTA_RESP     0x0902U
-#define PC_COMMAND_MCU_OTA_COMPLETE 0x0903U
+/* 固件升级请求/动作应答/完成确认；mcu_*已实现，rk_*仅保留且返回notSupported。 */
+#define PC_COMMAND_FIRMWARE_UPGRADE_REQUEST   0x0901U
+#define PC_COMMAND_FIRMWARE_UPGRADE_RESP      0x0902U
+#define PC_COMMAND_FIRMWARE_UPGRADE_COMPLETE  0x0903U
 
 #endif /* PC_COMMAND_H */

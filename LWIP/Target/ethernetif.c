@@ -186,6 +186,8 @@ __attribute__((section(".Rx_PoolSection"))) extern u8_t memp_memory_RX_POOL_base
 #endif
 
 /* USER CODE BEGIN 2 */
+/* 保护接收描述符与MAC启停，链路更新/发包由同一个TCPIP线程串行执行。 */
+static osMutexId_t eth_rx_mutex;
 
 /* USER CODE END 2 */
 
@@ -306,6 +308,9 @@ static void low_level_init(struct netif *netif)
   /* create a binary semaphore used for informing ethernetif of frame transmission */
   TxPktSemaphore = osSemaphoreNew(1, 0, NULL);
 
+  eth_rx_mutex = osMutexNew(NULL);
+  if (!eth_rx_mutex || !RxPktSemaphore || !TxPktSemaphore) Error_Handler();
+
   /* create the task that handles the ETH_MAC */
 /* USER CODE BEGIN OS_THREAD_NEW_CMSIS_RTOS_V2 */
   memset(&attributes, 0x0, sizeof(osThreadAttr_t));
@@ -316,28 +321,10 @@ static void low_level_init(struct netif *netif)
 /* USER CODE END OS_THREAD_NEW_CMSIS_RTOS_V2 */
 
 /* USER CODE BEGIN low_level_init Code 1 for User BSP */
-
-  /* 注册 YT8512H 使用的 Clause 22 PHY 接口。 */
-  USER_PHY_RegisterBusIO(&UserPhyObj, &UserPhyIOCtx);
-  if (USER_PHY_Init(&UserPhyObj) != USER_PHY_STATUS_OK)
-  {
-    /* MDIO 扫描或 PHY 初始化失败时停机，避免带病进入网络任务。 */
-    Error_Handler();
-  }
-
-  /* ── 步骤2: 启动 ETH MAC DMA, 但不创建 EthIf 线程 ── */
-  HAL_ETH_Start_IT(&heth);
-
-  /* ★ 测试: 暂时不创建 ethernetif_input 线程, 看 ISR 本身是否崩溃 ★ */
-#if 0
-  /* create the task that handles the ETH_MAC */
-  memset(&attributes, 0x0, sizeof(osThreadAttr_t));
-  attributes.name = "EthIf";
-  attributes.stack_size = INTERFACE_THREAD_STACK_SIZE;
-  attributes.priority = osPriorityRealtime;
-  osThreadNew(ethernetif_input, netif, &attributes);
-#endif
-
+  if (hal_eth_init_status != HAL_OK ||
+      USER_PHY_RegisterBusIO(&UserPhyObj, &UserPhyIOCtx) != USER_PHY_STATUS_OK ||
+      USER_PHY_Init(&UserPhyObj) != USER_PHY_STATUS_OK) Error_Handler();
+  /* MAC保持停止，链路解析成功且速率/双工配置正确后再启动。 */
 /* USER CODE END low_level_init Code 1 for User BSP */
 
   if (hal_eth_init_status == HAL_OK)
@@ -377,6 +364,7 @@ static void low_level_init(struct netif *netif)
 static err_t low_level_output(struct netif *netif, struct pbuf *p)
 {
   uint32_t i = 0U;
+  uint8_t retries = 0U;
   struct pbuf *q = NULL;
   err_t errval = ERR_OK;
   ETH_BufferTypeDef Txbuffer[ETH_TX_DESC_CNT] = {0};
@@ -415,6 +403,7 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
   tx_config.TxBuffer = Txbuffer;
   tx_config.pData = p;
 
+  if (heth.gState != HAL_ETH_STATE_STARTED || !netif_is_link_up(netif)) return ERR_IF;
   pbuf_ref(p);
 
   do
@@ -426,7 +415,7 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
     else
     {
 
-      if(HAL_ETH_GetError(&heth) & HAL_ETH_ERROR_BUSY)
+      if ((HAL_ETH_GetError(&heth) & HAL_ETH_ERROR_BUSY) && retries++ == 0U)
       {
         /* Wait for descriptors to become available */
         osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT);
@@ -459,7 +448,10 @@ static struct pbuf * low_level_input(struct netif *netif)
 
   if(RxAllocStatus == RX_ALLOC_OK)
   {
-    HAL_ETH_ReadData(&heth, (void **)&p);
+    if (osMutexAcquire(eth_rx_mutex, osWaitForever) == osOK) {
+      if (heth.gState == HAL_ETH_STATE_STARTED) HAL_ETH_ReadData(&heth, (void **)&p);
+      osMutexRelease(eth_rx_mutex);
+    }
   }
 
   return p;
@@ -614,6 +606,35 @@ u32_t sys_now(void) { return HAL_GetTick(); }
   * @brief  Check the ETH link state then update ETH driver and netif link accordingly.
   * @retval None
   */
+/* 在TCPIP线程调用；链路故障和HAL失败均保持down，下轮允许重试。 */
+static void ethernet_link_update(void *argument)
+{
+  static int32_t applied_state = USER_PHY_STATUS_LINK_DOWN;
+  struct netif *netif = argument;
+  int32_t state = USER_PHY_GetLinkState(&UserPhyObj);
+  uint8_t valid = state >= USER_PHY_STATUS_100MBITS_FULLDUPLEX &&
+                  state <= USER_PHY_STATUS_10MBITS_HALFDUPLEX;
+  if (valid && state == applied_state && heth.gState == HAL_ETH_STATE_STARTED) return;
+  netif_set_link_down(netif);
+  if (osMutexAcquire(eth_rx_mutex, osWaitForever) != osOK) return;
+  int ready = 0;
+  if (heth.gState != HAL_ETH_STATE_STARTED || HAL_ETH_Stop_IT(&heth) == HAL_OK) {
+    if (valid) {
+      ETH_MACConfigTypeDef config;
+      if (HAL_ETH_GetMACConfig(&heth, &config) == HAL_OK) {
+        config.Speed = (state == USER_PHY_STATUS_100MBITS_FULLDUPLEX ||
+                        state == USER_PHY_STATUS_100MBITS_HALFDUPLEX) ? ETH_SPEED_100M : ETH_SPEED_10M;
+        config.DuplexMode = (state == USER_PHY_STATUS_100MBITS_FULLDUPLEX ||
+                            state == USER_PHY_STATUS_10MBITS_FULLDUPLEX) ? ETH_FULLDUPLEX_MODE : ETH_HALFDUPLEX_MODE;
+        ready = HAL_ETH_SetMACConfig(&heth, &config) == HAL_OK && HAL_ETH_Start_IT(&heth) == HAL_OK;
+      }
+    }
+  }
+  osMutexRelease(eth_rx_mutex);
+  applied_state = ready ? state : USER_PHY_STATUS_LINK_DOWN;
+  if (ready) netif_set_link_up(netif);
+}
+
 void ethernet_link_thread(void* argument)
 {
 
@@ -625,26 +646,8 @@ void ethernet_link_thread(void* argument)
   {
 
 /* USER CODE BEGIN ETH link Thread core code for User BSP */
-    /* 链路检测: 周期读 PHY 状态, 维护 netif 的 LINK_UP 标志。
-     * ★ 2026-08-13 之前此段被清空(第5个 CubeMX 覆盖点), 导致 LINK_UP 从未设置,
-     *   LWIP 认为链路 down, ARP 不发 → ping 不通。 */
-    {
-      struct netif *pnetif = (struct netif *)argument;
-      int32_t link_state = USER_PHY_GetLinkState(&UserPhyObj);
-
-      if ((link_state == USER_PHY_STATUS_LINK_DOWN)      ||
-          (link_state == USER_PHY_STATUS_AUTONEGO_NOTDONE) ||
-          (link_state == USER_PHY_STATUS_READ_ERROR)     ||
-          (link_state == USER_PHY_STATUS_WRITE_ERROR)    ||
-          (link_state == USER_PHY_STATUS_ADDRESS_ERROR))
-      {
-        netif_set_link_down(pnetif);
-      }
-      else
-      {
-        netif_set_link_up(pnetif);
-      }
-    }
+    /* 等待核心线程完成，避免直接跨线程修改netif，也不会积压链路回调。 */
+    (void)tcpip_callback_wait(ethernet_link_update, argument);
 /* USER CODE END ETH link Thread core code for User BSP */
 
     osDelay(100);

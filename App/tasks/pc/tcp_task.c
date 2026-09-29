@@ -10,8 +10,8 @@
  * 也不会把RK TLV或监测文本原样发给PC。
  *
  * 数据流:
- *   PC → TCP 8888 → pc_state_machine → pc_dispatch → 后续业务适配层
- *   后续适配层 → 独立RK Seq/TLV → RK3588；业务结果关联合同另行冻结
+ *   PC → TCP 8888 → pc_state_machine → pc_dispatch → pc_test_service
+ *   pc_test_service → 独立RK Seq/TLV → RK3588；结果按algorithmIndex关联
  * ===================================================================
  */
 #include "main.h"
@@ -160,6 +160,12 @@ void StartTcpServerTask(void *argument)
         for (;;) {
             ota_app_progress(OTA_TASK_TCP);
             pc_dispatch_poll();
+            /* 领取真实RK异步结果，业务层已完成JSON组包；本任务只传输及推进Seq。 */
+            pc_dispatch_response_t async_response;
+            int ready = pc_dispatch_next_response(mcu_tx_sequence, &async_response);
+            if (ready < 0 || (ready > 0 && pc_send_all(connfd, async_response.data,
+                                                    async_response.length) != 0)) break;
+            if (ready > 0) ++mcu_tx_sequence;
             int n = recv(connfd, rx, sizeof(rx), 0);
 
             if (n > 0) {
@@ -167,7 +173,7 @@ void StartTcpServerTask(void *argument)
                 pc_last_byte_tick = xTaskGetTickCount();
                 /*
                  * 逐字节喂流解析器是为了处理任意TCP切分。完成一帧并reset后，
-                * 循环会继续消费rx剩余字节，所以一次recv中的多个粘包不会丢失。
+                 * 循环会继续消费rx剩余字节，所以一次recv中的多个粘包不会丢失。
                  */
                 for (int i = 0; i < n; i++) {
                     /*
@@ -209,8 +215,8 @@ void StartTcpServerTask(void *argument)
                             mcu_tx_sequence++;
                         }
                         /*
-                         * 其他命令目前只验证并记录，不回临时ACK，避免PC工程师把
-                         * 尚未冻结的行为当成正式合同；业务适配层接入后在这里投递。
+                         * 0103的accepted仅表示入队；真正算法结论在异步0105上报。
+                         * 坏头有界丢弃，完整坏JSON回错后继续；仅恢复超限等致命错误断连。
                          */
                         TCP_DIAG(5, frame.command_id);
                         /* frame.json借用状态机缓冲，必须在处理完成后再reset。 */

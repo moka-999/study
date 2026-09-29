@@ -10,6 +10,11 @@ option(ENABLE_OTA_RELOCATION_PROBE "Build slot-limited App with relocation recor
 option(ENABLE_OTA_BOOT "Require B journal and healthy-start confirmation" OFF)
 set(OTA_APP_BASE "0x08020000" CACHE STRING "OTA App slot address")
 
+# B1只使用真实驱动；不允许构建参数误开V2的电源模拟或隔离网关。
+if(ENABLE_V2_POWER_SIMULATION OR ENABLE_RK_GATEWAY_TEST)
+    message(FATAL_ERROR "B1 does not support V2 power simulation or gateway test")
+endif()
+
 # RK物理口仍待真板确认；只选择一路，避免向两个候选控制台同时发送协议。
 set(B1_RK_UART 4 CACHE STRING "B1 RK UART candidate: 4=UART4, 2=USART2")
 set_property(CACHE B1_RK_UART PROPERTY STRINGS 4 2)
@@ -82,6 +87,7 @@ add_executable(b1
     HAL_Drv/ddr_power.c
     HAL_Drv/pwr_ctrl.c
     HAL_Drv/memory_monitor.c
+    HAL_Drv/idd_stats.c
     HAL_Drv/uart_hw.c
     HAL_Drv/uart_router.c
     # 两套协议/任务独立构建；不加入V2测试任务或旧PG12复位分发器。
@@ -91,12 +97,12 @@ add_executable(b1
     App/protocol/pc/pc_ota.c
     App/protocol/pc/pc_tester_info.c
     App/protocol/pc/pc_test_message.c
+    App/protocol/pc/pc_test_service.c
     App/protocol/rk/crc.c
     App/protocol/rk/frame.c
     App/protocol/rk/state_machine.c
     App/tasks/pc/tcp_task.c
     App/tasks/rk/rk_task.c
-    App/tasks/rk/hb_task.c
     App/tasks/rk/rk_link.c
     App/tasks/common/monitor_task.c
     BSP/AD7124/ad7124.c

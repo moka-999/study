@@ -1,6 +1,6 @@
 /*
  * UART字节路由接口：不承载TCP转发，不解释RK/PC协议。
- * B1逻辑槽0由Core在UART4/USART2中选择一条RK链路；USART1只作本地控制台。
+ * V2逻辑槽0绑定USART1作RK对测，B1的物理UART选择另行确认。
  */
 #ifndef UART_ROUTER_H
 #define UART_ROUTER_H
@@ -13,22 +13,61 @@
  */
 #define UART_RX_BUF_SIZE 1056
 
-/* 调度前每槽注册一次。id为0或1；非法参数/分配失败不会创建可用槽位。 */
+/* 已丢失字节连续性；消费者必须先重置半帧状态，再继续poll，不能按字节数使用。 */
+#define UART_RX_GAP (-1)
+
+typedef struct {
+    uint32_t queue_overflows;  /* ISR投队列失败次数。 */
+    uint32_t dropped_blocks;   /* 已知丢弃块数，含断流后清队列；不是物理丢失字节数。 */
+    uint32_t errors;           /* HAL错误回调次数。 */
+    uint32_t last_hal_error;   /* 最近一次HAL UART错误位图。 */
+    uint32_t invalid_events;   /* 非HT事件的长度非法次数。 */
+    uint32_t restart_failures; /* 首次/回调/恢复后启动RX失败次数。 */
+    uint32_t recovery_failures;/* 任务停止RX失败次数。 */
+    uint32_t recoveries;       /* 任务停止并重新启动RX成功次数。 */
+    uint8_t recovery_pending; /* 1等待任务恢复；不表示线缆/对端已在线。 */
+} uart_rx_diagnostics_t;
+
+/**
+ * @brief 调度前为逻辑UART槽注册接口并创建接收队列。
+ * @param[in] id 槽编号0或1。
+ * @param[in] interface 借用接口，须含start_rx/send并覆盖槽位使用期。
+ * @note 无效参数、重复注册或分配失败直接返回；无状态码，失败槽不可用。
+ *       每槽只注册一次；注册不启动物理接收。
+ */
 void uart_register(int id, uart_if_t *interface);
 
-/* 调度前初始化TX锁/中断钩子，再启动已注册槽位接收；调用方负责外设已就绪。 */
+/**
+ * @brief 调度前创建TX互斥锁、挂接HAL TxISR并启动已注册槽接收。
+ * @note 调用方须先初始化外设；失败槽记录恢复请求，须由唯一接收任务周期poll。
+ *       返回不表示所有DMA已成功启动；通过诊断接口查询。TX锁失败拒绝发送。
+ */
 void uart_start_all(void);
 
-/*
- * 任务上下文非等待取一个接收块；buffer至少有UART_RX_BUF_SIZE字节。
- * 返回实际复制字节数，0表示无数据或参数无效；不会返回内部DMA指针。
+/**
+ * @brief 在任务上下文驱动RX恢复，并无队列等待地取走一个接收块。
+ * @param[in] id 已注册槽编号0或1。
+ * @param[out] buffer 非NULL调用方缓冲，至少UART_RX_BUF_SIZE字节。
+ * @param[in] capacity 缓冲实际字节容量；小于要求时不出队。
+ * @return >0实际字节数；0无数据/参数无效；UART_RX_GAP表示断流且已丢弃旧队列。
+ *         返回<=0时输出不变；GAP时必须重置组帧状态并继续poll。
+ * @note 每槽只允许一个任务消费，须周期调用以驱动100ms间隔的RX恢复。
+ *       出队不等待，但恢复可等待HAL Abort自身超时；不得ISR调用。
+ *       一个接收块不保证是一帧，队列满/异常时不保证可靠传输。
  */
 int uart_poll_rx(int id, uint8_t *buffer, uint16_t capacity);
 
-/*
- * 任务上下文发送；IF_OK表示已复制入TX环，不代表物理发送完毕。
- * 锁竞争最多等待100ms；无效槽/参数、锁失败或TX环满返回IF_ERR。
- * 失败时调用方必须显式决定重试或丢弃，禁止在ISR调用。
+/** 任务上下文复制本次开机累计诊断：1成功，0参数/槽无效且输出不变；计数饱和。 */
+int uart_get_rx_diagnostics(int id, uart_rx_diagnostics_t *out);
+
+/**
+ * @brief 在任务上下文将载荷交给已注册UART发送接口。
+ * @param[in] id 已注册槽编号0或1。
+ * @param[in] buffer 非NULL，至少可读length字节，当前STM32实现复制入TX环。
+ * @param[in] length 非0字节数，当前TX环最大可接纳2047字节。
+ * @return IF_OK已复制入TX环；IF_ERR参数/槽无效、锁失败或环空间不足。
+ * @note 当前STM32实现取锁最多100ms；失败不入队部分载荷。IF_OK不代表线上
+ *       发完或RK收到；调用方须决定失败重试/丢弃策略，禁止ISR调用。
  */
 int uart_send(int id, uint8_t *buffer, uint16_t length);
 

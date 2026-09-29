@@ -86,8 +86,10 @@ def main() -> None:
             "每条TCP连接的MCU首个发送Seq必须为1")
     require(tcp.index("pc_send_all(connfd") < tcp.index("mcu_tx_sequence++;"),
             "Seq只能在完整PDU成功发送后推进")
-    require("read_be16(&sm->buffer[8]) != 0U" in state_machine,
-            "接收端必须拒绝非0 ServiceID")
+    require(all(token in state_machine for token in (
+                "data[8] != 0U", "data[9] != 0U", "PC_SM_ERROR_SERVICE_ID",
+                "header_prefix_error", "PC_SM_MAX_DISCARDED_BYTES")),
+            "接收端必须拒绝非0 ServiceID，并以有界滑窗寻找下一个合法头")
     require("json_string_lexemes_are_safe" in protocol and
             "json[i + 4U] == '0'" in protocol,
             "共享JSON入口必须拒绝\\u0000造成的C字符串截断")
@@ -199,9 +201,12 @@ def main() -> None:
             "pc_test_start_read_index" in dispatch and "build_command_failure_with_index" in dispatch,
             "0103纯计算边界或合法index失败回带缺失")
     start_handler = dispatch.split("static pc_dispatch_result_t handle_start_test(", 1)[1].split("\n}", 1)[0]
-    require('"notReady"' in start_handler and '"otaNotReady"' in start_handler and
-            "PC_DISPATCH_NO_RESPONSE" not in start_handler and "build_command_accepted" not in start_handler,
-            "0103在RK未接时必须诚实拒绝，不能静默或假报受理")
+    start_service = (ROOT / "App/protocol/pc/pc_test_service.c").read_text(encoding="utf-8")
+    require("pc_test_service_start" in start_handler and
+            all(token in start_service for token in (
+                "!start->external_ready", "pwr_ctrl_get_state() != PWR_CTRL_STATE_ON",
+                '"notReady"', '"otaNotReady"', "monitor_idd_start", "rk_link_request")),
+            "0103须委托业务服务，仅健康且ON的外部就绪路径可启动采样并下发RK")
     require("result_led_get_all" in led_source and
             led_source.count("taskENTER_CRITICAL()") >= 4 and
             "s_states[target] == state" in led_source,

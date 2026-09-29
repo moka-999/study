@@ -208,7 +208,7 @@ def main() -> int:
             "AD7124_CFG_REF_SEL(AD7124_REF_EXT1)" not in ad_source and
             "AD7124_CFG_AIN_BUFP" in ad_source and
             "AD7124_CFG_AIN_BUFM) != IF_OK" not in ad_source and
-            "FB2306为NC" in ad_source,
+            "_wr24(d, AD7124_REG_ERROR_EN, AD7124_DIAGNOSTIC_MASK)" in ad_source,
             "AD7124必须使用内部2.5V基准且关闭接地负端缓冲")
     require("spi_if_t spi4_if" in spi_source and "&hspi4" in spi_source and
             "hspi2" not in spi_source,
@@ -336,7 +336,7 @@ def main() -> int:
         "HAL_Drv/memory_monitor.c")),
             "B1 build does not compile the accepted power/monitor modules")
 
-    # 移植通用PC解析/查表与RK收发；正式TCP尚不等于PC到RK测试业务已打通。
+    # 通用PC解析/查表与真实RK业务共用；静态检查不能替代B1真板验收。
     pc_header = (ROOT / "App/protocol/pc/pc_protocol.h").read_text(encoding="utf-8")
     pc_source = (ROOT / "App/protocol/pc/pc_protocol.c").read_text(encoding="utf-8")
     pc_test_source = (ROOT / "App/protocol/pc/pc_test_message.c").read_text(encoding="utf-8")
@@ -383,7 +383,6 @@ def main() -> int:
     rk_state = (ROOT / "App/protocol/rk/state_machine.c").read_text(encoding="utf-8")
     tcp_task = (ROOT / "App/tasks/pc/tcp_task.c").read_text(encoding="utf-8")
     rk_task = (ROOT / "App/tasks/rk/rk_task.c").read_text(encoding="utf-8")
-    hb_task = (ROOT / "App/tasks/rk/hb_task.c").read_text(encoding="utf-8")
     monitor_task = (ROOT / "App/tasks/common/monitor_task.c").read_text(encoding="utf-8")
     task_header = (ROOT / "App/tasks/app_tasks.h").read_text(encoding="utf-8")
     require("s_state_handlers" in pc_state and "PC_SM_STATE_COUNT" in pc_state_header and
@@ -425,33 +424,49 @@ def main() -> int:
             "PC信息查询必须读取持久FRU，空白B1身份使用自身UID MAC")
     require("return tlv_unpack(" in rk_state and
             re.search(r"tlv_sm_get_frame\([^;]+\)\s*<\s*0", rk_task) and
-            "frame_len < TLV_PAYLOAD_MIN" in rk_frame and
-            "unit_count >= TLV_MAX_PER_FRAME" in rk_frame and
+            "length < TLV_PAYLOAD_MIN" in rk_frame and
+            "frame->count >= TLV_MAX_PER_FRAME" in rk_frame and
             "invalid_frame:" in rk_frame,
             "RK必须传播解包错误并保留短帧/数量/整帧原子拒绝保护")
-    require(all("rk_link_next_sequence()" in task for task in (rk_task, hb_task)),
+    require(rk_task.count("rk_link_next_sequence()") == 2 and
+            "process_heartbeat(&last_heartbeat);" in rk_task,
             "RK命令与心跳必须通过独立序号入口分配，不借用PC Seq")
+    require(not (ROOT / "App/tasks/rk/hb_task.c").exists() and
+            not (ROOT / "App/tasks/rk/hb_task.h").exists() and
+            "StartHbTask" not in rtos_source + task_header and "hb_task.c" not in cmake,
+            "心跳必须合入RK任务，不残留独立HB线程或构建项")
 
     task_paths = (
         "App/tasks/pc/tcp_task.c", "App/tasks/rk/rk_task.c",
-        "App/tasks/rk/hb_task.c", "App/tasks/rk/rk_link.c",
+        "App/tasks/rk/rk_link.c",
         "App/tasks/common/monitor_task.c",
         "App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_state_machine.c",
-        "App/protocol/pc/pc_tester_info.c", "App/protocol/rk/frame.c",
+        "App/protocol/pc/pc_tester_info.c", "App/protocol/pc/pc_test_service.c",
+        "App/protocol/rk/frame.c",
         "App/protocol/rk/state_machine.c", "App/protocol/rk/crc.c",
     )
     require(all(path in cmake for path in task_paths), "正式任务/协议源码未全部加入B1构建")
+    pc_service = (ROOT / "App/protocol/pc/pc_test_service.c").read_text(encoding="utf-8")
+    require("pc_dispatch_next_response" in tcp_task and
+            all(token in pc_service for token in (
+                "!start->external_ready", "pwr_ctrl_get_state() != PWR_CTRL_STATE_ON",
+                "monitor_idd_start", "monitor_idd_finish", "pc_test_add_measurement")) and
+            "pc_test_add_statistics" in pc_dispatch,
+            "B1真实算法必须受ON门控，统计及异步结果都须接入正式TCP")
+    require("if(ENABLE_V2_POWER_SIMULATION OR ENABLE_RK_GATEWAY_TEST)" in cmake and
+            "FATAL_ERROR" in cmake,
+            "B1构建必须拒绝V2电源模拟和旧RK网关联调开关")
     require(all(name in rtos_source and name in task_header for name in (
-        "StartTcpServerTask", "StartRkTask", "StartHbTask", "StartMonitorTask")),
+        "StartTcpServerTask", "StartRkTask", "StartMonitorTask")),
             "B1正式任务未统一声明或未在RTOS初始化中接入")
     require(all(re.search(rf"{name}\s*=\s*xQueueCreate\(\s*8U?\s*,", rtos_source)
-                for name in ("pcToRk_Queue", "rkToPc_Queue")) and
+                for name in ("rkRequestQueue", "rkResponseQueue")) and
             "pdPASS" in rtos_source and "Error_Handler()" in rtos_source,
             "RK业务队列必须各8槽，任务创建失败必须显式处理")
     require("monitor_power_process(HAL_GetTick())" in rtos_source and
             "pwr_ctrl_process(now_ms)" in monitor_task and
             all("pwr_ctrl_get_state()" in task and "PWR_CTRL_STATE_ON" in task
-                for task in (rk_task, hb_task, monitor_task)),
+                for task in (rk_task, monitor_task)),
             "B1必须推进电源状态机，RK发送和采样均受ON状态门控")
     require(re.search(r"memory_monitor_configure\([^;]*&i2c4_if\s*,\s*&spi4_if\s*,"
                       r"\s*(?:GPIOE|B1_SPI4_NCS_PORT)\s*,"
@@ -479,7 +494,7 @@ def main() -> int:
             tcp_task.index("for (int i = 0; i < n; i++)") <
             tcp_task.rindex("pc_last_byte_tick = xTaskGetTickCount();"),
             "TCP必须按实际消费字节刷新半帧计时，不能计入MCU业务处理时间")
-    formal_tasks = rtos_source + tcp_task + rk_task + hb_task + monitor_task
+    formal_tasks = rtos_source + tcp_task + rk_task + monitor_task
     require(not (ROOT / "App/tasks/test").exists() and
             "App/tasks/test/" not in cmake and
             not re.search(r"\b(?:StartDriverMockTestTask|StartTestTask|StartQspiTestTask|"
@@ -525,13 +540,17 @@ def main() -> int:
             "ota_app_watchdog_tick()" in rtos_source and
             all(f"ota_app_progress(OTA_TASK_{name})" in text for name, text in
                 (("DEFAULT", rtos_source), ("TCP", tcp_task), ("MONITOR", monitor_task),
-                 ("RK", rk_task), ("HB", hb_task))) and
+                 ("RK", rk_task))) and
             rk_task.split("void StartRkTask", 1)[1].index("ota_app_progress(OTA_TASK_RK)") <
             rk_task.split("void StartRkTask", 1)[1].index("continue;"),
-            "五任务必须参与健康观察，OFF不能导致RK健康缺报")
+            "四任务必须参与健康观察，OFF不能导致RK健康缺报")
+    ota_header = (ROOT / "App/ota/ota_app.h").read_text(encoding="utf-8")
+    require("OTA_TASK_HB" not in ota_header and
+            "(1U << OTA_TASK_COUNT) - 1U" in ota_app,
+            "OTA健康位图必须按真实任务数量生成，不能仍等待已移除的HB")
     require("pc_dispatch_poll();" in tcp_task and "pc_dispatch_disconnected();" in tcp_task and
             "select(listenfd + 1" in tcp_task and "SO_SNDTIMEO" in tcp_task and
-            "PC_COMMAND_MCU_OTA_REQUEST, pc_ota_handle" in pc_dispatch and
+            "PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, pc_ota_handle" in pc_dispatch and
             '"otaNotReady"' in pc_dispatch and '"notSupported"' in pc_ota,
             "OTA命令/有界等待/断线生命周期或普通镜像拒绝入口缺失")
     require("monitor_ota_enter" in monitor_task and "s_ota_maintenance" in monitor_task and
@@ -539,7 +558,7 @@ def main() -> int:
             "flash_transaction_begin(1000U)" in pc_info and
             "firmware_version_load(" in ota_app and "firmware_version_current(" not in ota_app,
             "OTA必须串行访问Flash并保留OFF维护门和W25信息来源")
-    print("OTA slot limits, five-task health, B1 OFF gate and shared Flash transactions PASS")
+    print("OTA槽容量、四任务健康、B1 OFF门禁及Flash事务检查通过")
 
     manifest_path = ROOT / "build_debug/b1.manifest.json"
     image_path = ROOT / "build_debug/b1.bin"

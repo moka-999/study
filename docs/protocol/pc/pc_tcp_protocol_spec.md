@@ -44,7 +44,7 @@ Seq只表示本端发送顺序，不作为请求与应答的匹配依据。控�
 
 ## 3. 命令编号
 
-已有编号沿用 `CommandEnum1.cs`，保留原枚举名称；本框架新增0x0006通用应答和0x0509 DDR配置入口，供双方同步枚举。
+已有编号沿用 `CommandEnum1.cs`；本框架新增0x0006通用应答和0x0509 DDR配置入口，0x0901–0x0903保留编号并改用通用固件升级枚举名称，供双方同步。
 
 | 编号 | 枚举名称 | 用途 |
 |---|---|---|
@@ -76,6 +76,9 @@ Seq只表示本端发送顺序，不作为请求与应答的匹配依据。控�
 | 0x0703 | CMD_INDICATOR_STATUS_RESP | MCU→PC：结果灯状态响应 |
 | 0x0801 | CMD_QUERY_B2_HEARTBEAT_STATUS | PC→MCU：查询B1–B2保活状态 |
 | 0x0802 | CMD_B2_HEARTBEAT_STATUS_RESP | MCU→PC：B1–B2保活状态响应 |
+| 0x0901 | CMD_FIRMWARE_UPGRADE_REQUEST | PC→MCU：固件升级操作请求 |
+| 0x0902 | CMD_FIRMWARE_UPGRADE_RESP | MCU→PC：升级操作响应及状态 |
+| 0x0903 | CMD_FIRMWARE_UPGRADE_COMPLETE | MCU→PC：目标固件已健康运行 |
 
 原枚举中的0x0201～0x0204属于PC–B2温控接口，不列入本B1协议。新增命令按业务分组追加，不改变已有编号。
 
@@ -102,6 +105,7 @@ Seq只表示本端发送顺序，不作为请求与应答的匹配依据。控�
 | 0x0601 查询电源采样 | 0x0602 采样快照 | 0x0006 failed |
 | 0x0701 设置结果灯 | 0x0006 completed | 0x0006 failed |
 | 0x0702 查询结果灯 | 0x0703 结果灯状态 | 0x0006 failed |
+| 0x0901 固件升级操作 | 0x0902；带MCU目标包查询且健康确认完成时为0x0903 | 0x0006 failed；RK预留动作回notSupported |
 
 0x0006不是“错误命令”。它是通用命令执行结果，必须结合JSON中的`status`判断：
 `accepted`表示非阻塞操作已受理，`completed`表示操作已完成，`failed`才表示失败。
@@ -474,17 +478,120 @@ AD7124或TPS。
 
 ### 4.25 B1–B2保活状态响应（0x0802）
 
-### 4.26 MCU固件升级请求（0x0901）
+### 4.26 固件升级请求（0x0901）
 
-PC发送一个`.ota`文件，按begin/write/finish/query/cancel动作传输；每个write的data为最多3000字节原始内容的Base64字符串，且不超过begin返回的blockSize（旧版可能为1024）。使用紧凑JSON，Base64字符不额外转义，发送前检查18字节头加UTF-8正文≤4096字节；末块不补零。MCU须已健康确认且电源OFF。完整字段及示例见[OTA协议](pc_ota_protocol.md)。B1与V2包不能混用。
+沿用现有连接、帧头和JSON，action前缀区分目标：`mcu_*`升级MCU，`rk_*`预留升级RK。现有MCU流程由PC发送一个`.ota`文件，MCU自行选择安装区；以下五种操作共用0x0901，每次等待响应后再发送下一次请求。新固件不再接受旧无前缀动作。
 
-### 4.27 MCU固件升级响应（0x0902）
+B1升级包板型固定`b1-h743`，禁止使用V2包或稳定镜像；B1目前仅完成构建/离线验证，尚未真板验收，见[同步记录](../../ota_sync_20260916.md)。
 
-操作成功及进度查询返回0902；字段/状态/校验失败返回0006并携带requestCommandId=2305。finish的accepted仅表示已提交安装，不表示升级完成。
+RK仅预留`rk_begin/rk_write/rk_finish/rk_query/rk_cancel`，当前统一返回0x0006 `failed/notSupported`并带回action，不下载、不擦写、不重启。RK文件和包体格式先不定义；以下字段、示例及完成条件仅适用于MCU。
 
-### 4.28 MCU固件升级完成（0x0903）
+开始下载：
 
-重启重连后PC携带目标packageId查询，仅当目标镜像已运行并完成30秒任务健康确认才返回0903；不依赖主动推送，不复用请求Seq。
+```json
+{"action":"mcu_begin","packageId":"5A1B2C3D","packageSize":139452}
+```
+
+发送数据块：
+
+```json
+{"action":"mcu_write","packageId":"5A1B2C3D","offset":0,"data":"T1RBMQ=="}
+```
+
+完整文件发送后申请安装并重启：
+
+```json
+{"action":"mcu_finish","packageId":"5A1B2C3D"}
+```
+
+查询目标包的升级结果；查询一般状态时省略packageId：
+
+```json
+{"action":"mcu_query","packageId":"5A1B2C3D"}
+```
+
+取消尚未提交的下载：
+
+```json
+{"action":"mcu_cancel","packageId":"5A1B2C3D"}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| action | string | mcu_begin开始、mcu_write写块、mcu_finish提交并重启、mcu_query查询、mcu_cancel取消 |
+| packageId | string | 包头CRC32，8位大写十六进制，不带0x；非Seq，同一文件保持不变 |
+| packageSize | integer | `.ota`总字节数，116..2097152；mcu_begin必填 |
+| offset | integer | 文件原始字节偏移，从0开始；mcu_write必填 |
+| data | string | 独立块的标准Base64，无换行、有必要填充；解码后1..3000字节，且不超过mcu_begin返回的blockSize |
+
+PC从文件偏移36..39读取小端u32包头CRC，并转为packageId；从偏移44/46/48读取三个小端u16组成目标版本major.minor.patch。文件数据原样编码传输，不随网络帧头转换字节序。示例ID、长度和版本仅演示格式；T1RBMQ==只有4字节，不能代替完整升级文件。
+
+每个操作只发送示例列出的字段。每块原始数据不超过mcu_begin返回的blockSize（当前3000，旧版可能为1024），末块按剩余长度发送、不补零。使用紧凑JSON，Base64字符不额外转义；发送前检查UTF-8正文加18字节头≤4096字节，3000字节块的最大正常整帧为4090字节。升级前停止测试、使RK/DDR安全下电，并单独协调B2维护，避免因B1保活中断而复位或断电；MCU仍独立检查升级条件。
+
+### 4.27 固件升级响应（0x0902）
+
+mcu_begin成功返回块上限和起始偏移；重复相同mcu_begin不会清空已收进度：
+
+```json
+{"action":"mcu_begin","packageId":"5A1B2C3D","status":"completed","state":"receiving","blockSize":3000,"nextOffset":0}
+```
+
+mcu_write成功后返回本块offset和下一块nextOffset；PC按action、packageId及offset匹配，不按Seq匹配：
+
+```json
+{"action":"mcu_write","packageId":"5A1B2C3D","status":"completed","state":"receiving","offset":0,"nextOffset":4}
+```
+
+nextOffset按已写入并读回验证的原始字节计数。仅允许上一成功块以完全相同内容重发；其他错位或不同内容返回失败，不得自行跳过未确认数据。
+
+mcu_finish受理返回以下内容，随后MCU自动重启；accepted不是升级成功：
+
+```json
+{"action":"mcu_finish","packageId":"5A1B2C3D","status":"accepted","state":"ready"}
+```
+
+一般状态查询响应示例：
+
+```json
+{"action":"mcu_query","status":"completed","state":"confirmed","activePackageId":"11223344","firmwareVersion":"0.1.2","confirmed":true}
+```
+
+mcu_query请求含packageId时响应也带回。activePackageId、firmwareVersion、confirmed表示实际运行包、固件版本及本次启动健康确认；旧镜像无有效包标识时activePackageId为null。下载中另带download对象，字段为packageId、receivedBytes、totalBytes；没有下载时省略。
+
+state为receiving下载中、ready已提交、commitUnknown提交结果不确定、trial启动待确认、confirmed当前固件健康、cancelled取消或failed未提交下载失败。mcu_cancel成功回0902、status=completed、state=cancelled；已提交后禁止取消。
+
+业务失败返回0x0006，requestCommandId=2305，并带已合法解析的action/packageId；mcu_write可带offset和仍有效的nextOffset。例如：
+
+```json
+{"requestCommandId":2305,"status":"failed","action":"mcu_write","packageId":"5A1B2C3D","offset":1024,"nextOffset":0,"errorCode":"offsetMismatch"}
+```
+
+errorCode沿用invalidArgument、invalidDirection、notSupported、invalidState、busy、notReady；OTA补充offsetMismatch偏移错误、dataMismatch重复块内容不同、packageInvalid包结构错误、targetMismatch板型不符、versionRejected版本不允许、crcMismatch校验失败、flashError存储错误、commitUnknown提交不确定。commitUnknown须等待复位后查询，不能按普通失败立即重传。
+
+### 4.28 固件升级完成（0x0903）
+
+本节仅定义MCU的完成判定，RK完成上报暂未定义。
+
+PC重连后发送mcu_query及目标packageId。只有该包正在运行、已通过本次启动30秒健康确认且没有活动升级，MCU才直接返回0x0903；否则返回0x0902当前状态，不主动推送完成通知。
+
+```json
+{"action":"mcu_query","packageId":"5A1B2C3D","status":"completed","state":"confirmed","firmwareVersion":"0.1.3","confirmed":true}
+```
+
+PC核对packageId和目标固件版本后显示成功。可重复查询，不需要额外ACK；firmwareVersion不是测试仪硬件版本testerVersion。若返回旧版/稳定版则显示“未运行目标版本”，仅凭断连或超时不能认定回滚。
+
+PC操作规则：
+
+1. 普通请求等待5秒，mcu_finish等待30秒；同一连接最多重发3次，业务字段不变，Seq照常递增。
+2. 未提交时断连/复位或30秒无下载活动，下载取消，重连从0开始；mcu_query、心跳和重复mcu_begin不延长下载超时。
+3. mcu_finish后断连，即使没收到受理响应，也先查询结果，禁止盲目重新下载。ready和commitUnknown后禁止新下载及取消。
+4. 每2秒重连/查询；安装期间B无网络服务。PC等待600秒仍无结果时显示“结果未确认”，不自动切电源或强制复位。
+5. 仅维护升级，普通路径拒绝同版本和降版；B、稳定版及板卡信息不由PC升级命令修改。CRC用于检测损坏，不作为身份认证。
+
+<!-- 内部接入状态留在Markdown，生成对外Word时不包含此段。 -->
+2026-09-24：本地文档采用新action并预留RK入口；新前缀不是旧网络验收结果，当前固件实现与验证见任务清单。
+
+历史记录2026-09-17：V2/B1单块上限更新为3000字节，完整帧仍≤4096；V2已通过真实TCP升级至0.1.6及健康确认，B1只完成构建/离线验证。未启用OTA的普通镜像回notSupported。详细合同见[OTA协议](pc_ota_protocol.md)，验收边界见[本次记录](../../../../test/doc/ota_chunk_3000_validation_20260917.md)。线上文档本轮未修改。
 
 ## 5. 业务命令补充格式
 

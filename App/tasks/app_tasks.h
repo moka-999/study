@@ -4,7 +4,6 @@
 
 void StartTcpServerTask(void *argument);
 void StartRkTask(void *argument);
-void StartHbTask(void *argument);
 void StartMonitorTask(void *argument);
 
 #endif

@@ -19,9 +19,9 @@
 /* 链接脚本为固定LwIP堆预留32KiB，其中需包含分配器元数据和对齐空间。 */
 _Static_assert(MEM_SIZE <= 30U * 1024U, "Update B1 .lwip_heap reservation before growing MEM_SIZE");
 
-/* 当前沿用V2内部排队模型；正式PC算法业务尚未接入，不代表双协议闭环。 */
-QueueHandle_t pcToRk_Queue;
-QueueHandle_t rkToPc_Queue;
+/* RK串行执行，业务层通过完整请求/结果副本交换，不传递PC帧。 */
+QueueHandle_t rkRequestQueue;
+QueueHandle_t rkResponseQueue;
 
 /*
  * 网络初始化会创建 tcpip、收包和链路监测线程，512B 的 CubeMX 默认栈
@@ -51,7 +51,7 @@ static void StartDefaultTask(void *argument)
 }
 
 #if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
-/* 完整B已启动IWDG；每500ms检查五个任务，失败不喂狗，由B累计启动失败。
+/* 完整B已启动IWDG；每500ms检查四个必要任务，失败不喂狗，由B累计启动失败。
  * 不是单独检查RK在线；OFF时各任务仍须上报自身正常运行。使用4KiB栈写日志。 */
 static void StartOtaWatchdogTask(void *argument)
 {
@@ -70,9 +70,9 @@ void MX_FREERTOS_Init(void)
     if (flash_transaction_prepare() != 0) Error_Handler();
     ota_app_prepare();
 
-    pcToRk_Queue = xQueueCreate(8, sizeof(pc2rk_msg_t));
-    rkToPc_Queue = xQueueCreate(8, sizeof(rk_msg_t));
-    if (!pcToRk_Queue || !rkToPc_Queue || !monitor_task_prepare())
+    rkRequestQueue = xQueueCreate(8, sizeof(rk_request_t));
+    rkResponseQueue = xQueueCreate(8, sizeof(rk_response_t));
+    if (!rkRequestQueue || !rkResponseQueue || !monitor_task_prepare())
         Error_Handler();
 
     /* UART4为软件暂选值，实机确认后用CMake B1_RK_UART=2切换USART2。
@@ -88,10 +88,9 @@ void MX_FREERTOS_Init(void)
     if (osThreadNew(StartDefaultTask, NULL, &s_default_task_attributes) == NULL) {
         Error_Handler();
     }
-    /* xTaskCreate的栈单位是StackType_t，以下分别为16/32/4/2KiB。 */
+    /* 栈单位为StackType_t，以下分别16/32/2KiB；RK任务统一收发命令和心跳。 */
     if (xTaskCreate(StartTcpServerTask, "tcp", 4096, NULL, 5, NULL) != pdPASS ||
         xTaskCreate(StartRkTask, "rk", 8192, NULL, 3, NULL) != pdPASS ||
-        xTaskCreate(StartHbTask, "hb", 1024, NULL, 3, NULL) != pdPASS ||
         xTaskCreate(StartMonitorTask, "monitor", 512, NULL, 2, NULL) != pdPASS) {
         Error_Handler();
     }

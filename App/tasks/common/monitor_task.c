@@ -6,6 +6,7 @@
  * 快照留给新PC–MCU JSON业务层读取，不再向旧TLV TCP队列发文本。
  */
 #include "monitor_task.h"
+#include "device_wait.h"
 #include "ota_app.h"
 #include "board_interfaces.h"
 #include "mcp4725.h"
@@ -24,12 +25,13 @@ static mcp4725_t s_boot_dac;
 static boot_mode_t s_boot_mode;
 static uint8_t s_boot_mode_valid;
 static uint8_t s_ota_maintenance;
+static idd_stats_t s_idd_stats; /* 统计独立于最新快照；只在短临界区访问，不含器件IO。 */
 
 #define MEMORY_IO_LOCK_TIMEOUT_MS 500U
 
 static void monitor_wait_ms(uint32_t milliseconds)
 {
-    vTaskDelay(pdMS_TO_TICKS(milliseconds));
+    device_wait_ms(milliseconds);
 }
 
 static void publish_snapshot(const monitor_snapshot_t *snapshot)
@@ -56,6 +58,47 @@ static int memory_io_take(TickType_t timeout)
 {
     return s_memory_io_mutex != NULL &&
            xSemaphoreTake(s_memory_io_mutex, timeout) == pdTRUE;
+}
+
+int monitor_idd_start(uint32_t duration_ms, uint32_t minimum_samples)
+{
+    if (duration_ms == 0U || duration_ms > INT32_MAX || minimum_samples == 0U ||
+        minimum_samples > duration_ms) return IF_ERR;
+    if (!memory_io_take(pdMS_TO_TICKS(MEMORY_IO_LOCK_TIMEOUT_MS))) return IF_TIMEOUT;
+    int result = IF_ERR;
+    if (!s_ota_maintenance && ota_app_is_confirmed() &&
+        pwr_ctrl_get_state() == PWR_CTRL_STATE_ON) {
+        taskENTER_CRITICAL();
+        idd_stats_poll(&s_idd_stats, HAL_GetTick());
+        result = idd_stats_begin(&s_idd_stats, HAL_GetTick(), duration_ms, minimum_samples);
+        taskEXIT_CRITICAL();
+    }
+    xSemaphoreGive(s_memory_io_mutex);
+    return result;
+}
+
+void monitor_idd_cancel(void)
+{
+    taskENTER_CRITICAL();
+    idd_stats_cancel(&s_idd_stats);
+    taskEXIT_CRITICAL();
+}
+
+void monitor_idd_finish(void)
+{
+    taskENTER_CRITICAL();
+    idd_stats_finish(&s_idd_stats);
+    taskEXIT_CRITICAL();
+}
+
+int monitor_idd_get(idd_stats_t *out)
+{
+    if (!out) return 0;
+    taskENTER_CRITICAL();
+    idd_stats_poll(&s_idd_stats, HAL_GetTick());
+    *out = s_idd_stats;
+    taskEXIT_CRITICAL();
+    return 1;
 }
 
 /*
@@ -103,12 +146,18 @@ pwr_ctrl_result_t monitor_request_power_off(uint32_t now_ms)
     if (!memory_io_take_for_power(&now_ms))
         return PWR_CTRL_ERR_RESOURCE_BUSY;
     result = pwr_ctrl_request_off(now_ms);
+    if (result == PWR_CTRL_OK) monitor_idd_cancel();
     xSemaphoreGive(s_memory_io_mutex);
     return result;
 }
 
 void monitor_power_process(uint32_t now_ms)
 {
+    /* 即使器件IO正被占用也推进截止时间，不让无新样本的窗口一直运行。 */
+    taskENTER_CRITICAL();
+    if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON) idd_stats_cancel(&s_idd_stats);
+    idd_stats_poll(&s_idd_stats, now_ms);
+    taskEXIT_CRITICAL();
     if (!memory_io_take(0U)) return;
     pwr_ctrl_process(now_ms);
     xSemaphoreGive(s_memory_io_mutex);
@@ -196,6 +245,7 @@ pwr_ctrl_result_t monitor_apply_ddr_config(
             result = PWR_CTRL_ERR_BUSY;
         } else {
             /* PC须在RK完成DDR初始化后下发；ready强制门待双方业务握手冻结。 */
+            monitor_idd_cancel(); /* 实际调压前终止旧条件窗口，写失败也可能改变电压。 */
             result = pwr_ctrl_apply_ddr_steps(steps);
         }
     } else if (state == PWR_CTRL_STATE_FAULT) {
@@ -233,14 +283,20 @@ void StartMonitorTask(void *argument)
         memset(&snapshot, 0, sizeof(snapshot));
         snapshot.timestamp_ms = HAL_GetTick();
         if (memory_io_take(pdMS_TO_TICKS(MEMORY_IO_LOCK_TIMEOUT_MS))) {
+            snapshot.timestamp_ms = HAL_GetTick(); /* 取锁后记录本次真实读取的开始。 */
             snapshot.power_state = pwr_ctrl_get_state();
             if (snapshot.power_state == PWR_CTRL_STATE_ON) {
                 /* 组合层自身管理就绪态，只重试未初始化器件。 */
                 (void)memory_monitor_init(&s_monitor);
                 /* 单器件失败时仍保留其他有效数据，由valid_mask标识。 */
                 (void)memory_monitor_sample(&s_monitor, &snapshot.memory);
+                taskENTER_CRITICAL();
+                (void)idd_stats_feed(&s_idd_stats, snapshot.timestamp_ms,
+                                      HAL_GetTick(), &snapshot.memory);
+                taskEXIT_CRITICAL();
             } else {
                 memory_monitor_invalidate(&s_monitor);
+                monitor_idd_cancel();
             }
             xSemaphoreGive(s_memory_io_mutex);
         } else {
@@ -259,6 +315,7 @@ int monitor_ota_enter(void)
     if (!memory_io_take(pdMS_TO_TICKS(MEMORY_IO_LOCK_TIMEOUT_MS))) return -1;
     int result = -1;
     if (!s_ota_maintenance && pwr_ctrl_get_state() == PWR_CTRL_STATE_OFF) {
+        monitor_idd_cancel();
         s_ota_maintenance = 1U;
         result = 0;
     }

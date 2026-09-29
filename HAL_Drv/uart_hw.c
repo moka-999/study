@@ -135,6 +135,12 @@ static int uart_start_receive(uart_if_t *port, uint8_t *buffer, uint16_t size)
     return IF_OK;
 }
 
+int uart_rx_abort(uart_if_t *port)
+{
+    if (port == NULL || port->handle == NULL) return IF_ERR;
+    return HAL_UART_AbortReceive(port->handle) == HAL_OK ? IF_OK : IF_ERR;
+}
+
 uart_if_t uart4_if = {
     .handle = &huart4,
     .send = uart_queue_send,

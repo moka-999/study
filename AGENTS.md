@@ -1,11 +1,19 @@
 # B1 project rules
 
+## RK协议替换约束（2026-09-23）
+
+- 用户指定RK工程师的`D:/pro/tlv_proto`为基线；与V2共享`frame/state_machine/rk_link/rk_task`，保留B1的UART4/USART2、DMA、OFF门禁和OTA健康上报，不引入V2板级GPIO。
+- Type/Length/Seq大端、Value整数和CRC小端；HCRC覆盖前3字节，FCRC覆盖Seq＋TLV。命令0x5000，结果0x5001/0x9001/0x3001/0x9002同帧聚合，按Seq＋命令号配对。
+- `rkRequestQueue/rkResponseQueue`各8槽，只允许单个在途测试；无500ms自动重传。最终结果超时后暂停后续发送，直到匹配迟到结果或B1断电；队列满不丢完成结果。
+- 1..20为参考文档定义的无参数功能测试，17=MATS；IDD21..36不支持。0103允许操作者已确认RK测试程序就绪、MCU电源状态为ON的外部启动路径：power/bootMode均null、reboot=false。完整上电/训练/重启请求仍拒绝；不移植V2模拟旁路。详见`docs/real_test_sync_20260929.md`。
+- B1结果灯不作RK通信指示，PC温控边界不变。代码/离线/构建与B1实板验收分开记录，见`docs/rk_protocol_migration_20260923.md`。
+
 ## 20260920-2134原理图适配边界
 
 - PAC1934三路R7268/R7269/R7270均为20mΩ，生产采样必须显式使用板级20000µΩ，不能采用通用驱动的10mΩ兼容值。0602复用现有采样结果，不在JSON层再次乘除系数。
 - TPS料号、地址、20mV步进不变；U4025为56.2kΩ，U4026为86.6kΩ。TPS输出选装和实物阻值仍需验收，寄存器写成功不证明DDR实际已由TPS供电。
 - 用户接受共同4V上电后能及时完成调压的开发预设，暂不新增RK初始化前等待机制；这不批准具体毫秒延时或跳过初始化后的RK-ready。保留默认OFF和未配置时序门禁。
-- 0103已增加完整参数校验及带合法index的失败应答；RK业务未接时明确notReady，不触发Boot、电源或RK动作。安全训练范围、成功配置比较、自动冷重启与真正测试交接仍未实现，不能宣称完整开始测试闭环。
+- 0103保留完整参数校验及带合法index的失败应答；仅外部就绪且ON路径可交给真实RK。安全训练范围、成功配置比较、自动冷重启及自动RK-ready仍未实现，不得把本路径宣称为完整上电测试闭环。
 - Boot实际写失败后缓存失效，0507返回notConfigured；参数/忙/状态拒绝不改旧缓存。查询仍不是DAC模拟电压回读。H13首次上电/掉电输入容限待硬件/RK确认，不自动写EEPROM或改成全时0V。
 - 适配及复跑记录见`docs/schematic_adaptation_20260921.md`；离线验证不能替代实板验收。
 
@@ -13,7 +21,8 @@
 
 - 普通构建保持OTA关闭；`ENABLE_OTA_BOOT=ON`必须同时启用槽限/修正表构建，A1/A2共同上限896KiB，向量使用`g_pfnVectors`符号随镜像修正。
 - 完整B在独立bootloader分支用`BOOT_BOARD=b1`生成，板型固定b1-h743；复位在RAM初始化前关PC6/PC7/PG11。禁止使用V2的B/包或普通最小跳转B覆盖已部署OTA的板卡。
-- 下载只在已健康且OFF时进行；五个必要任务（包括OFF的RK）上报进展，30秒健康才确认。Flash查询、下载及启动日志共用事务锁，保留B1的FRU迁移/UID MAC规则。
+- 下载只在已健康且OFF时进行；默认、TCP、监测、RK四个必要任务（包括OFF的RK）上报进展，30秒健康才确认。心跳随RK任务推进，不再创建独立HB任务或要求HB健康位。Flash查询、下载及启动日志共用事务锁，保留B1的FRU迁移/UID MAC规则。
+- PC固件升级0901–0903使用通用枚举名；MCU仅接受`mcu_begin/mcu_write/mcu_finish/mcu_query/mcu_cancel`，对应五个`rk_*`动作仅返回`notSupported`且不得进入MCU下载或查询。W25Q256为RK预留两个独立8MiB空间，仅固定地址/容量，不定义RK包体、SPL/EDK分配或回滚语义；见[PC固件升级协议](docs/protocol/pc/pc_ota_protocol.md)。
 - 同步及复跑见`docs/ota_sync_20260916.md`；B1目前仅构建/离线验证，不能引用V2实测冒充B1实测。
 
 - Target: STM32H743IIT6, LQFP176, 25 MHz HSE, 400 MHz core.
@@ -90,7 +99,7 @@
   FRU or migrate a supported old record, followed by a verified readback.
 - FreeRTOS 10.6.2 and LwIP 2.2.1 have been migrated for the final gateway using
   B1's existing YT8512 driver, UID-derived MAC and PG12 PHY reset. Formal TCP,
-  RK, heartbeat and power-gated monitor tasks are integrated; never copy V2 board glue.
+  RK (including periodic heartbeat) and power-gated monitor tasks are integrated; never copy V2 board glue.
 - The PC state-handler table and command-handler table are attached to the TCP
   server, using cJSON v1.7.19. The wire header is 18-byte big-endian
   plus a UTF-8 JSON object; the u32 Length field has a confirmed 4096-byte MCU
@@ -99,9 +108,11 @@
   first Seq is 1, successful sends advance it, reconnect resets it to 1, and
   UINT32_MAX wraps to 0. Request/RK Seq never enters an MCU send header.
 - 测试仪查询0101/0102及空对象心跳已接入。0103必须携带算法大类/名称/index、
-  完整power、reboot及bootMode；字段解析及失败应答已实现，但算法到RK映射、
-  执行和最终结果转发仍未接入。0105旧结果构造器不代表新结果链路完成，
-  不能自行假定未知算法名称对应的RK编号。
+  power、reboot及bootMode。外部就绪模式严格使用null/false/null；通过RK命令表
+  查找1..20，不猜未知名称。正式TCP领取四TLV结果并发送0105，包含testTimeMs、
+  首错地址及实际采样的18项均值/峰值/最小值；无有效样本报null，不造假零值。
+  每次受理重开统计，结果领取后冻结；0601只读查询不因算法在途返回busy。
+  断线不撤销算法，新连接不领取旧0105。采样仍是后台约2秒加IO间隔，非JEDEC同步IDD窗口。
 - PC heartbeat is frozen as client request 0x0002 with `{}` and server response
   0x0001 with `{}` using the MCU connection-local send Seq.
 - The local business now includes 0x0501/0x0502 power requests, 0x0503/0x0504
@@ -119,9 +130,9 @@
   It uses decimal `requestCommandId` and `status=accepted|completed|failed`;
   `errorCode` exists only for failed results and may be
   `invalidArgument|invalidDirection|notSupported|invalidState|busy|notReady|notConfigured|executionFailed`.
-  Only malformed frame/UTF-8/JSON
-  input closes the connection. The shared JSON lexical guard rejects literal NUL,
-  unescaped string controls and `\u0000` before cJSON creates C strings.
+  非法头前缀逐字节丢弃，累计超过4096字节垃圾或半帧空闲500ms才断连；
+  完整坏UTF-8/JSON回0006 invalidArgument后继续，不在正文内搜索控制帧。
+  JSON词法检查拒绝原始NUL、未转义控制字符及`\u0000`，防止C字符串截断。
 - B1 and V2 both keep D-Cache disabled. ETH DMA memory belongs in D2 SRAM and
   the FreeRTOS heap belongs in AXI SRAM; never add SCB cache maintenance calls.
 - Result LED business states are ported to PG0-PG5. The 2026-08-27 BRD uses three
@@ -154,5 +165,7 @@
   PB3/PB4/PB5 presence detection is not an approved slot-ID interface. Do not
   configure these GPIOs, derive IP from them, or change the ETH1/PHY versus RMII
   switching path until the revised schematic and eight-slot level table are agreed.
-  Static/DHCP/slot-based addressing and multi-B2 address allocation remain deferred.
+  正式B1 IP已于2026-09-22确认为由B2 MCU告知，不以本地固定地址或FRU配置IP作为正式来源。
+  当前测试继续使用本地配置192.168.1.201；本次仅记录，保留网络代码和FRU布局。
+  B2侧分配方式、通知链路（是否SPI）/协议/时机、异常处理及是否持久化仍待双方确定，不擅自新增SPI命令。
 - Build with `.\tools\dev.ps1 build`; run `.\tools\dev.ps1 check` before commit.

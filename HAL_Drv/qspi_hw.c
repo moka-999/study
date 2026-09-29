@@ -1,6 +1,6 @@
 /*
  * ===================================================================
- * QSPI Flash 驱动 — STM32H7 HAL 实现 (W25Q256JV, Quad SPI)
+ * QSPI Flash 驱动 — STM32H7 HAL 实现 (W25Q256FV/JV, Quad SPI)
  * ===================================================================
  *
  * 四线 Quad SPI 模式 (QE=1, 4B 寻址):
@@ -16,6 +16,7 @@
 #include "main.h"
 #include "qspi_hw.h"
 #include "hal_if.h"
+#include "cmsis_os2.h"
 #include <string.h>
 
 extern QSPI_HandleTypeDef hqspi;
@@ -29,10 +30,17 @@ extern QSPI_HandleTypeDef hqspi;
 /* ── 工具: 快速写使能 (单线) ── */
 static int _write_enable(void)
 {
+    uint8_t status;
+    if (qspi_wait_busy(BUSY_TO_MS) != IF_OK ||
+        qspi_read_status(W25Q_CMD_READ_STATUS2, &status) != IF_OK ||
+        (status & W25Q_SR2_SUS) != 0U) return IF_ERR;
     QSPI_CommandTypeDef c = {0};
     c.InstructionMode = QSPI_INSTRUCTION_1_LINE;
     c.Instruction     = W25Q_CMD_WRITE_ENABLE;
-    return HAL_QSPI_Command(&hqspi, &c, QSPI_TO);
+    if (HAL_QSPI_Command(&hqspi, &c, QSPI_TO) != HAL_OK ||
+        qspi_read_status(W25Q_CMD_READ_STATUS1, &status) != IF_OK ||
+        (status & W25Q_SR1_WEL) == 0U) return IF_ERR;
+    return IF_OK;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -41,65 +49,42 @@ static int _write_enable(void)
 
 int qspi_init(void)
 {
-    uint8_t sr2;
+    uint8_t status, id[3];
+    QSPI_CommandTypeDef command = {0};
 
-    /* HAL_QSPI_Init已由B1的MX_QSPI_Init调用。 */
+    /* 退出QPI后先检查忙/挂起状态；绝不复位正在编程或擦除的NOR。 */
+    command.InstructionMode = QSPI_INSTRUCTION_4_LINES;
+    command.Instruction = 0xFFU;
+    if (HAL_QSPI_Command(&hqspi, &command, QSPI_TO) != HAL_OK ||
+        qspi_wait_busy(BUSY_TO_MS) != IF_OK ||
+        qspi_read_status(W25Q_CMD_READ_STATUS2, &status) != IF_OK ||
+        (status & W25Q_SR2_SUS) != 0U ||
+        qspi_read_jedec_id(id) != IF_OK ||
+        id[0] != 0xEFU || id[1] != 0x40U || id[2] != 0x19U) return IF_ERR;
 
-    /* ── 1. 用四线发 0xFF 退出 QPI (若之前误入 QPI 模式) ── */
-    {
-        QSPI_CommandTypeDef cq = {0};
-        cq.InstructionMode = QSPI_INSTRUCTION_4_LINES;
-        cq.Instruction     = 0xFF;
-        HAL_QSPI_Command(&hqspi, &cq, QSPI_TO);
+    /* 取消残留写使能，进入四字节地址模式并回读ADS；不修改保护位。 */
+    command.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    command.Instruction = 0x04U;
+    if (HAL_QSPI_Command(&hqspi, &command, QSPI_TO) != HAL_OK) return IF_ERR;
+    command.Instruction = 0xB7U;
+    if (HAL_QSPI_Command(&hqspi, &command, QSPI_TO) != HAL_OK ||
+        qspi_read_status(W25Q_CMD_READ_STATUS3, &status) != IF_OK ||
+        (status & 1U) == 0U) return IF_ERR;
+
+    if (qspi_read_status(W25Q_CMD_READ_STATUS2, &status) != IF_OK) return IF_ERR;
+    if ((status & W25Q_SR2_QE) == 0U) {
+        uint8_t wanted = status | W25Q_SR2_QE;
+        if (_write_enable() != IF_OK) return IF_ERR;
+        command.Instruction = W25Q_CMD_WRITE_STATUS2;
+        command.DataMode = QSPI_DATA_1_LINE;
+        command.NbData = 1U;
+        if (HAL_QSPI_Command(&hqspi, &command, QSPI_TO) != HAL_OK ||
+            HAL_QSPI_Transmit(&hqspi, &wanted, QSPI_TO) != HAL_OK ||
+            qspi_wait_busy(100U) != IF_OK ||
+            qspi_read_status(W25Q_CMD_READ_STATUS2, &status) != IF_OK ||
+            status != wanted) return IF_ERR;
     }
-
-    /* ── 2. 软件复位: 0x66 + 0x99 ── */
-    {
-        QSPI_CommandTypeDef c0 = {0};
-        c0.InstructionMode = QSPI_INSTRUCTION_1_LINE;
-        c0.Instruction     = 0x66;
-        if (HAL_QSPI_Command(&hqspi, &c0, QSPI_TO) != HAL_OK) return -1;
-
-        QSPI_CommandTypeDef c1 = {0};
-        c1.InstructionMode = QSPI_INSTRUCTION_1_LINE;
-        c1.Instruction     = 0x99;
-        if (HAL_QSPI_Command(&hqspi, &c1, QSPI_TO) != HAL_OK) return -1;
-
-        HAL_Delay(1);
-    }
-
-    /* ── 3. 进入 4 字节地址模式 (0xB7), 寻址 32MB ── */
-    {
-        QSPI_CommandTypeDef c2 = {0};
-        c2.InstructionMode = QSPI_INSTRUCTION_1_LINE;
-        c2.Instruction     = 0xB7;
-        if (HAL_QSPI_Command(&hqspi, &c2, QSPI_TO) != HAL_OK) return IF_ERR;
-    }
-
-    /* ── 4. 使能 QE (Quad Enable) ── */
-    {
-        if (qspi_read_status(W25Q_CMD_READ_STATUS2, &sr2) != IF_OK) return IF_ERR;
-        if ((sr2 & W25Q_SR2_QE) == 0U) {
-            QSPI_CommandTypeDef command = {0};
-            uint8_t new_sr2 = sr2 | W25Q_SR2_QE;
-
-            if (_write_enable() != HAL_OK) return IF_ERR;
-            command.InstructionMode = QSPI_INSTRUCTION_1_LINE;
-            command.Instruction     = W25Q_CMD_WRITE_STATUS2;
-            command.DataMode        = QSPI_DATA_1_LINE;
-            command.NbData          = 1;
-
-            if (HAL_QSPI_Command(&hqspi, &command, QSPI_TO) != HAL_OK ||
-                HAL_QSPI_Transmit(&hqspi, &new_sr2, QSPI_TO) != HAL_OK ||
-                qspi_wait_busy(100U) != IF_OK ||
-                qspi_read_status(W25Q_CMD_READ_STATUS2, &sr2) != IF_OK ||
-                (sr2 & W25Q_SR2_QE) == 0U) {
-                return IF_ERR;
-            }
-        }
-    }
-
-    return 0;
+    return IF_OK;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -128,7 +113,8 @@ int qspi_read_jedec_id(uint8_t *id)
 
 int qspi_read_status(uint8_t cmd, uint8_t *sr)
 {
-    if (sr == NULL) return IF_ERR;
+    if (sr == NULL || (cmd != W25Q_CMD_READ_STATUS1 &&
+        cmd != W25Q_CMD_READ_STATUS2 && cmd != W25Q_CMD_READ_STATUS3)) return IF_ERR;
 
     QSPI_CommandTypeDef c = {0};
     c.InstructionMode = QSPI_INSTRUCTION_1_LINE;
@@ -160,20 +146,32 @@ void qspi_dump_regs(uint32_t *cr, uint32_t *sr, uint32_t *ccr, uint32_t *dcr)
 
 int qspi_wait_busy(uint32_t timeout_ms)
 {
-    uint8_t sr;
-    uint32_t elapsed = 0;
-
-    while (elapsed < timeout_ms) {
-        if (qspi_read_status(W25Q_CMD_READ_STATUS1, &sr) != 0)
-            return -1;
-        if (!(sr & W25Q_SR1_BUSY))
-            return 0;
-        /* 启动阶段也会调用本函数，必须允许调度器尚未运行；不能直接改为osDelay。
-         * 任务上下文同样保持这套有界等待，由调用方串行访问Flash器件。 */
-        HAL_Delay(1U);
-        elapsed++;
+    uint32_t begin = HAL_GetTick();
+    for (;;) {
+        uint8_t status;
+        if (qspi_read_status(W25Q_CMD_READ_STATUS1, &status) != IF_OK) return IF_ERR;
+        if ((status & W25Q_SR1_BUSY) == 0U) return IF_OK;
+        if ((uint32_t)(HAL_GetTick() - begin) >= timeout_ms) return IF_TIMEOUT;
+        if (osKernelGetState() == osKernelRunning) osDelay(1U);
+        else HAL_Delay(1U);
     }
-    return -2;
+}
+
+/* 校验整段擦除结果；单次只占256字节栈，不申请整块缓冲。 */
+static int verify_erased(uint32_t address, uint32_t size, uint32_t timeout_ms)
+{
+    int result = qspi_wait_busy(timeout_ms);
+    if (result != IF_OK) return result;
+    uint8_t data[W25Q_PAGE_SIZE];
+    for (uint32_t offset = 0U; offset < size; offset += sizeof(data)) {
+        if (qspi_read_data(address + offset, data, sizeof(data)) != IF_OK) return IF_ERR;
+        for (uint32_t i = 0U; i < sizeof(data); ++i)
+            if (data[i] != 0xFFU) return IF_ERR;
+        /* 大范围维护校验让出CPU；调用方仍须保证独占Flash及看门狗维护。 */
+        if ((offset & 0xFFFFU) == 0U && osKernelGetState() == osKernelRunning)
+            osDelay(1U);
+    }
+    return IF_OK;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -195,7 +193,7 @@ int qspi_erase_sector(uint32_t addr)
     c.DummyCycles     = 0;
 
     if (HAL_QSPI_Command(&hqspi, &c, QSPI_TO) != HAL_OK) return -1;
-    return qspi_wait_busy(ERASE_TO_MS);
+    return verify_erased(addr, W25Q_SECTOR_SIZE, ERASE_TO_MS);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -217,7 +215,7 @@ int qspi_erase_block32(uint32_t addr)
     c.DummyCycles     = 0;
 
     if (HAL_QSPI_Command(&hqspi, &c, QSPI_TO) != HAL_OK) return -1;
-    return qspi_wait_busy(3000);  /* 32KB 擦除典型 120-800ms */
+    return verify_erased(addr, W25Q_BLOCK32_SIZE, 3000U);
 }
 
 int qspi_erase_block64(uint32_t addr)
@@ -235,7 +233,7 @@ int qspi_erase_block64(uint32_t addr)
     c.DummyCycles     = 0;
 
     if (HAL_QSPI_Command(&hqspi, &c, QSPI_TO) != HAL_OK) return -1;
-    return qspi_wait_busy(3000);  /* 64KB 擦除典型 150-1000ms */
+    return verify_erased(addr, W25Q_BLOCK64_SIZE, 3000U);
 }
 
 int qspi_erase_chip(void)
@@ -250,7 +248,7 @@ int qspi_erase_chip(void)
     c.DummyCycles     = 0;
 
     if (HAL_QSPI_Command(&hqspi, &c, QSPI_TO) != HAL_OK) return -1;
-    return qspi_wait_busy(200000);  /* 整片擦除 32MB 典型 60-200s */
+    return verify_erased(0U, W25Q_CAPACITY, 410000U); /* 最大400s，另留10s余量。 */
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -280,7 +278,12 @@ int qspi_write_page(uint32_t addr, const uint8_t *data, uint16_t len)
 
     if (HAL_QSPI_Command(&hqspi, &c, QSPI_TO) != HAL_OK) return -1;
     if (HAL_QSPI_Transmit(&hqspi, (uint8_t *)data, QSPI_TO) != HAL_OK) return -1;
-    return qspi_wait_busy(WRITE_TO_MS);
+    int result = qspi_wait_busy(WRITE_TO_MS);
+    if (result != IF_OK) return result;
+    uint8_t verify[W25Q_PAGE_SIZE];
+    if (qspi_read_data(addr, verify, len) != IF_OK || memcmp(data, verify, len) != 0)
+        return IF_ERR;
+    return IF_OK;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -291,7 +294,7 @@ int qspi_write_page(uint32_t addr, const uint8_t *data, uint16_t len)
  *   [CMD:8bit/1线=8clk on IO0] [ADDR:32bit/4线=8clk] [MODE:8bit/4线=2clk]
  *   [DUMMY:4clk] [DATA:N*8bit/4线=N*2clk]
  *
- * DCYC=6 覆盖 mode(2clk) + dummy(4clk) 共 6 个时钟周期
+ * MODE显式发送0xFF，禁止进入连续读；MODE之后再留4个空时钟。
  * ═══════════════════════════════════════════════════════════════════ */
 
 int qspi_read_data(uint32_t addr, uint8_t *buf, uint32_t len)
@@ -301,15 +304,21 @@ int qspi_read_data(uint32_t addr, uint8_t *buf, uint32_t len)
         return IF_ERR;
     }
 
+    uint8_t status;
+    if (qspi_wait_busy(BUSY_TO_MS) != IF_OK ||
+        qspi_read_status(W25Q_CMD_READ_STATUS2, &status) != IF_OK ||
+        (status & W25Q_SR2_SUS) != 0U) return IF_ERR;
     QSPI_CommandTypeDef c = {0};
     c.InstructionMode   = QSPI_INSTRUCTION_1_LINE;   /* 0xEB 指令只在 IO0 上发! */
     c.Instruction       = W25Q_CMD_QUAD_READ;        /* 0xEB */
     c.AddressMode       = QSPI_ADDRESS_4_LINES;
     c.AddressSize       = QSPI_ADDRESS_32_BITS;
     c.Address           = addr;
-    c.AlternateByteMode = QSPI_ALTERNATE_BYTES_NONE;
+    c.AlternateByteMode = QSPI_ALTERNATE_BYTES_4_LINES;
+    c.AlternateBytesSize = QSPI_ALTERNATE_BYTES_8_BITS;
+    c.AlternateBytes    = 0xFFU;
     c.DataMode          = QSPI_DATA_4_LINES;
-    c.DummyCycles       = 6;   /* 6 clk: 2 mode + 4 dummy */
+    c.DummyCycles       = 4U;
     c.NbData            = len;
 
     if (HAL_QSPI_Command(&hqspi, &c, QSPI_TO) != HAL_OK) return -1;

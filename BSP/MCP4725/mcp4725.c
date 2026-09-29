@@ -27,9 +27,9 @@ int mcp4725_mv_to_code(uint16_t output_mv, uint16_t vdd_mv, uint16_t *code)
     uint32_t scaled;
 
     if (!code || vdd_mv == 0U || output_mv > vdd_mv) return IF_ERR;
-    /* VOUT=code/4095*VDD，加vdd/2后做整数四舍五入。 */
-    scaled = (uint32_t)output_mv * MCP4725_DAC_MAX_CODE + vdd_mv / 2U;
-    *code = (uint16_t)(scaled / vdd_mv);
+    /* VOUT=code/4096*VDD；四舍五入后限幅，VDD对应的4096不能写入12位DAC。 */
+    scaled = ((uint32_t)output_mv * 4096U + vdd_mv / 2U) / vdd_mv;
+    *code = (uint16_t)(scaled > MCP4725_DAC_MAX_CODE ? MCP4725_DAC_MAX_CODE : scaled);
     return IF_OK;
 }
 

@@ -1,4 +1,5 @@
 #include "pc_state_machine.h"
+#include <string.h>
 
 /*
  * 固定头使用网络大端序。逐字节移位既适配STM32H743小端CPU，也避免
@@ -8,7 +9,6 @@ static uint16_t read_be16(const uint8_t *data)
 {
     return (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
 }
-
 static uint32_t read_be32(const uint8_t *data)
 {
     return ((uint32_t)data[0] << 24) |
@@ -30,6 +30,7 @@ void pc_sm_reset(pc_sm_t *sm)
     sm->state = PC_SM_STATE_HEADER;
     sm->received = 0U;
     sm->expected_length = 0U;
+    sm->discarded_bytes = 0U;
     sm->error = PC_SM_ERROR_NONE;
 }
 
@@ -38,38 +39,52 @@ void pc_sm_init(pc_sm_t *sm)
     pc_sm_reset(sm);
 }
 
-/*
- * HEADER：只收固定头。Length/Version/Flag/ServiceID分别在第4/6/8/10字节
- * 到齐时校验，
- * 不必等到18字节甚至整个正文收齐；因此非法大包仍能尽早被拒绝。
- * 收满头后由Length决定进入BODY还是直接FRAME_READY（无正文的18字节帧）。
- * 正文是否是合法JSON由上层决定，帧状态机不替JSON层扩大或缩小接收规则。
+/* 判断1..18字节前缀是否仍可能构成合法头；尚未收到的字节不能按零判错。
+ * Length上下界同时考虑缺少的低字节，因此单个'T'也能立即丢弃，不留下半帧。
+ * Reserved仍沿用接收不解释的合同；此处不根据CommandID猜测帧边界。
+ */
+static pc_sm_error_t header_prefix_error(const uint8_t *data, uint32_t count)
+{
+    uint32_t minimum = 0U;
+    uint32_t maximum = 0U;
+    for (uint32_t i = 0U; i < 4U; ++i) {
+        minimum = (minimum << 8) | (i < count ? data[i] : 0U);
+        maximum = (maximum << 8) | (i < count ? data[i] : 0xFFU);
+    }
+    if (minimum > PC_PROTOCOL_MAX_PDU || maximum < PC_PROTOCOL_HEADER_SIZE) {
+        return PC_SM_ERROR_LENGTH;
+    }
+    if ((count >= 5U && data[4] != (PC_PROTOCOL_VERSION >> 8)) ||
+        (count >= 6U && data[5] != (PC_PROTOCOL_VERSION & 0xFFU))) {
+        return PC_SM_ERROR_VERSION;
+    }
+    if ((count >= 7U && data[6] != (PC_PROTOCOL_FLAG_JSON >> 8)) ||
+        (count >= 8U && data[7] != (PC_PROTOCOL_FLAG_JSON & 0xFFU))) {
+        return PC_SM_ERROR_FLAG;
+    }
+    if ((count >= 9U && data[8] != 0U) || (count >= 10U && data[9] != 0U)) {
+        return PC_SM_ERROR_SERVICE_ID;
+    }
+    return PC_SM_ERROR_NONE;
+}
+
+/* HEADER：仅移动最多18字节的候选头，不清空整个recv缓冲，避免误丢粘连好帧。
+ * 每次滑动都重新检查剩余前缀，能覆盖“垃圾末尾+正常头部”发生重叠的情况。
+ * 满18字节后转入BODY；即使正文含有另一份合法头，也不能在正文内重新分发。
  */
 static pc_sm_feed_result_t feed_header(pc_sm_t *sm, uint8_t byte)
 {
     sm->buffer[sm->received++] = byte;
-
-    /* Length刚到齐便拒绝异常值，避免继续接收不可信的大包体。 */
-    if (sm->received == 4U) {
-        sm->expected_length = read_be32(sm->buffer);
-        if (sm->expected_length < PC_PROTOCOL_HEADER_SIZE ||
-            sm->expected_length > PC_PROTOCOL_MAX_PDU) {
-            return fail(sm, PC_SM_ERROR_LENGTH);
+    while (sm->received != 0U &&
+           header_prefix_error(sm->buffer, sm->received) != PC_SM_ERROR_NONE) {
+        if (sm->discarded_bytes >= PC_SM_MAX_DISCARDED_BYTES) {
+            return fail(sm, PC_SM_ERROR_RECOVERY_LIMIT);
         }
+        ++sm->discarded_bytes;
+        --sm->received;
+        memmove(sm->buffer, sm->buffer + 1U, sm->received);
     }
-
-    /* Version和Flag位于头部前段，不必等JSON正文到齐后才发现错误。 */
-    if (sm->received == 6U &&
-        read_be16(&sm->buffer[4]) != PC_PROTOCOL_VERSION) {
-        return fail(sm, PC_SM_ERROR_VERSION);
-    }
-    if (sm->received == 8U &&
-        read_be16(&sm->buffer[6]) != PC_PROTOCOL_FLAG_JSON) {
-        return fail(sm, PC_SM_ERROR_FLAG);
-    }
-    if (sm->received == 10U && read_be16(&sm->buffer[8]) != 0U) {
-        return fail(sm, PC_SM_ERROR_SERVICE_ID);
-    }
+    sm->expected_length = sm->received >= 4U ? read_be32(sm->buffer) : 0U;
 
     if (sm->received == PC_PROTOCOL_HEADER_SIZE) {
         if (sm->expected_length == PC_PROTOCOL_HEADER_SIZE) {

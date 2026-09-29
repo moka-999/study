@@ -1,180 +1,156 @@
-/*
- * ===================================================================
- * MCU-RK TLV 帧解析状态机 — 逐字节实现
- * ===================================================================
- *
- * 仅用于MCU-RK串口链路；PC-MCU TCP使用独立的pc_state_machine模块。
- *
- * 帧布局:
- *   [0] 0x5A            Sync
- *   [1] Len_H           Len = TLV 字节数 (不含 Seq)
- *   [2] Len_L
- *   [3] CRC_L           Header CRC16 (LE) — 覆盖 0x5A + Len(2)
- *   [4] CRC_H
- *   [5..12]             Seq (8B BE)
- *   [13..12+Len]        TLV 数据 (Len 字节)
- *   [13+Len] CRC_F_L    Frame CRC16 (LE) — 覆盖 Len(2) + TLV 数据
- *   [14+Len] CRC_F_H
- *   [15+Len] 0xA5       Footer
- *
- * 校验:
- *   Header CRC = crc16_modbus([0x5A, Len_H, Len_L])
- *   Frame CRC  = crc16_modbus([Len_H, Len_L])
- *              + crc16_modbus_continue([TLV data Len 字节])
- *              (跳过 HeaderCRC + Seq)
- * ===================================================================
- */
 #include "state_machine.h"
 #include "crc.h"
-#include <string.h>
 #include "FreeRTOS.h"
 #include "task.h"
+#include <string.h>
 
 void tlv_sm_init(tlv_sm_t *sm)
 {
-    memset(sm, 0, sizeof(*sm));
-    sm->state = TLV_SM_IDLE;
+    if (sm != NULL) memset(sm, 0, sizeof(*sm));
 }
-
 void tlv_sm_reset(tlv_sm_t *sm)
 {
-    sm->state  = TLV_SM_IDLE;
-    sm->pos    = 0;
-    sm->expect = 0;
+    if (sm == NULL) return;
+    sm->state = TLV_SM_IDLE;
+    sm->pos = 0U;
+    sm->expect = 0U;
+    sm->ready_len = 0U;
 }
-
-/* ── 伪同步恢复: 在已收集的 buf[1..pos-1] 中搜索 0x5A ── */
-static int _resync(tlv_sm_t *sm)
-{
-    uint16_t i;
-    for (i = 1; i < sm->pos; i++) {
-        if (sm->buf[i] == TLV_SYNC_HEADER) {
-            uint16_t remain = sm->pos - i;
-            memmove(sm->buf, sm->buf + i, remain);
-            sm->pos    = remain;
-            sm->expect = 4;
-            return 1;
-        }
-    }
-    return 0;
-}
-
 int tlv_sm_check_timeout(tlv_sm_t *sm, uint32_t timeout_ms)
 {
-    /* 仅当半帧进行中 (非 IDLE) 且自最后字节起超过 timeout_ms 才复位 */
-    if (sm->state == TLV_SM_IDLE) {
-        return 0;
-    }
-    uint32_t now = xTaskGetTickCount();
-    if ((now - sm->last_tick) >= pdMS_TO_TICKS(timeout_ms)) {
+    if (sm == NULL || sm->state == TLV_SM_IDLE) return 0;
+    if ((uint32_t)(xTaskGetTickCount() - sm->last_tick) >= pdMS_TO_TICKS(timeout_ms)) {
         tlv_sm_reset(sm);
         return 1;
     }
     return 0;
 }
-
-/* ═══════════════════════════════════════════════════════════════════
- * 核心: 逐字节喂入
- * ═══════════════════════════════════════════════════════════════════ */
-
-int tlv_sm_feed(tlv_sm_t *sm, uint8_t byte)
+/* 头校验失败时保留后续可能的5A前缀；头完整长度始终是5，不是剩余4字节。 */
+static void resync_header(tlv_sm_t *sm)
 {
-    sm->last_tick = xTaskGetTickCount();   /* 记录最后字节时间戳, 供超时复位用 */
-    if (sm->pos >= TLV_FRAME_MAX) {
-        tlv_sm_reset(sm);
-        return -1;
+    for (uint16_t i = 1U; i < sm->pos; ++i) {
+        if (sm->buf[i] == TLV_SYNC_HEADER) {
+            sm->pos -= i;
+            memmove(sm->buf, sm->buf + i, sm->pos);
+            sm->state = TLV_SM_HEADER;
+            sm->expect = 5U;
+            return;
+        }
     }
-    sm->buf[sm->pos++] = byte;
+    tlv_sm_reset(sm);
+}
+/* 状态处理函数共用返回约定：0继续收集、1完整帧边界成立、-1错误已恢复。
+ * 调用前feed已经把byte写入buf，pos指向已收字节数；handler只推进本阶段。
+ */
+typedef int (*rk_state_handler_t)(tlv_sm_t *sm, uint8_t byte);
 
-    switch (sm->state) {
-
-    /* ─── IDLE: 等待 0x5A ─── */
-    case TLV_SM_IDLE:
-        if (byte == TLV_SYNC_HEADER) {
-            sm->state  = TLV_SM_HEADER;
-            sm->expect = 4;   /* 还需 Len(2) + HeaderCRC(2) */
-        } else {
-            sm->pos = 0;
-        }
-        break;
-
-    /* ─── HEADER: 收集 Len(2) + HeaderCRC(2), 验证头 CRC ─── */
-    case TLV_SM_HEADER:
-        if (sm->pos < 5) break;
-
-        {
-            uint16_t calc = crc16_modbus(sm->buf, 3);  /* 0x5A + Len(2) */
-            uint16_t exp  = sm->buf[3] | ((uint16_t)sm->buf[4] << 8);
-
-            if (calc == exp) {
-                uint16_t plen = tlv_get_length(sm->buf + 1);  /* TLV 字节数 */
-                if (plen < TLV_PAYLOAD_MIN || plen > TLV_PAYLOAD_MAX) {
-                    if (!_resync(sm)) tlv_sm_reset(sm);
-                    break;
-                }
-                sm->state  = TLV_SM_DATA;
-                /* 还需 Seq(8) + TLV(plen) + FCRC(2) + Footer(1)
-                 * 但 CRC/Footer 各在自己的状态里处理
-                 * DATA 态收集 Seq + TLV = 8 + plen 字节 */
-                sm->expect = 8 + plen;
-            } else {
-                if (!_resync(sm)) tlv_sm_reset(sm);
-            }
-        }
-        break;
-
-    /* ─── DATA: 收集 Seq(8B) + TLV 数据 (plen 字节) ─── */
-    case TLV_SM_DATA:
-        if (sm->pos < 5 + sm->expect) break;
-
-        sm->state  = TLV_SM_CRC;
-        sm->expect = 2;   /* 还需 FrameCRC(2) */
-        break;
-
-    /* ─── CRC: 收集 FrameCRC(2), 验证帧 CRC ─── */
-    case TLV_SM_CRC:
-        {
-            uint16_t plen = tlv_get_length(sm->buf + 1);
-            /* CRC 在 buf[5+8+plen] = buf[13+plen] */
-            if (sm->pos < 13 + plen + 2) break;
-
-            /* Frame CRC: Len(2) + TLV 数据 (plen 字节, 从 buf[13] 开始) */
-            uint16_t calc = crc16_modbus(sm->buf + 1, 2);       /* Len(2)     */
-            calc = crc16_modbus_continue(calc, sm->buf + 13, plen); /* + TLVs */
-            uint16_t crc_pos = 13 + plen;
-            uint16_t exp  = sm->buf[crc_pos] | ((uint16_t)sm->buf[crc_pos + 1] << 8);
-
-            if (calc == exp) {
-                sm->state  = TLV_SM_FOOTER;
-                sm->expect = 1;   /* 还需 0xA5 */
-            } else {
-                tlv_sm_reset(sm);
-                return -1;
-            }
-        }
-        break;
-
-    /* ─── FOOTER: 验证 0xA5 ─── */
-    case TLV_SM_FOOTER:
-        if (sm->buf[sm->pos - 1] == TLV_SYNC_FOOTER) {
-            tlv_sm_reset(sm);
-            return 1;              /* 完整帧就绪 */
-        } else {
-            tlv_sm_reset(sm);
-            return -1;
-        }
+/* 没有在途帧：只接受5A，其余字节视为噪声。 */
+static int handle_idle(tlv_sm_t *sm, uint8_t byte)
+{
+    if (byte == TLV_SYNC_HEADER) {
+        sm->state = TLV_SM_HEADER;
+        sm->expect = 5U; /* 帧头1 + Length2 + HCRC2。 */
+    } else {
+        sm->pos = 0U;
     }
     return 0;
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- * 取出已解析帧
- * ═══════════════════════════════════════════════════════════════════ */
+/* 头部可信后才使用Length接收数据；坏头在已有5字节内尝试寻找下一个5A。 */
+static int handle_header(tlv_sm_t *sm, uint8_t byte)
+{
+    (void)byte;
+    if (sm->pos < sm->expect) return 0;
+    uint16_t length = tlv_get_length(sm->buf + 1);
+    if (crc16_modbus(sm->buf, 5U) != 0U ||
+        length < TLV_PAYLOAD_MIN || length > TLV_PAYLOAD_MAX) {
+        resync_header(sm);
+        return 0;
+    }
+    sm->state = TLV_SM_DATA;
+    sm->expect = 13U + length; /* 头5 + Seq8 + TLV区Length。 */
+    return 0;
+}
 
+/* DATA包含Seq和TLV区，必须收满后才切到FCRC阶段。 */
+static int handle_data(tlv_sm_t *sm, uint8_t byte)
+{
+    (void)byte;
+    if (sm->pos == sm->expect) {
+        sm->state = TLV_SM_CRC;
+        sm->expect += 2U;
+    }
+    return 0;
+}
+
+/* 接收到的FCRC也参与计算；对Seq+TLV+FCRC重算余数0即通过。 */
+static int handle_crc(tlv_sm_t *sm, uint8_t byte)
+{
+    (void)byte;
+    if (sm->pos < sm->expect) return 0;
+    if (crc16_modbus(sm->buf + 5, sm->pos - 5U) != 0U) {
+        tlv_sm_reset(sm);
+        return -1;
+    }
+    sm->state = TLV_SM_FOOTER;
+    ++sm->expect;
+    return 0;
+}
+
+/* 发布长度但不提前交付业务；get_frame仍要检查TLV内部结构。 */
+static int handle_footer(tlv_sm_t *sm, uint8_t byte)
+{
+    if (byte == TLV_SYNC_FOOTER) {
+        uint16_t length = sm->pos;
+        tlv_sm_reset(sm);
+        sm->ready_len = length;
+        return 1;
+    }
+    tlv_sm_reset(sm);
+    /* 缺失帧尾后紧接新帧头时，不吞掉下一帧的5A。 */
+    if (byte == TLV_SYNC_HEADER) {
+        sm->buf[0] = byte;
+        sm->pos = 1U;
+        sm->state = TLV_SM_HEADER;
+        sm->expect = 5U;
+    }
+    return -1;
+}
+
+/* 接收状态分发表：每个状态对应一个处理函数；新增状态必须同时补表和测试。
+ * 这是字节流状态分发，不是RK算法分发，也不会执行电源/PC业务。
+ */
+static const rk_state_handler_t s_state_handlers[] = {
+    [TLV_SM_IDLE]   = handle_idle,
+    [TLV_SM_HEADER] = handle_header,
+    [TLV_SM_DATA]   = handle_data,
+    [TLV_SM_CRC]    = handle_crc,
+    [TLV_SM_FOOTER] = handle_footer,
+};
+
+_Static_assert(sizeof(s_state_handlers) / sizeof(s_state_handlers[0]) == TLV_SM_COUNT,
+               "RK状态分发表必须覆盖全部接收状态");
+
+int tlv_sm_feed(tlv_sm_t *sm, uint8_t byte)
+{
+    if (sm == NULL) return -1;
+    /* 先检查枚举值再索引函数表；负数转无符号后同样会被拦截。 */
+    if ((unsigned)sm->state >= TLV_SM_COUNT || s_state_handlers[sm->state] == NULL) {
+        tlv_sm_reset(sm);
+        return -1;
+    }
+    (void)tlv_sm_check_timeout(sm, RK_BYTE_TIMEOUT_MS);
+    sm->ready_len = 0U;
+    sm->last_tick = xTaskGetTickCount();
+    if (sm->pos >= TLV_FRAME_MAX) tlv_sm_reset(sm);
+    sm->buf[sm->pos++] = byte;
+    return s_state_handlers[sm->state](sm, byte);
+}
 int tlv_sm_get_frame(tlv_sm_t *sm, tlv_frame_t *frame)
 {
-    uint16_t plen = tlv_get_length(sm->buf + 1);
-    /* feed成功只代表帧边界/CRC正确；TLV仍可能损坏。必须把解包失败
-     * 传回任务，不能把CRC正确误当作业务数据已经可用。 */
-    return tlv_unpack(sm->buf + 5, plen, frame);
+    if (sm == NULL || sm->ready_len == 0U) {
+        frame_init(frame);
+        return -1;
+    }
+    return tlv_unpack(sm->buf, sm->ready_len, frame);
 }
