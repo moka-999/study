@@ -21,7 +21,8 @@ mx.scratch
 
 # IDE / 工具缓存
 .clangd
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 .settings/
 
 # 参考资料 / 临时文件（下划线前缀, 根目录）

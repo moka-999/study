@@ -25,7 +25,8 @@ extern "C" {
 
 /*
  * PC工程师确认的MCU完整PDU上限，包含18字节头部。Length字段本身仍为u32，
- * 但超过4KiB时必须在继续接收包体前断开连接，避免占满FreeRTOS堆和任务栈。
+ * 但超过4KiB时必须拒绝该候选头，并在有界搜索中寻找后续正常头；不得按超限
+ * Length收正文或分配内存，避免占满FreeRTOS堆和任务栈。
  */
 #define PC_PROTOCOL_MAX_PDU       4096U
 #define PC_PROTOCOL_MAX_JSON_SIZE (PC_PROTOCOL_MAX_PDU - PC_PROTOCOL_HEADER_SIZE)

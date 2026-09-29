@@ -8,110 +8,72 @@
 
 #include "pcf8574.h"
 
-/**
- * @brief   初始化 PCF8574
- * @note    配置 PB12 为中断输入(上拉)，初始化软件 I2C，
- *          检测 PCF8574 是否在线，默认所有 IO 输出高电平
- * @retval  0:成功  1:失败(无 ACK 应答)
- */
-uint8_t pcf8574_init(void)
+/* 缓存的是输出锁存器，不是引脚电平；只有完整ACK成功才允许继续按位修改。 */
+static uint8_t output_latch = 0xFFU;
+static uint8_t latch_valid;
+
+/* 调用方串行化整笔I2C事务；当前仅在ETH初始化阶段使用。 */
+int pcf8574_init(void)
 {
-    uint8_t temp = 0;
-    GPIO_InitTypeDef gpio_init_struct;
-
-    /* ── PB12 配置为中断输入 ── */
+    GPIO_InitTypeDef gpio = {0};
+    latch_valid = 0U;
     PCF8574_GPIO_CLK_ENABLE();
-    gpio_init_struct.Pin   = PCF8574_GPIO_PIN;
-    gpio_init_struct.Mode  = GPIO_MODE_INPUT;
-    gpio_init_struct.Pull  = GPIO_PULLUP;
-    gpio_init_struct.Speed = GPIO_SPEED_HIGH;
-    HAL_GPIO_Init(PCF8574_GPIO_PORT, &gpio_init_struct);
-
-    /* ── 初始化软件 I2C ── */
+    gpio.Pin = PCF8574_GPIO_PIN;
+    gpio.Mode = GPIO_MODE_INPUT;
+    gpio.Pull = GPIO_PULLUP;
+    gpio.Speed = GPIO_SPEED_HIGH;
+    HAL_GPIO_Init(PCF8574_GPIO_PORT, &gpio);
     iic_init();
+    return pcf8574_write_byte(0xFFU);
+}
 
-    /* ── 发送器件地址，检测是否有 ACK 应答 ── */
+int pcf8574_read_byte(void)
+{
+    iic_start();
+    iic_send_byte(PCF8574_ADDR | 1U);
+    if (iic_wait_ack() != 0U) {
+        iic_stop();
+        return -1;
+    }
+    uint8_t value = iic_read_byte(0U);
+    iic_stop();
+    return value;
+}
+
+int pcf8574_write_byte(uint8_t data)
+{
+    /* 准双向输入必须写1释放；外部中断拉低不能反写成输出低。 */
+    data |= (1U << AP_INT_IO) | (1U << MPU_INT_IO);
+    latch_valid = 0U;
     iic_start();
     iic_send_byte(PCF8574_ADDR);
-    temp = iic_wait_ack();               /* 0=有应答(芯片在线), 1=无应答 */
-    iic_stop();
-
-    /* ── 默认所有 IO 输出高电平 ── */
-    pcf8574_write_byte(0xFF);
-
-    return temp;
-}
-
-/**
- * @brief   读取 PCF8574 全部 8 位 IO 值
- * @retval  8 位 IO 状态
- */
-uint8_t pcf8574_read_byte(void)
-{
-    uint8_t temp = 0;
-
-    iic_start();
-    iic_send_byte(PCF8574_ADDR | 0x01);   /* 读模式 */
-    iic_wait_ack();
-    temp = iic_read_byte(0);
-    iic_stop();
-
-    return temp;
-}
-
-/**
- * @brief   向 PCF8574 写入全部 8 位 IO 值
- * @param   data: 要写入的数据
- */
-void pcf8574_write_byte(uint8_t data)
-{
-    iic_start();
-    iic_send_byte(PCF8574_ADDR | 0x00);   /* 写模式 */
-    iic_wait_ack();
+    if (iic_wait_ack() != 0U) {
+        iic_stop();
+        return -1;
+    }
     iic_send_byte(data);
-    iic_wait_ack();
+    if (iic_wait_ack() != 0U) {
+        iic_stop();
+        return -1;
+    }
     iic_stop();
-    HAL_Delay(10);
+    output_latch = data;
+    latch_valid = 1U;
+    return 0;
 }
 
-/**
- * @brief   设置 PCF8574 某一位 IO 的高低电平
- * @param   bit: IO 编号 (0~7)
- * @param   sta: 0=低电平, 1=高电平
- * @note    采用读-修改-写方式，不影响其他 IO
- */
-void pcf8574_write_bit(uint8_t bit, uint8_t sta)
+int pcf8574_write_bit(uint8_t bit, uint8_t state)
 {
-    uint8_t data;
-
-    data = pcf8574_read_byte();           /* 先读出当前全部 IO 状态 */
-    if (sta == 0)
-    {
-        data &= ~(1 << bit);              /* 目标位清零 */
-    }
-    else
-    {
-        data |= (1 << bit);               /* 目标位置1  */
-    }
-    pcf8574_write_byte(data);             /* 写回 */
+    if (bit > 7U || state > 1U || !latch_valid ||
+        ((bit == AP_INT_IO || bit == MPU_INT_IO) && state == 0U)) return -1;
+    uint8_t data = output_latch & (uint8_t)~(1U << bit);
+    if (state != 0U) data |= (uint8_t)(1U << bit);
+    return pcf8574_write_byte(data);
 }
 
-/**
- * @brief   读取 PCF8574 某一位 IO 的值
- * @param   bit: IO 编号 (0~7)
- * @retval  0 或 1
- */
-uint8_t pcf8574_read_bit(uint8_t bit)
+int pcf8574_read_bit(uint8_t bit)
 {
-    uint8_t data;
-
-    data = pcf8574_read_byte();
-    if (data & (1 << bit))
-    {
-        return 1;
-    }
-    else
-    {
-        return 0;
-    }
+    if (bit > 7U) return -1;
+    int data = pcf8574_read_byte();
+    return data < 0 ? -1 : ((data >> bit) & 1);
 }

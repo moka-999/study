@@ -2,6 +2,18 @@
 
 本页是仓库文档入口。状态以 **当前源码 + 本次可复现验证** 为准，不以旧文档中的“完成”字样为准。
 
+2026-09-29 B1已接入真实电源ON下的外部就绪算法路径、实际采样统计及TCP异常输入恢复，见[B1同步记录](../../b1/docs/real_test_sync_20260929.md)。未烧录，首板时序/器件/RK端口待验收，自动冷重启仍拒绝；下方日期较早的“未接入”仅指当时状态。
+
+2026-09-28 V2连接真实RK的外部启动模式及网络助手完整HEX见[操作说明](rk_real_test_20260928.md)。V2已更新0.1.17并健康确认；实际RK算法留待操作者发起。该新增JSON已写Markdown协议，Word/飞书本轮未同步，不要用旧Word判断这个新入口不支持。
+
+日常修改App后的操作见[V2编译与安全下载](ota_daily_download.md)：VS Code按Ctrl+Shift+B走完整OTA安全SWD流程，也可只打包或通过网络升级。已部署完整B的板卡不要直接覆盖普通App ELF。
+
+## RK协议更新（2026-09-23）
+
+对外 UART 协议使用[新版 RK Word](mcu_rk协议.docx)，固定文件名为 `doc/mcu_rk协议.docx`。内容已按现行 TLV 协议重写并完成 8 页实际渲染检查，包含命令表、四 TLV 结果、CRC、心跳、超时与完整报文示例；不沿用旧版自动重传和旧结果编号。以后更新前按旧文件修改时间归档到 `doc/history/rk/`，同名追加序号，不覆盖旧文件。
+
+MCU–RK已按用户指定的`D:/pro/tlv_proto`替换旧线格式/事务层并同步B1，见[现行RK协议](protocol_spec.md)和[迁移验证记录](rk_protocol_migration_20260923.md)。旧CRC范围、命令大端、4 pending/500ms重传和旧PC–TLV调度器均不再适用；下方较早的进度表及带日期旧记录不覆盖这一结论。
+
 ## B1电源控制核对（2026-09-14）
 
 [B1电源控制核对与训练电压方案](b1_power_control_review.md)集中记录0831版原理图证据、PC6/PC7/PG11实际作用、RK806自动启动窗口、`power`训练目标语义、代码差距及实板验收清单。B1正常电源控制不预设依赖B2；训练前调压的最坏时序仍待证明。本次只保存文档，没有修改或烧录固件。下文较早的电源阶段结论按此记录修正。
@@ -12,7 +24,7 @@
 
 ## PC–MCU TCP协议框架
 
-OTA接口见[PC OTA协议](pc_ota_protocol.md)及PC协议4.26至4.28：V2/B1单块原始数据上限已调整为3000字节，整帧仍≤4096；PC按begin返回的blockSize兼容旧版1024。V2已通过真实网络升级至0.1.6及健康确认，B1只完成构建/离线验证；详见[2026-09-17验证记录](ota_chunk_3000_validation_20260917.md)。本地Word已同步并检查内容，本次视觉分页复核因WPS接口异常未完成；线上文档未改。
+升级接口见[PC固件升级协议](pc_ota_protocol.md)及PC协议4.26至4.28：编号仍为0901/0902/0903，MCU动作统一加`mcu_`前缀；对应`rk_*`仅保留入口并回notSupported，W25Q256已预留两块各8MiB，尚不定义RK包体或烧录。V2/B1 MCU原始分块上限3000字节、整帧≤4096，PC按`mcu_begin`返回的blockSize分块。旧固件首次迁移须显式使用[旧动作选项](ota_daily_download.md)，不自动重发写入。详见[2026-09-24修改记录](firmware_upgrade_reservation_20260924.md)；旧日期网络测试不代表本轮新动作已完成真机验证，飞书未同步。
 
 PC工程师使用[最新版Word](pc_tcp协议.docx)：只写连接/报文、请求JSON、字段、响应和PC执行规则。[Markdown详细定义](pc_tcp_protocol_spec.md)、[内部JSON合同](pc_json_contract.md)及电源控制记录保留实现依据、开发状态和硬件验收要求，不把这些长篇说明直接复制进对外Word。8月31日规则为双方独立递增Seq、不回显，ServiceID固定0；固件迁移见任务9.6。
 Word最新版固定为`doc/pc_tcp协议.docx`，不再使用“修订版”“补齐”等后缀。每次更新前，把旧文件按其最后修改时间保存为`doc/history/pc_tcp/pc_tcp协议_yyyyMMdd_HHmmss.docx`；同秒重名时增加序号，禁止覆盖已有历史文件。历史版本见[归档记录](history/pc_tcp/README.md)。若文件正被用户编辑，先等待保存/关闭，不另造一个含糊的“最新版”。
@@ -51,12 +63,12 @@ Word最新版固定为`doc/pc_tcp协议.docx`，不再使用“修订版”“�
 
 脚本会从 STM32Cube bundle/CMake 缓存寻找 Ninja，并以 UTF-8 模式运行 Python，避免依赖当前终端 `PATH` 和 GBK 输出编码。
 
-硬件测试仍需阿波罗 V2、COM3 和 `192.168.1.201:8888`：
+硬件测试需阿波罗V2和`192.168.1.201:8888`；2026-09-23的CH340为COM5，每次先枚举确认：
 
 ```powershell
-python -X utf8 tests\stability_test.py
-python -X utf8 tests\full_chain_stress.py
-python -X utf8 tests\pc_business_network_test.py
+python -B -X utf8 tests\pc_business_network_test.py
+# 下项仅限已备份并装入隔离联调镜像；完成后必须恢复正式镜像。
+python -B -X utf8 tests\rk_gateway_network_test.py --serial COM5 --report build/rk-chain.json
 ```
 
 ## 文档可信度顺序
@@ -64,7 +76,7 @@ python -X utf8 tests\pc_business_network_test.py
 1. 当前源码、原理图/BOM、实测日志。
 2. 本页和 [`driver_tasks.md`](driver_tasks.md) 的状态表。
 3. [`../AGENTS.md`](../AGENTS.md) 的工程约束与操作手册。
-4. [`protocol_spec.md`](protocol_spec.md) 是旧协议提案，含 `0x5002` 等未采用设计，不能直接作为现行协议。
+4. [`protocol_spec.md`](protocol_spec.md)是2026-09-23按RK工程师参考包更新后的UART协议；旧提案已移入`history/rk/`，不能再作为现行实现依据。
 5. [`b1_mcu_pinout.md`](b1_mcu_pinout.md) 保留B1映射依据；可执行引脚合同与最终映射在独立`../b1`工程内维护。
 6. `schematic*.md` 与 AD7124 中文文档是提取/参考材料，不代表驱动已验证。
 

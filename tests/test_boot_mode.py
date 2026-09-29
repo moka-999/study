@@ -5,7 +5,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "BSP/MCP4725/mcp4725.c").read_text(encoding="utf-8")
 EXPECTED_MV = [0, 300, 600, 900, 1200, 1500, 1800]
-EXPECTED_CODE = [0, 372, 745, 1117, 1489, 1861, 2234]
+EXPECTED_CODE = [0, 372, 745, 1117, 1489, 1862, 2234]
 
 
 def main() -> None:
@@ -14,7 +14,7 @@ def main() -> None:
     actual_mv = [int(value) for value in re.findall(r"(\d+)U", match.group(1))]
     assert actual_mv == EXPECTED_MV, f"Boot电压表不符: {actual_mv}"
 
-    actual_code = [(mv * 4095 + 1650) // 3300 for mv in actual_mv]
+    actual_code = [(mv * 4096 + 1650) // 3300 for mv in actual_mv]
     assert actual_code == EXPECTED_CODE, f"3.3V DAC码不符: {actual_code}"
 
     packets = [((code >> 8) & 0x0F, code & 0xFF) for code in actual_code]

@@ -3,7 +3,7 @@
  * @file    myiic.c
  * @brief   软件模拟 I2C 驱动实现
  * @note    用 GPIO 模拟 I2C 总线时序，SCL=PH4(推挽), SDA=PH5(开漏)
- *          速率约 250KHz（2us 延时）
+ *          单主机、从机无时钟拉伸；每个高/低阶段至少5us，速率不超过100kHz
  * @source  正点原子 ALIENTEK
  ********************************************************************
  */
@@ -37,11 +37,13 @@ void iic_init(void)
 }
 
 /**
- * @brief   I2C 延时（约 2us，对应 250KHz 速率）
+ * @brief   保守保证至少5us；循环开销只会降低总线速率，不依赖优化等级。
  */
 static void iic_delay(void)
 {
-    volatile uint32_t n = 80;
+    /* SystemCoreClock为当前内核频率；每轮至少一条NOP，不得改成空循环。
+     * 向上取整后预留一个周期，真实高低时间还包含循环和GPIO访问开销。 */
+    volatile uint32_t n = ((SystemCoreClock + 999999U) / 1000000U) * 5U + 1U;
     while (n--) { __NOP(); }
 }
 
@@ -80,24 +82,11 @@ void iic_stop(void)
  */
 uint8_t iic_wait_ack(void)
 {
-    uint8_t waittime = 0;
-    uint8_t rack     = 0;
-
-    IIC_SDA(1);                         /* 释放 SDA，等待从机拉低 */
+    IIC_SDA(1);
     iic_delay();
-    IIC_SCL(1);                         /* SCL=1，从机发出 ACK */
+    IIC_SCL(1);
     iic_delay();
-
-    while (IIC_READ_SDA)                /* 等待 SDA 被从机拉低 */
-    {
-        waittime++;
-        if (waittime > 250)             /* 超时，无应答 */
-        {
-            iic_stop();
-            rack = 1;
-            break;
-        }
-    }
+    uint8_t rack = IIC_READ_SDA ? 1U : 0U;
 
     IIC_SCL(0);                         /* SCL=0，结束 ACK 检测 */
     iic_delay();

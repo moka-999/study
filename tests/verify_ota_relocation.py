@@ -217,20 +217,30 @@ def main() -> None:
     parser.add_argument("--build-type", choices=("Debug", "Release"), default="Debug")
     parser.add_argument("--ota-boot", action="store_true", help="启用真实B日志/健康确认，仍不烧录")
     parser.add_argument("--version", default="0.1.0", help="打包语义版本，例如0.1.1")
+    parser.add_argument("--rk-gateway-test", action="store_true", help="仅V2临时全链路联调镜像，正式业务不得启用")
+    parser.add_argument("--power-simulation", action="store_true", help="V2正式任务联调：仅模拟电源/测量，RK仍为真实串口")
     args = parser.parse_args()
     self_check()
     if not re.fullmatch(r"\d+\.\d+\.\d+", args.version) or any(int(v) > 65535 for v in args.version.split(".")):
         raise ValueError("版本必须是三个0..65535整数")
     root = args.app_root.resolve()
     app = args.app_name
+    if args.rk_gateway_test and app != "test":
+        raise ValueError("B1禁止使用V2临时业务门禁模拟")
+    if args.power_simulation and (app != "test" or args.rk_gateway_test):
+        raise ValueError("电源模拟仅用于V2真实RK路径，不能与旧网关联调开关混用")
     env = dict(os.environ)
     env["PATH"] = str(args.compiler.parent) + os.pathsep + env.get("PATH", "")
-    # 仅实验固定构建时间，避免两个槽的身份字段因配置时间不同而误报字节差异。
-    env["SOURCE_DATE_EPOCH"] = "1789430400"
+    # 两槽必须共用构建时间；日常入口传入本轮时间，独立实验保留固定默认值。
+    env.setdefault("SOURCE_DATE_EPOCH", "1789430400")
     env["LC_ALL"] = "C"
     builds = []
     for name, base in (("a1", A1_BASE), ("a2", A2_BASE)):
         prefix = "ota-app" if args.ota_boot else "ota-probe"
+        if args.rk_gateway_test:
+            prefix += "-rk-test"
+        if args.power_simulation:
+            prefix += "-power-sim"
         suffix = "-uart2" if app == "b1" and args.rk_uart == 2 else ""
         build = root / "build" / f"{prefix}-{args.version}-{args.build_type.lower()}-{name}{suffix}"
         build.mkdir(parents=True, exist_ok=True)
@@ -241,6 +251,9 @@ def main() -> None:
                      f"-DPython3_EXECUTABLE={sys.executable}",
                      "-DENABLE_OTA_RELOCATION_PROBE=ON", f"-DOTA_APP_BASE=0x{base:08X}"]
         configure += [f"-DENABLE_OTA_BOOT={'ON' if args.ota_boot else 'OFF'}"]
+        if app == "test":
+            configure += [f"-DENABLE_RK_GATEWAY_TEST={'ON' if args.rk_gateway_test else 'OFF'}"]
+            configure += [f"-DENABLE_V2_POWER_SIMULATION={'ON' if args.power_simulation else 'OFF'}"]
         if app == "b1":
             configure += [f"-DB1_RK_UART={args.rk_uart}"]
         configure += [f"-DFIRMWARE_VERSION_{part}={value}" for part, value in

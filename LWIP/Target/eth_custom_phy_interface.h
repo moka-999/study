@@ -97,7 +97,14 @@ extern   "C" {
 /** @defgroup USER_PHY_PHYI1R_Bit_Definition USER_PHY PHYI1R Bit Definition
   * @{
   */
-#define USER_PHY_PHYI1R_OUI_3_18               ((uint16_t)0xFFFFU)
+/* YT8512C/H完整ID：ID1为0是合法值，必须同时匹配ID2。 */
+#define USER_PHY_EXPECTED_ID1                0x0000U
+#define USER_PHY_EXPECTED_ID2                0x0128U
+#define USER_PHY_SPECIFIC_STATUS             0x11U
+#define USER_PHY_RESOLVED                    0x0800U
+#define USER_PHY_REALTIME_LINK               0x0400U
+#define USER_PHY_RESOLVED_DUPLEX             0x2000U
+#define USER_PHY_RESOLVED_SPEED              0xC000U
 /**
   * @}
   */

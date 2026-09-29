@@ -5,7 +5,14 @@
 /** 单次write解码后的文件字节上限；不是整帧长度。PC须同时满足4096字节PDU上限。 */
 #define OTA_DOWNLOAD_BLOCK_BYTES 3000U
 
-enum { OTA_TASK_DEFAULT = 0, OTA_TASK_TCP, OTA_TASK_MONITOR, OTA_TASK_RK, OTA_TASK_HB };
+/** 必要任务编号用于健康位图；RK任务同时负责收发、事务和心跳，不单列心跳任务。 */
+enum {
+    OTA_TASK_DEFAULT = 0, /**< 默认任务：系统周期维护。 */
+    OTA_TASK_TCP,         /**< TCP任务：连接和PC协议处理。 */
+    OTA_TASK_MONITOR,     /**< 监控任务：采样与电源状态推进。 */
+    OTA_TASK_RK,          /**< RK任务：含OFF/等待期间的有界调度进展。 */
+    OTA_TASK_COUNT       /**< 必要任务总数4，不是可上报的任务编号。 */
+};
 
 #if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
 /** 调度前初始化健康观察器；失败记录不会被默认健康掩盖。 */

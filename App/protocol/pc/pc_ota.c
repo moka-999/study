@@ -1,10 +1,23 @@
-/* OTA线上字段/分块解码在本模块；Flash、维护门、提交及复位由ota_app统一负责。 */
+/* 固件升级线上分发在本模块；MCU下载由ota_app负责，RK动作仅保留名称并明确拒绝。 */
 #include "pc_ota.h"
 #include "pc_command.h"
 #include "ota_app.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <string.h>
+
+/* RK尚未定义下载包体；这里只识别保留动作，不读取包字段或执行任何后台操作。 */
+static const char *const reserved_rk_actions[] = {
+    "rk_begin", "rk_write", "rk_finish", "rk_query", "rk_cancel",
+};
+
+static int is_reserved_rk_action(const char *name)
+{
+    for (size_t i = 0U; i < sizeof(reserved_rk_actions) / sizeof(reserved_rk_actions[0]); ++i) {
+        if (strcmp(name, reserved_rk_actions[i]) == 0) return 1;
+    }
+    return 0;
+}
 
 /** 复用固定头组帧；正文对象归调用者，本函数不释放。 */
 static pc_dispatch_result_t respond(uint16_t command, uint32_t sequence,
@@ -22,7 +35,7 @@ static pc_dispatch_result_t respond(uint16_t command, uint32_t sequence,
 #define OTA_BASE64_MAX_CHARS (4U * ((OTA_DOWNLOAD_BLOCK_BYTES + 2U) / 3U))
 /* 紧凑JSON按最长u32偏移预算；实际线上长度仍由公共帧状态机检查，空白也计入。 */
 _Static_assert(PC_PROTOCOL_HEADER_SIZE + OTA_BASE64_MAX_CHARS +
-    sizeof("{\"action\":\"write\",\"packageId\":\"FFFFFFFF\",\"offset\":4294967295,\"data\":\"\"}") - 1U
+    sizeof("{\"action\":\"mcu_write\",\"packageId\":\"FFFFFFFF\",\"offset\":4294967295,\"data\":\"\"}") - 1U
     <= PC_PROTOCOL_MAX_PDU, "OTA write整帧超出容量");
 
 typedef struct {
@@ -43,13 +56,13 @@ static ota_download_result_t write_block(const ota_message_t *m) { return ota_do
 static ota_download_result_t finish(const ota_message_t *m) { return ota_download_finish(m->package_id); }
 static ota_download_result_t cancel(const ota_message_t *m) { return ota_download_cancel(m->package_id); }
 
-/* 每个动作只接纳表中字段；query的packageId是唯一可选字段。 */
+/* 每个MCU动作只接纳表中字段；mcu_query的packageId是唯一可选字段。 */
 static const ota_action_t actions[] = {
-    {"begin",  {"action", "packageId", "packageSize"}, 3U, begin},
-    {"write",  {"action", "packageId", "offset", "data"}, 4U, write_block},
-    {"finish", {"action", "packageId"}, 2U, finish},
-    {"query",  {"action", "packageId"}, 2U, NULL},
-    {"cancel", {"action", "packageId"}, 2U, cancel},
+    {"mcu_begin",  {"action", "packageId", "packageSize"}, 3U, begin},
+    {"mcu_write",  {"action", "packageId", "offset", "data"}, 4U, write_block},
+    {"mcu_finish", {"action", "packageId"}, 2U, finish},
+    {"mcu_query",  {"action", "packageId"}, 2U, NULL},
+    {"mcu_cancel", {"action", "packageId"}, 2U, cancel},
 };
 
 static const char *const errors[] = {
@@ -172,7 +185,7 @@ static int query(cJSON *body, const ota_message_t *m, const ota_download_progres
         !cJSON_AddStringToObject(body, "state", state) ||
         !cJSON_AddStringToObject(body, "firmwareVersion", version) ||
         !cJSON_AddBoolToObject(body, "confirmed", status.confirmed)) return -1;
-    if (complete) *command = PC_COMMAND_MCU_OTA_COMPLETE;
+    if (complete) *command = PC_COMMAND_FIRMWARE_UPGRADE_COMPLETE;
     else if (!add_id(body, "activePackageId", status.active_package_id)) return -1;
     if (p->state == OTA_DOWNLOAD_RECEIVING) {
         cJSON *download = cJSON_AddObjectToObject(body, "download");
@@ -189,22 +202,26 @@ pc_dispatch_result_t pc_ota_handle(const pc_protocol_frame_t *request, uint32_t 
                                     const cJSON *root, pc_dispatch_response_t *response)
 {
     cJSON *body = cJSON_CreateObject();
-    uint16_t command = PC_COMMAND_MCU_OTA_RESP;
+    uint16_t command = PC_COMMAND_FIRMWARE_UPGRADE_RESP;
     const char *error = NULL;
     pc_dispatch_result_t result = PC_DISPATCH_ERROR;
     if (!body) return result;
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "action");
+    if (!cJSON_IsString(name) || !name->valuestring) error = "invalidArgument";
+    else if (is_reserved_rk_action(name->valuestring)) {
+        /* 保留请求只回动作名和notSupported；不能轮询MCU升级、擦写Flash或触发复位。 */
+        if (!cJSON_AddStringToObject(body, "action", name->valuestring)) goto done;
+        error = "notSupported";
+    }
 #if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
     ota_message_t message = {0};
     const ota_action_t *action = NULL;
-    const cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "action");
-    if (!cJSON_IsString(name) || !name->valuestring) error = "invalidArgument";
-    else {
+    if (!error) {
         for (size_t i = 0U; i < sizeof(actions) / sizeof(actions[0]); ++i) {
             if (strcmp(name->valuestring, actions[i].action) == 0) { action = &actions[i]; break; }
         }
         if (!action) error = "notSupported";
     }
-    ota_download_poll();
     if (action) {
         if (!parse_message(root, action, &message)) error = "invalidArgument";
         if (!cJSON_AddStringToObject(body, "action", action->action) ||
@@ -212,6 +229,7 @@ pc_dispatch_result_t pc_ota_handle(const pc_protocol_frame_t *request, uint32_t 
             (action->execute == write_block && message.has_offset &&
              !cJSON_AddNumberToObject(body, "offset", message.offset))) goto done;
         ota_download_progress_t progress;
+        if (!error) ota_download_poll();
         if (!error && action->execute) {
             ota_download_result_t code = action->execute(&message);
             if (code != OTA_DOWNLOAD_OK) error = errors[code];
@@ -233,9 +251,8 @@ pc_dispatch_result_t pc_ota_handle(const pc_protocol_frame_t *request, uint32_t 
             !cJSON_AddStringToObject(body, "state", "commitUnknown")) goto done;
     }
 #else
-    (void)root;
     /* 未启用完整B合同的普通/隔离镜像明确拒绝OTA，不能假装已建立安全回退链。 */
-    error = "notSupported";
+    if (!error) error = "notSupported";
 #endif
     if (error) {
         command = PC_COMMAND_COMMAND_RESP;

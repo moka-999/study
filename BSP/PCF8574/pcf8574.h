@@ -33,11 +33,15 @@
 #define RS485_RE_IO     6       /* RS485 收发使能       P6 */
 #define ETH_RESET_IO    7       /* 以太网 PHY 硬件复位   P7 */
 
-    /* ── API ── */
-uint8_t pcf8574_init(void);                                 /* 初始化，返回0成功 */
-uint8_t pcf8574_read_byte(void);                            /* 读取8位IO值       */
-void    pcf8574_write_byte(uint8_t data);                   /* 写入8位IO值       */
-void    pcf8574_write_bit(uint8_t bit, uint8_t sta);        /* 写某一位(0/1)     */
-uint8_t pcf8574_read_bit(uint8_t bit);                      /* 读某一位          */
+/* 初始化及写入返回0成功、-1失败；每个地址/数据字节都要求ACK。 */
+int pcf8574_init(void);
+/* 读返回0..255或-1；引脚电平不等于内部输出锁存器。 */
+int pcf8574_read_byte(void);
+/* P1/P5始终写1保持输入；成功时刷新软件锁存，失败后须完整重写再按位操作。 */
+int pcf8574_write_byte(uint8_t data);
+/* bit=0..7，state=0/1；禁止把P1/P5输入改成输出低。 */
+int pcf8574_write_bit(uint8_t bit, uint8_t state);
+/* 返回0/1；参数、总线错误返回-1，不伪装成高电平。 */
+int pcf8574_read_bit(uint8_t bit);
 
 #endif

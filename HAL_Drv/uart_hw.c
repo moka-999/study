@@ -118,8 +118,19 @@ static int uart_start_receive(uart_if_t *port, uint8_t *buffer, uint16_t size)
     if (port == NULL || port->handle == NULL || buffer == NULL || size == 0U) {
         return IF_ERR;
     }
-    return HAL_UARTEx_ReceiveToIdle_DMA(port->handle, buffer, size) == HAL_OK
-               ? IF_OK : IF_ERR;
+    UART_HandleTypeDef *uart = port->handle;
+    if (uart->hdmarx == NULL || uart->hdmarx->Init.Mode != DMA_NORMAL)
+        return IF_ERR; /* 本路由不支持循环DMA；缺失DMA时禁止进入HAL解引用。 */
+    if (HAL_UARTEx_ReceiveToIdle_DMA(uart, buffer, size) != HAL_OK) return IF_ERR;
+    /* 每次启动都关闭HT；只交付IDLE/TC，避免同一前缀重复入队。 */
+    __HAL_DMA_DISABLE_IT(uart->hdmarx, DMA_IT_HT);
+    return IF_OK;
+}
+
+int uart_rx_abort(uart_if_t *port)
+{
+    if (port == NULL || port->handle == NULL) return IF_ERR;
+    return HAL_UART_AbortReceive(port->handle) == HAL_OK ? IF_OK : IF_ERR;
 }
 
 uart_if_t uart1_if = {

@@ -12,6 +12,8 @@
 #include <string.h>
 
 static boot_health_t health;
+/* 通用健康观察器的槽位容量可大于实际任务数，禁止漏检或访问越界。 */
+_Static_assert(OTA_TASK_COUNT <= BOOT_HEALTH_TASKS, "OTA任务数超过健康观察器容量");
 static uint32_t boot_epoch, running_base;
 static volatile uint32_t confirmed, failed, download_state;
 static uint32_t download_bytes, downloaded, download_id;
@@ -53,13 +55,14 @@ static const boot_store_t store = {NULL, read_store, program_store, erase_store}
 
 void ota_app_prepare(void)
 {
-    boot_health_init(&health, 31U, HAL_GetTick());
+    boot_health_init(&health, (1U << OTA_TASK_COUNT) - 1U, HAL_GetTick());
     running_base = SCB->VTOR;
     ota_app_diag[0] = 0x4F544131U; ota_app_diag[1] = running_base;
 }
 
 void ota_app_progress(uint32_t task_id)
 {
+    if (task_id >= OTA_TASK_COUNT) return;
     taskENTER_CRITICAL();
     boot_health_progress(&health, task_id, HAL_GetTick());
     taskEXIT_CRITICAL();

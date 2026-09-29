@@ -1,5 +1,6 @@
 /* 在QEMU执行正式0103解析、分发和组帧；硬件入口一旦被调用立即判失败。 */
 #include "pc_dispatch.h"
+#include "pc_state_machine.h"
 #include "pc_test_message.h"
 #include "pc_tester_info.h"
 #include "pc_ota.h"
@@ -70,6 +71,12 @@ int monitor_get_latest(monitor_snapshot_t *out)
     }
     return 1;
 }
+int monitor_idd_get(idd_stats_t *out)
+{
+    if (!query_monitor) fail("FAIL statistics access\n");
+    memset(out, 0, sizeof(*out));
+    return 1;
+}
 HAL_StatusTypeDef result_led_set(result_led_target_t target, result_led_state_t state)
 { (void)target; (void)state; fail("FAIL LED write\n"); }
 HAL_StatusTypeDef result_led_get_all(result_led_state_t states[3])
@@ -122,15 +129,262 @@ static void replace(cJSON *root, const char *key, cJSON *value)
     CHECK(value && cJSON_ReplaceItemInObjectCaseSensitive(root, key, value));
 }
 
+static cJSON *external_request(void)
+{
+    cJSON *root = base_request();
+    replace(root, "algorithmType", cJSON_CreateString("functional"));
+    replace(root, "algorithmName", cJSON_CreateString("gtest-xor"));
+    replace(root, "power", cJSON_CreateNull());
+    replace(root, "bootMode", cJSON_CreateNull());
+    replace(root, "reboot", cJSON_CreateBool(0));
+    return root;
+}
+
+/* 只验证协议层：保持现状不会被转换为0V请求，未知测量值不能伪装成实测0。 */
+static void test_message_contract(void)
+{
+    pc_test_start_view_t view;
+    cJSON *root = external_request();
+    CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK);
+    CHECK(view.external_ready == 1U && view.reboot == 0U && view.timeout_ms == 0U);
+    CHECK(!view.memory_type && !view.boot_mode && view.target_mv[0] == 0U &&
+          view.target_mv[1] == 0U && view.target_mv[2] == 0U);
+    cJSON_Delete(root);
+    const uint32_t timeouts[] = {0U, 1U, 1200000U, 86400000U};
+    for (size_t mode = 0U; mode < 2U; mode++) {
+        for (size_t i = 0U; i < sizeof(timeouts) / sizeof(timeouts[0]); i++) {
+            root = mode ? external_request() : base_request();
+            CHECK(cJSON_AddNumberToObject(root, "timeoutMs", timeouts[i]));
+            CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK);
+            CHECK(view.external_ready == mode && view.timeout_ms == timeouts[i]);
+            cJSON_Delete(root);
+        }
+    }
+    const double bad_timeouts[] = {-1.0, 0.5, 86400001.0, 4294967296.0, NAN, INFINITY};
+    for (size_t i = 0U; i < sizeof(bad_timeouts) / sizeof(bad_timeouts[0]); i++) {
+        root = external_request();
+        CHECK(cJSON_AddNumberToObject(root, "timeoutMs", 1));
+        cJSON_GetObjectItemCaseSensitive(root, "timeoutMs")->valuedouble = bad_timeouts[i];
+        pc_test_start_view_t before = view;
+        CHECK(pc_test_start_parse(root, &view) != PC_TEST_JSON_OK &&
+              memcmp(&view, &before, sizeof(view)) == 0);
+        cJSON_Delete(root);
+    }
+    for (size_t i = 0U; i < 6U; i++) {
+        root = external_request();
+        if (i == 0U) replace(root, "reboot", cJSON_CreateBool(1));
+        if (i == 1U) replace(root, "bootMode", cJSON_CreateString("emmc"));
+        if (i == 2U) replace(root, "power", cJSON_CreateObject());
+        if (i == 3U) CHECK(cJSON_AddBoolToObject(root, "timeoutMs", 0));
+        if (i == 4U) CHECK(cJSON_AddNullToObject(root, "timeoutMs"));
+        if (i == 5U) {
+            CHECK(cJSON_AddNumberToObject(root, "timeoutMs", 1));
+            CHECK(cJSON_AddNumberToObject(root, "timeoutMs", 2));
+        }
+        CHECK(pc_test_start_parse(root, &view) != PC_TEST_JSON_OK);
+        cJSON_Delete(root);
+    }
+    /* 原始文本入口拒绝键和值内的NUL，防止cJSON字符串截断后绕过命令表。 */
+    const char *const nul_json[] = {
+        "{\"algorithmName\":\"gtest-xor\\u0000junk\"}",
+        "{\"algorithmName\\u0000junk\":\"gtest-xor\"}"
+    };
+    for (size_t i = 0U; i < 2U; i++) {
+        root = NULL;
+        CHECK(pc_json_parse_object((const uint8_t *)nul_json[i], strlen(nul_json[i]),
+                                   &root, NULL) == PC_JSON_ERROR_SYNTAX && root == NULL);
+    }
+    const uint64_t addresses[] = {0U, UINT64_C(0x0000000123456780), UINT64_MAX};
+    const char *const address_text[] = {NULL, "0x0000000123456780", "0xFFFFFFFFFFFFFFFF"};
+    for (size_t i = 0U; i < 3U; i++) {
+        root = pc_functional_result_create("gtest-xor", UINT32_MAX, "B1-01", 0U, "", addresses[i], 42000U);
+        CHECK(root != NULL && cJSON_GetArraySize(root) == 5);
+        CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(root, "algorithmType")->valuestring, "functional") == 0);
+        CHECK(cJSON_GetObjectItemCaseSensitive(root, "algorithmIndex")->valuedouble == 4294967295.0);
+        const cJSON *array = cJSON_GetObjectItemCaseSensitive(root, "testResults");
+        CHECK(cJSON_IsArray(array) && cJSON_GetArraySize(array) == 1);
+        const cJSON *entry = cJSON_GetArrayItem(array, 0);
+        CHECK(cJSON_GetArraySize(entry) == 6);
+        CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(entry, "siteId")->valuestring, "B1-01") == 0);
+        CHECK(cJSON_GetObjectItemCaseSensitive(entry, "mirrorIndex")->valueint == 0);
+        CHECK(cJSON_GetObjectItemCaseSensitive(entry, "testStatus")->valueint == (i == 0U ? 1 : 2));
+        CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(entry, "physicalAddr")->valuestring, "") == 0);
+        CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(entry, "measurementData")));
+        const cJSON *desc = cJSON_GetObjectItemCaseSensitive(entry, "resultDesc");
+        CHECK(cJSON_IsObject(desc) && cJSON_GetArraySize(desc) == 2);
+        CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(desc, "errorType")));
+        const cJSON *address = cJSON_GetObjectItemCaseSensitive(desc, "firstErrorAddress");
+        CHECK(i == 0U ? cJSON_IsNull(address) :
+              cJSON_IsString(address) && strcmp(address->valuestring, address_text[i]) == 0);
+        cJSON_Delete(root);
+    }
+    /* 核对线上数字文本，不能用double比较掩盖uint64大值的末位丢失。 */
+    const uint64_t times[] = {0U, 42000U, UINT64_C(4294967296), UINT64_C(9007199254740993), UINT64_MAX};
+    const char *const time_text[] = {"0", "42000", "4294967296", "9007199254740993", "18446744073709551615"};
+    for (size_t i = 0U; i < sizeof(times) / sizeof(times[0]); ++i) {
+        root = pc_functional_result_create("gtest-xor", 1U, "", 0U, "", 0U, times[i]);
+        CHECK(root);
+        char *json = cJSON_PrintUnformatted(root);
+        CHECK(json);
+        const char *value = strstr(json, "\"testTimeMs\":");
+        CHECK(value);
+        value += strlen("\"testTimeMs\":");
+        CHECK(strncmp(value, time_text[i], strlen(time_text[i])) == 0 && value[strlen(time_text[i])] == ',');
+        cJSON *parsed = cJSON_Parse(json);
+        CHECK(parsed && cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(parsed, "testTimeMs")));
+        cJSON_Delete(parsed);
+        cJSON_free(json);
+        cJSON_Delete(root);
+    }
+    CHECK(pc_functional_result_create(NULL, 1U, "", 0U, "", 0U, 0U) == NULL);
+    CHECK(pc_functional_result_create("gtest-xor", 1U, NULL, 0U, "", 0U, 0U) == NULL);
+    CHECK(pc_functional_result_create("gtest-xor", 1U, "", 0U, NULL, 0U, 0U) == NULL);
+    message("PASS: external-ready JSON, optional timeout, NUL rejection and real FUNC result\n");
+}
+
+/* 复用正式接收顺序：逐字节组帧、分发、消费响应后复位；禁止任何硬件副作用。 */
+static void consume_pc_bytes(pc_sm_t *sm, const uint8_t *data, size_t length,
+                             uint32_t counts[2])
+{
+    for (size_t i = 0U; i < length; ++i) {
+        pc_sm_feed_result_t feed = pc_sm_feed(sm, data[i]);
+        CHECK(feed != PC_SM_FEED_ERROR);
+        if (feed != PC_SM_FEED_FRAME_READY) continue;
+        pc_protocol_frame_t frame;
+        pc_dispatch_response_t response;
+        CHECK(pc_sm_get_frame(sm, &frame) == 0);
+        const uint32_t sequence = counts[0] + counts[1] + 1U;
+        CHECK(pc_dispatch_handle(&frame, sequence, &response) == PC_DISPATCH_RESPONSE_READY);
+        CHECK(response.data[15] == sequence && response.data[12] == 0U &&
+              response.data[13] == 0U && response.data[14] == 0U);
+        cJSON *body = NULL;
+        CHECK(pc_json_parse_object(response.data + 18U, response.length - 18U,
+                                   &body, NULL) == PC_JSON_OK);
+        CHECK(response.data[10] == 0U);
+        if (response.data[11] == PC_COMMAND_SERVER_HEARTBEAT) {
+            CHECK(cJSON_GetArraySize(body) == 0);
+            ++counts[0];
+        } else {
+            CHECK(response.data[11] == PC_COMMAND_COMMAND_RESP);
+            CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(body, "status")->valuestring, "failed") == 0);
+            CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(body, "errorCode")->valuestring, "invalidArgument") == 0);
+            CHECK(cJSON_GetObjectItemCaseSensitive(body, "requestCommandId")->valueint == frame.command_id);
+            ++counts[1];
+        }
+        cJSON_Delete(body);
+        pc_sm_reset(sm);
+    }
+}
+
+static void test_stream_recovery(void)
+{
+    static uint8_t packet[PC_PROTOCOL_MAX_PDU];
+    const uint8_t heartbeat[] = {
+        0, 0, 0, 20, 0, 1, 0, 8, 0, 0, 0, 2, 0, 0, 0, 99, 0, 0, '{', '}'
+    };
+    uint8_t batch[48];
+    pc_sm_t sm;
+    uint32_t counts[2] = {0U, 0U};
+    pc_sm_init(&sm);
+    consume_pc_bytes(&sm, (const uint8_t *)"TEXT", 4U, counts);
+    CHECK(!pc_sm_is_receiving(&sm) && sm.received == 0U);
+    consume_pc_bytes(&sm, heartbeat, sizeof(heartbeat), counts);
+    CHECK(counts[0] == 1U && counts[1] == 0U);
+
+    /* 垃圾与两个好帧同批到达、跨任意两批拆分，不能漏帧或重复应答。 */
+    memcpy(batch, "TEXT", 4U);
+    memcpy(batch + 4U, heartbeat, sizeof(heartbeat));
+    memcpy(batch + 24U, heartbeat, sizeof(heartbeat));
+    memcpy(batch + 44U, "TEXT", 4U);
+    for (size_t split = 0U; split <= sizeof(batch); ++split) {
+        pc_sm_init(&sm); counts[0] = counts[1] = 0U;
+        consume_pc_bytes(&sm, batch, split, counts);
+        consume_pc_bytes(&sm, batch + split, sizeof(batch) - split, counts);
+        CHECK(counts[0] == 2U && counts[1] == 0U && !pc_sm_is_receiving(&sm));
+    }
+
+    /* 各类坏头之后紧接好帧；候选前缀重叠时同样不得丢失真正的长度字段。 */
+    const uint8_t offsets[] = {3U, 2U, 5U, 7U, 9U};
+    const uint8_t values[] = {17U, 0x10U, 2U, 7U, 1U};
+    for (size_t i = 0U; i < sizeof(offsets); ++i) {
+        memcpy(batch, heartbeat, sizeof(heartbeat));
+        batch[offsets[i]] = values[i];
+        memcpy(batch + 20U, heartbeat, sizeof(heartbeat));
+        pc_sm_init(&sm); counts[0] = counts[1] = 0U;
+        consume_pc_bytes(&sm, batch, 40U, counts);
+        CHECK(counts[0] == 1U && counts[1] == 0U);
+    }
+    pc_sm_init(&sm); counts[0] = counts[1] = 0U;
+    consume_pc_bytes(&sm, (const uint8_t *)"\0\0", 2U, counts);
+    consume_pc_bytes(&sm, heartbeat, sizeof(heartbeat), counts);
+    CHECK(counts[0] == 1U && counts[1] == 0U);
+
+    /* 头和长度有效时，坏JSON只回错；控制/OTA命令不得到达硬件或下载入口。 */
+    const char *const invalid_json[] = {"TEXT", "{\"x\":}", "[]", "{}x",
+        "{\"x\":1,\"x\":2}", "{\"x\":\"\xED\xA0\x80\"}", "{\"x\":\"\\u0000\"}"};
+    const uint16_t commands[] = {PC_COMMAND_CLIENT_HEARTBEAT, PC_COMMAND_START_TEST,
+                                PC_COMMAND_POWER_ON, PC_COMMAND_FIRMWARE_UPGRADE_REQUEST};
+    for (size_t c = 0U; c < sizeof(commands) / sizeof(commands[0]); ++c) {
+        for (size_t j = 0U; j < sizeof(invalid_json) / sizeof(invalid_json[0]); ++j) {
+            uint32_t length;
+            CHECK(pc_protocol_build_response(commands[c], 99U, (const uint8_t *)invalid_json[j],
+                (uint32_t)strlen(invalid_json[j]), packet, sizeof(packet), &length) == 0);
+            pc_sm_init(&sm); counts[0] = counts[1] = 0U;
+            consume_pc_bytes(&sm, packet, length, counts);
+            consume_pc_bytes(&sm, heartbeat, sizeof(heartbeat), counts);
+            CHECK(counts[0] == 1U && counts[1] == 1U);
+        }
+    }
+    memcpy(packet, heartbeat, sizeof(heartbeat)); packet[3] = 18U;
+    pc_sm_init(&sm); counts[0] = counts[1] = 0U;
+    consume_pc_bytes(&sm, packet, 18U, counts);
+    consume_pc_bytes(&sm, heartbeat, sizeof(heartbeat), counts);
+    CHECK(counts[0] == 1U && counts[1] == 1U);
+
+    /* 不扫描已认可的正文：即使其中藏着完整心跳，也只能拒绝外层坏JSON。 */
+    uint32_t length;
+    CHECK(pc_protocol_build_response(PC_COMMAND_POWER_ON, 99U, heartbeat, sizeof(heartbeat),
+                                     packet, sizeof(packet), &length) == 0);
+    pc_sm_init(&sm); counts[0] = counts[1] = 0U;
+    consume_pc_bytes(&sm, packet, length, counts);
+    CHECK(counts[0] == 0U && counts[1] == 1U);
+    consume_pc_bytes(&sm, heartbeat, sizeof(heartbeat), counts);
+    CHECK(counts[0] == 1U && counts[1] == 1U);
+
+    /* 4096字节合法帧仍完整接收；合法长度的半帧留给TCP超时，不抢执行内部字节。 */
+    memcpy(packet, heartbeat, sizeof(heartbeat));
+    packet[2] = 0x10U; packet[3] = 0U;
+    memset(packet + 20U, ' ', sizeof(packet) - 20U);
+    pc_sm_init(&sm); counts[0] = counts[1] = 0U;
+    consume_pc_bytes(&sm, packet, sizeof(packet), counts);
+    CHECK(counts[0] == 1U && counts[1] == 0U);
+    pc_sm_init(&sm); counts[0] = counts[1] = 0U;
+    consume_pc_bytes(&sm, packet, 20U, counts);
+    consume_pc_bytes(&sm, heartbeat, sizeof(heartbeat), counts);
+    CHECK(pc_sm_is_receiving(&sm) && counts[0] == 0U && counts[1] == 0U);
+
+    /* 单次恢复最多丢弃4096字节；用常量实值锁定边界，不把无上限扫描算通过。 */
+    pc_sm_init(&sm);
+    for (size_t i = 0U; i < 4096U; ++i) CHECK(pc_sm_feed(&sm, 'T') == PC_SM_FEED_MORE);
+    CHECK(pc_sm_feed(&sm, 'T') == PC_SM_FEED_ERROR && sm.state == PC_SM_STATE_ERROR);
+    pc_sm_init(&sm); counts[0] = counts[1] = 0U;
+    consume_pc_bytes(&sm, heartbeat, sizeof(heartbeat), counts);
+    CHECK(counts[0] == 1U && counts[1] == 0U);
+    message("PASS: actual PC stream recovery, malformed JSON, no embedded dispatch and bounded scan\n");
+}
+
 void test_main(void)
 {
+    test_stream_recovery();
+    test_message_contract();
     const char *const required[] = {"algorithmType", "algorithmName", "algorithmIndex", "power", "reboot", "bootMode"};
     const char *const power_keys[] = {"memoryType", "vdd1Steps", "vdd2Steps", "vddqSteps"};
     cJSON *root = base_request();
     pc_test_start_view_t view;
     CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK);
     CHECK(view.target_mv[0] == 1800U && view.target_mv[1] == 1100U && view.target_mv[2] == 600U);
-    CHECK(view.reboot == 1U && view.algorithm_index == 1U);
+    CHECK(view.reboot == 1U && view.algorithm_index == 1U &&
+          view.external_ready == 0U && view.timeout_ms == 0U);
     check_request(root, "notReady", 1, 1U);
 
     /* 三大类、两内存类型及七种Boot均为现有合法枚举，未知算法名不伪造RK编号。 */

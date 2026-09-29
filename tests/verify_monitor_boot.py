@@ -1,4 +1,4 @@
-"""复用GNU/QEMU直接执行正式Boot缓存与MCP4725代码；不证明真实DAC/RK电气行为。"""
+"""运行正式监测任务、IDD统计与Boot缓存代码；器件/RTOS桩不证明真板电气行为。"""
 import argparse
 import os
 from pathlib import Path
@@ -15,7 +15,7 @@ def main():
     root = args.app_root.resolve()
     build = root / "build/monitor-boot-test"
     build.mkdir(parents=True, exist_ok=True)
-    # 只提供未运行的板级/RTOS声明，正式monitor头、状态枚举及DAC驱动均原样编译。
+    # 仅替换板级/RTOS接口；正式任务、统计、Boot缓存和DAC驱动均原样编译。
     (build / "boot_test_port.h").write_text('''#pragma once
 #include <stdint.h>
 typedef uint32_t TickType_t;
@@ -45,10 +45,12 @@ uint32_t HAL_GetTick(void);
         "BSP/AD7124", "BSP/PAC1934", "BSP/TPS62868")]
     sources = [Path(__file__).with_name("test_monitor_boot.c"),
                root / "App/tasks/common/monitor_task.c", root / "BSP/MCP4725/mcp4725.c",
+               root / "HAL_Drv/idd_stats.c",
                args.boot_root / "tests/qemu_start.s"]
     command = [str(args.compiler), "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-g", "-O1", "-DENABLE_OTA_BOOT=1", "-Wall", "-Wextra", "-Werror",
                "-ffunction-sections", "-fdata-sections", *["-I" + str(p) for p in includes],
+               *(["-DMONITOR_TEST_B1=1"] if (root / "b1.ioc").exists() else []),
                *map(str, sources), "-nostartfiles", "--specs=nosys.specs",
                "-T" + str(args.boot_root / "tests/qemu_test.ld"), "-Wl,--gc-sections",
                "-o", str(build / "test.elf")]

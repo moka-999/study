@@ -412,3 +412,4 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+# 已停用的历史参考，不适用于当前PC或RK协议，不作为测试入口。

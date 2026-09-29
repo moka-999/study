@@ -2,15 +2,15 @@
  * PC-MCU TCP字节流解析状态机：状态 -> 字节处理函数查表。
  *
  * TCP只保证字节顺序，不保证一次recv()对应一个协议帧。本模块逐字节收集
- * 固定18字节头和JSON正文，并在头字段刚到齐时尽早检查Length/Version/Flag/
- * ServiceID。
+ * 固定18字节头和JSON正文。帧头前缀不可能满足Length/Version/Flag/ServiceID
+ * 时逐字节丢弃并重新寻找；完整头通过后只按声明长度收正文，不扫描正文内部。
  * 它只负责传输层组帧，不解析JSON字段，也不处理CommandID业务语义。
  * 状态表在pc_state_machine.c；业务命令表在pc_dispatch.c，两者互相独立。
  *
  * 状态转移：
  *   HEADER -> BODY -> FRAME_READY
  *      |        |          |
- *      +--------+--------> ERROR
+ *      +--------+--------> ERROR（恢复超限或调用状态错误）
  *
  * FRAME_READY后调用pc_sm_get_frame()取得借用视图；处理完成后调用reset，
  * 再继续喂入同一次recv中剩余的字节，即可处理半包、粘包和连续多帧。
@@ -21,15 +21,18 @@
 #include "pc_protocol.h"
 #include <stdint.h>
 
+/* 两次完整帧消费之间最多丢弃4KiB垃圾；超过后关闭连接，避免无限扫描。 */
+#define PC_SM_MAX_DISCARDED_BYTES 4096U
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef enum {
-    PC_SM_STATE_HEADER = 0,   /* 正在收集和校验18字节固定头。 */
+    PC_SM_STATE_HEADER = 0,   /* 收集固定头；非法前缀有界丢弃，保留可能的正常帧。 */
     PC_SM_STATE_BODY,         /* 固定头有效，正在收集JSON正文。 */
     PC_SM_STATE_FRAME_READY,  /* 完整PDU已收齐，等待上层取帧。 */
-    PC_SM_STATE_ERROR,        /* 当前连接已失步，上层应关闭socket。 */
+    PC_SM_STATE_ERROR,        /* 恢复超限或调用错误，上层应关闭socket。 */
     PC_SM_STATE_COUNT,        /* 状态表边界，不是可运行状态；新增状态放在它之前。 */
 } pc_sm_state_t;
 
@@ -40,6 +43,7 @@ typedef enum {
     PC_SM_ERROR_VERSION,  /* Version不是当前固定值1。 */
     PC_SM_ERROR_FLAG,     /* Flag不是当前固定JSON标志8。 */
     PC_SM_ERROR_SERVICE_ID, /* ServiceID不是初版固定值0。 */
+    PC_SM_ERROR_RECOVERY_LIMIT, /* 累计垃圾超过恢复上限，不再继续扫描。 */
 } pc_sm_error_t;
 
 typedef enum {
@@ -53,6 +57,7 @@ typedef struct {
     uint8_t buffer[PC_PROTOCOL_MAX_PDU];  /* 当前PDU，固定4KiB且不动态分配。 */
     uint32_t received;                    /* 已写入buffer的字节数。 */
     uint32_t expected_length;             /* 从头部Length解出的完整PDU长度。 */
+    uint32_t discarded_bytes;             /* 本次恢复已丢弃的字节数；reset后清零。 */
     pc_sm_error_t error;                  /* 最近一次致命错误，reset前保留。 */
 } pc_sm_t;
 
@@ -64,7 +69,7 @@ typedef struct {
 void pc_sm_init(pc_sm_t *sm);
 
 /**
- * @brief 清除收帧计数和错误，准备接收下一帧。
+ * @brief 清除收帧计数、垃圾累计量和错误，准备接收下一帧。
  * @param[in,out] sm 状态机；NULL时不操作。
  * @note 不擦除buffer；有效范围由计数隔离。此前借用的帧视图应停止使用。
  */
@@ -74,9 +79,11 @@ void pc_sm_reset(pc_sm_t *sm);
  * @brief 消费一个PC TCP字节，按头部长度收齐PDU。
  * @param[in,out] sm 已初始化且由同一接收任务串行访问的状态机。
  * @param[in] byte 下一个接收字节。
- * @return MORE继续接收；FRAME_READY可取帧；ERROR参数、状态或帧头错误。
+ * @return MORE继续接收/恢复；FRAME_READY可取帧；ERROR参数、状态或恢复超限。
  * @note FRAME_READY后先处理帧再reset；ERROR由TCP任务关闭连接。两个状态下
- *       继续喂入会返回状态错误。仅校验帧边界和固定字段，不验证JSON正文。
+ *       继续喂入会返回状态错误。头部垃圾最多丢弃PC_SM_MAX_DISCARDED_BYTES，
+ *       不需要额外reset；半帧超时仍由TCP任务负责。仅校验帧边界和固定字段，
+ *       JSON是否合法由分发层判定，禁止未校验就执行命令。
  */
 pc_sm_feed_result_t pc_sm_feed(pc_sm_t *sm, uint8_t byte);
 

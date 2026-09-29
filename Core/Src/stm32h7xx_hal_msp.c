@@ -135,7 +135,7 @@ void HAL_ETH_MspInit(ETH_HandleTypeDef *heth)
 
   /* ── PCF8574 初始化（I2C IO扩展芯片，控制PHY硬件复位） ── */
   {
-    uint8_t pcf_ret = pcf8574_init();
+    int pcf_ret = pcf8574_init();
 
     if (pcf_ret != 0) {
       /* ★ PCF8574 无应答 — PHY 复位失败 ★
@@ -150,9 +150,9 @@ void HAL_ETH_MspInit(ETH_HandleTypeDef *heth)
     }
 
     /* PCF8574 OK — 执行 PHY 硬件复位时序 */
-    pcf8574_write_bit(ETH_RESET_IO, 0);   /* PHY 复位拉低 */
+    if (pcf8574_write_bit(ETH_RESET_IO, 0U) != 0) Error_Handler(); /* PHY复位拉低。 */
     HAL_Delay(100);
-    pcf8574_write_bit(ETH_RESET_IO, 1);   /* PHY 释放复位 */
+    if (pcf8574_write_bit(ETH_RESET_IO, 1U) != 0) Error_Handler(); /* PHY释放复位。 */
     HAL_Delay(100);
 
     /* 验证: 读回 P7 确认是高电平 */

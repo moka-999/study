@@ -14,12 +14,13 @@ MAX_PACKAGE = 2097152
 MAX_BLOCK = 3000
 MAX_BASE64 = 4 * ((MAX_BLOCK + 2) // 3)
 FIELDS = {
-    "begin": {"action", "packageId", "packageSize"},
-    "write": {"action", "packageId", "offset", "data"},
-    "finish": {"action", "packageId"},
-    "query": {"action"},
-    "cancel": {"action", "packageId"},
+    "mcu_begin": {"action", "packageId", "packageSize"},
+    "mcu_write": {"action", "packageId", "offset", "data"},
+    "mcu_finish": {"action", "packageId"},
+    "mcu_query": {"action"},
+    "mcu_cancel": {"action", "packageId"},
 }
+RESERVED_RK_ACTIONS = {"rk_begin", "rk_write", "rk_finish", "rk_query", "rk_cancel"}
 
 
 def unique_object(pairs):
@@ -37,7 +38,7 @@ def request_valid(body):
     action = body.get("action")
     if not isinstance(action, str) or action not in FIELDS:
         return False
-    allowed = FIELDS[action] | ({"packageId"} if action == "query" else set())
+    allowed = FIELDS[action] | ({"packageId"} if action == "mcu_query" else set())
     if not FIELDS[action] <= body.keys() or not body.keys() <= allowed:
         return False
     if "packageId" in body and (
@@ -45,10 +46,10 @@ def request_valid(body):
         or re.fullmatch(r"[0-9A-F]{8}", body["packageId"]) is None
     ):
         return False
-    if action == "begin":
+    if action == "mcu_begin":
         value = body["packageSize"]
         return type(value) is int and 116 <= value <= MAX_PACKAGE
-    if action == "write":
+    if action == "mcu_write":
         offset, encoded = body["offset"], body["data"]
         if type(offset) is not int or not 0 <= offset < MAX_PACKAGE:
             return False
@@ -80,7 +81,11 @@ def main():
             assert isinstance(body, dict), name
             if "action" not in body:
                 continue
-            if "status" not in body:
+            if body["action"] in RESERVED_RK_ACTIONS:
+                # RK只保留名称及拒绝响应；下载包字段尚未定义，不套用MCU包体。
+                assert body == {"action": body["action"], "requestCommandId": 0x0901,
+                                "status": "failed", "errorCode": "notSupported"}, (name, body)
+            elif "status" not in body:
                 assert request_valid(body), (name, body)
             packet = frame(0x0901, 1, body)
             assert len(packet) <= 4096, name
@@ -90,15 +95,16 @@ def main():
 
     block = (bytes(range(256)) * 12)[:MAX_BLOCK]
     encoded = base64.b64encode(block).decode("ascii")
-    write = {"action": "write", "packageId": "FFFFFFFF", "offset": MAX_PACKAGE - MAX_BLOCK, "data": encoded}
+    write = {"action": "mcu_write", "packageId": "FFFFFFFF", "offset": MAX_PACKAGE - MAX_BLOCK, "data": encoded}
     assert len(encoded) == 4000 and request_valid(write)
     packet = frame(0x0901, 0xFFFFFFFF, write)
     assert HEADER.unpack(packet[:18]) == (len(packet), 1, 8, 0, 0x0901, 0xFFFFFFFF, 0)
-    assert len(packet) == 4086
+    assert len(packet) == 4090
+    assert len(frame(0x0901, 0, {**write, "offset": 0xFFFFFFFF})) == 4093
     assert base64.b64decode(json.loads(packet[18:])["data"]) == block
     assert len(frame(0x0901, 0, write)) == len(packet)
-    assert request_valid({"action": "query", "packageId": "00000000"})
-    assert request_valid({"action": "begin", "packageId": "FFFFFFFF", "packageSize": MAX_PACKAGE})
+    assert request_valid({"action": "mcu_query", "packageId": "00000000"})
+    assert request_valid({"action": "mcu_begin", "packageId": "FFFFFFFF", "packageSize": MAX_PACKAGE})
 
     # 以下是字段校验反例；不以Python模型代替C下载状态机测试。
     invalid = [
@@ -111,16 +117,17 @@ def main():
     ] + [
         {**write, "packageId": value} for value in (None, 123, "5a1b2c3d", "0x12345678", "123456789")
     ] + [
-        {"action": "begin", "packageId": "12345678", "packageSize": value}
+        {"action": "mcu_begin", "packageId": "12345678", "packageSize": value}
         for value in (True, 115, MAX_PACKAGE + 1, "1000", 1000.5)
     ] + [
-        {"action": "finish"}, {**write, "slot": "A2"}, {"action": "force"},
-        {"action": []}, {"action": "query", "address": 0x08000000},
-    ]
+        {"action": "mcu_finish"}, {**write, "slot": "A2"}, {"action": "force"},
+        {"action": []}, {"action": "mcu_query", "address": 0x08000000},
+    ] + [{"action": action} for action in
+         ("begin", "write", "finish", "query", "cancel", *sorted(RESERVED_RK_ACTIONS))]
     for body in invalid:
         assert not request_valid(body), body
     try:
-        json.loads('{"action":"query","action":"finish"}', object_pairs_hook=unique_object)
+        json.loads('{"action":"mcu_query","action":"mcu_finish"}', object_pairs_hook=unique_object)
     except ValueError:
         pass
     else:
@@ -128,7 +135,7 @@ def main():
 
     # 最大查询组合，包括实际版本、待安装包和下载进度，应可复用现有384字节响应缓冲。
     status = {
-        "action": "query", "packageId": "FFFFFFFF", "status": "completed",
+        "action": "mcu_query", "packageId": "FFFFFFFF", "status": "completed",
         "state": "commitUnknown", "activePackageId": "FFFFFFFF",
         "firmwareVersion": "65535.65535.65535", "confirmed": False,
         "download": {"packageId": "FFFFFFFF", "receivedBytes": MAX_PACKAGE, "totalBytes": MAX_PACKAGE},
@@ -146,6 +153,9 @@ def main():
     assert "bytes > OTA_DOWNLOAD_BLOCK_BYTES" in source
     assert "data[OTA_DOWNLOAD_BLOCK_BYTES]" in protocol
     assert '"blockSize", OTA_DOWNLOAD_BLOCK_BYTES' in protocol
+    for action in (*FIELDS, *RESERVED_RK_ACTIONS):
+        assert f'"{action}"' in protocol
+    assert protocol.index("is_reserved_rk_action(name->valuestring)") < protocol.index("ota_download_poll();")
     assert "0x00200000" in (ROOT / "App/ota/ota_install.h").read_text(encoding="utf-8")
     for name in ("pc_ota_protocol.md", "pc_tcp_protocol_spec.md"):
         text = (ROOT / "doc" / name).read_text(encoding="utf-8")

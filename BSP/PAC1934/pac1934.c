@@ -1,171 +1,212 @@
 /*
- * ===================================================================
- * PAC1934T 驱动实现 (Microchip DS20005850)
- * ===================================================================
- * I2C 8-bit 寄存器寻址 (HAL_I2C_Mem_Read/Write), 7-bit 设备地址。
- * 换算均为 unipolar 模式 (默认), 数据为大端 (MSB first)。
- * ===================================================================
+ * PAC1934同步驱动：单极性、连续采样；I2C地址为未左移的7位地址。
+ * 只负责器件配置、数据有效性及单位换算，不定义RK状态或IDD业务窗口。
  */
 #include "pac1934.h"
+#include <string.h>
 
-/* ── 寄存器读/写 ── */
-static int _read(pac1934_t *d, uint8_t reg, uint8_t *buf, uint16_t len)
+/* 通信/配置不可信时清除就绪掩码；量程上沿只拒绝本次数据，不重置器件。 */
+static int pac_fail(pac1934_t *d, pac1934_error_t error)
 {
-    if (!d || !d->bus || !d->bus->read_bytes) return IF_ERR;
-    return d->bus->read_bytes(d->bus, d->addr, reg, buf, len);
+    if (d) {
+        d->last_error = error;
+        if (error == PAC1934_ERROR_IO || error == PAC1934_ERROR_ID ||
+            error == PAC1934_ERROR_CONFIG || error == PAC1934_ERROR_DATA)
+            d->active_mask = 0U;
+    }
+    return IF_ERR;
 }
 
-static int _write(pac1934_t *d, uint8_t reg, uint8_t val)
+static int read_bytes(pac1934_t *d, uint8_t reg, uint8_t *data, uint16_t size)
 {
-    if (!d || !d->bus || !d->bus->write_reg) return IF_ERR;
-    return d->bus->write_reg(d->bus, d->addr, reg, val);
+    if (!d->bus || !d->bus->read_bytes ||
+        d->bus->read_bytes(d->bus, d->addr, reg, data, size) != IF_OK)
+        return pac_fail(d, PAC1934_ERROR_IO);
+    return IF_OK;
 }
 
-/* ── Send Byte 命令 (REFRESH 系列: 只发命令字节, 无数据, 不触发指针递增写) ── */
-static int _cmd(pac1934_t *d, uint8_t cmd)
+static int write_register(pac1934_t *d, uint8_t reg, uint8_t value)
 {
-    if (!d || !d->bus || !d->bus->write_cmd) return IF_ERR;
-    return d->bus->write_cmd(d->bus, d->addr, cmd);
+    if (!d->bus || !d->bus->write_reg ||
+        d->bus->write_reg(d->bus, d->addr, reg, value) != IF_OK)
+        return pac_fail(d, PAC1934_ERROR_IO);
+    return IF_OK;
 }
 
-/* ── 初始化 ── */
+/* REFRESH系列是Send Byte命令，不附加数据字节。 */
+static int send_command(pac1934_t *d, uint8_t command)
+{
+    if (!d->bus || !d->bus->write_cmd ||
+        d->bus->write_cmd(d->bus, d->addr, command) != IF_OK)
+        return pac_fail(d, PAC1934_ERROR_IO);
+    return IF_OK;
+}
+
+/* 软件bit0..3对应CH1..4，但器件的关闭位按bit7..4反向排列。 */
+static uint8_t channel_disable_bits(uint8_t enabled)
+{
+    uint8_t disabled = 0U;
+    for (uint8_t ch = 0U; ch < 4U; ++ch)
+        if (!(enabled & (1U << ch))) disabled |= (uint8_t)(0x80U >> ch);
+    return disabled;
+}
+
+/* ACT核对实际配置；LAT核对本次结果所属配置，不能只验证写入ACK。 */
+static int check_configuration(pac1934_t *d, uint8_t enabled,
+                               uint8_t rate, uint8_t first_register)
+{
+    uint8_t config[3];
+    if (read_bytes(d, first_register, config, sizeof(config)) != IF_OK) return IF_ERR;
+    /* CTRL的bit0是累加器溢出状态，不影响本驱动的瞬时读数，也不在此清除。 */
+    if ((config[0] & 0xFEU) != PAC1934_CTRL_SAMPLE_RATE(rate) ||
+        config[1] != channel_disable_bits(enabled) || config[2] != 0U)
+        return pac_fail(d, PAC1934_ERROR_CONFIG);
+    return IF_OK;
+}
+
 int pac1934_init(pac1934_t *d, uint8_t ch_mask, uint8_t sample_rate)
 {
-    uint8_t product_id = 0;
-    uint8_t manufacturer_id = 0;
+    uint8_t product, manufacturer;
+    static const uint8_t conversion_ms[4] = {1U, 4U, 16U, 125U};
+    if (!d) return IF_ERR;
+    d->active_mask = 0U;
+    d->last_error = PAC1934_ERROR_NONE;
+    if (!d->wait_ms || d->addr > 0x7FU || ch_mask == 0U ||
+        (ch_mask & ~PAC1934_CH_MASK_ALL) != 0U || sample_rate > 3U)
+        return pac_fail(d, PAC1934_ERROR_PARAM);
+    /* 通用兼容值不代表B1贴装值；正式板级层始终显式传入各板电阻参数。 */
+    if (d->rsense_uohm == 0U) d->rsense_uohm = 10000U;
 
-    if (!d || ch_mask == 0U || (ch_mask & ~PAC1934_CH_MASK_ALL) != 0U ||
-        sample_rate > 3U)
-        return IF_ERR;
-    if (d->rsense_uohm == 0) d->rsense_uohm = 10000;  /* 默认 0.01Ω */
+    /* 覆盖刚上电/退出PWRDN后的20ms器件启动要求，不是DDR稳定窗口。 */
+    d->wait_ms(20U);
+    if (read_bytes(d, PAC1934_REG_PRODUCT_ID, &product, 1U) != IF_OK ||
+        read_bytes(d, PAC1934_REG_MANUF_ID, &manufacturer, 1U) != IF_OK) return IF_ERR;
+    if (product != PAC1934_PRODUCT_ID || manufacturer != PAC1934_MANUF_ID)
+        return pac_fail(d, PAC1934_ERROR_ID);
 
-    /* 同时校验产品和厂商ID，避免总线浮空值被误判成器件在线。 */
-    if (_read(d, PAC1934_REG_PRODUCT_ID, &product_id, 1) != IF_OK ||
-        _read(d, PAC1934_REG_MANUF_ID, &manufacturer_id, 1) != IF_OK)
-        return IF_ERR;
-    if (product_id != PAC1934_PRODUCT_ID || manufacturer_id != PAC1934_MANUF_ID)
-        return IF_ERR;
+    if (write_register(d, PAC1934_REG_CHANNEL_DIS, channel_disable_bits(ch_mask)) != IF_OK ||
+        write_register(d, PAC1934_REG_NEG_PWR, 0U) != IF_OK ||
+        write_register(d, PAC1934_REG_CTRL, PAC1934_CTRL_SAMPLE_RATE(sample_rate)) != IF_OK ||
+        send_command(d, PAC1934_REG_REFRESH) != IF_OK) return IF_ERR;
 
-    /* 0x1C的CH1_OFF..CH4_OFF位于bit7..4；bit3..1属于SMBus控制。 */
-    uint8_t dis = PAC1934_CH_DISABLE_BITS(ch_mask);
-    if (_write(d, PAC1934_REG_CHANNEL_DIS, dis) != IF_OK)
+    /*
+     * 旧配置可能为8SPS，新速率须等旧转换周期结束，最长125ms。
+     * 一次保守等待126ms再回读，避免重初始化时将合法切换误判为失败。
+     */
+    d->wait_ms(126U);
+    if (check_configuration(d, ch_mask, sample_rate, PAC1934_REG_CTRL_ACT) != IF_OK)
         return IF_ERR;
-
-    /* 采样率 (01h) + 连续扫描模式 (SLEEP=0, SING=0) */
-    uint8_t ctrl = PAC1934_CTRL_SAMPLE_RATE(sample_rate);
-    if (_write(d, PAC1934_REG_CTRL, ctrl) != IF_OK)
-        return IF_ERR;
-
-    /* 启动转换 (00h REFRESH 命令, Send Byte: 复位累加器并开始连续采样) */
-    if (_cmd(d, PAC1934_REG_REFRESH) != IF_OK)
-        return IF_ERR;
-
+    /* 再给新配置一个完整转换周期；首次读数仍由读取API刷新锁存。 */
+    d->wait_ms(conversion_ms[sample_rate]);
+    d->sample_rate = sample_rate;
     d->active_mask = ch_mask;
     return IF_OK;
 }
 
-/* ── 读 2 字节大端 → uint16 ── */
-static uint16_t _u16(const uint8_t *b)
-{ return (uint16_t)((b[0] << 8) | b[1]); }
-
-/* ── 读 4 字节大端 → uint32 ── */
-static uint32_t _u32(const uint8_t *b)
-{ return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
-        ((uint32_t)b[2] << 8) | b[3]; }
-
-/* ── 读单通道 (ch=0..3) ── */
-int pac1934_read_ch(pac1934_t *d, uint8_t ch, pac1934_chan_t *out)
+static uint16_t read_be16(const uint8_t *data)
 {
-    uint8_t buf[4];
+    return (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+}
 
-    if (!d || !out || ch > 3 || !(d->active_mask & (1U << ch))) return IF_ERR;
+static uint32_t read_be32(const uint8_t *data)
+{
+    return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
+           ((uint32_t)data[2] << 8) | data[3];
+}
 
-    /* VBUS 结果 (07h+ch*1, 2B) */
-    if (_read(d, PAC1934_REG_VBUS1 + ch, buf, 2) != IF_OK) return IF_ERR;
-    out->vbus = _u16(buf);
-
-    /* VSENSE 结果 (0Bh+ch*1, 2B) */
-    if (_read(d, PAC1934_REG_VSENSE1 + ch, buf, 2) != IF_OK) return IF_ERR;
-    out->vsense = _u16(buf);
-
-    /* VPOWER 结果 (17h+ch*1, 4B) */
-    if (_read(d, PAC1934_REG_VPOWER1 + ch, buf, 4) != IF_OK) return IF_ERR;
-    out->vpower = _u32(buf);
-
+/* 调用方已验证配置与通道；局部缓冲保证任一步失败都不交付半份结果。 */
+static int read_channel(pac1934_t *d, uint8_t ch, pac1934_chan_t *out)
+{
+    uint8_t bytes[4];
+    pac1934_chan_t value = {0};
+    if (read_bytes(d, PAC1934_REG_VBUS1 + ch, bytes, 2U) != IF_OK) return IF_ERR;
+    value.vbus = read_be16(bytes);
+    if (read_bytes(d, PAC1934_REG_VSENSE1 + ch, bytes, 2U) != IF_OK) return IF_ERR;
+    value.vsense = read_be16(bytes);
+    if (read_bytes(d, PAC1934_REG_VPOWER1 + ch, bytes, 4U) != IF_OK) return IF_ERR;
+    uint32_t wire_power = read_be32(bytes);
+    /* 有效功率码在bit31..4；bit3..0按手册必须为0，不能把总线坏值当测量值。 */
+    if ((wire_power & 0x0FU) != 0U) return pac_fail(d, PAC1934_ERROR_DATA);
+    value.vpower = wire_power >> 4;
+    /* 只报告达到编码上沿/疑似饱和，不据此宣判DDR FAIL。 */
+    if (value.vbus == UINT16_MAX || value.vsense == UINT16_MAX ||
+        value.vpower == 0x0FFFFFFFU) return pac_fail(d, PAC1934_ERROR_RANGE);
+    *out = value;
     return IF_OK;
 }
 
-/* REFRESH_V后由本函数调用wait_ms等待1ms，再逐通道读取。 */
-int pac1934_read_all(pac1934_t *d, pac1934_chan_t *ch)
+static int check_sample_configuration(pac1934_t *d)
 {
-    if (!d || !ch || !d->wait_ms || d->active_mask == 0U) return IF_ERR;
+    if (check_configuration(d, d->active_mask, d->sample_rate,
+                            PAC1934_REG_CTRL_ACT) != IF_OK) return IF_ERR;
+    return check_configuration(d, d->active_mask, d->sample_rate, PAC1934_REG_CTRL_LAT);
+}
 
-    /* 刷新 (1Fh REFRESH_V 命令, Send Byte: 锁存最新转换结果, 不复位累加器) */
-    if (_cmd(d, PAC1934_REG_REFRESH_V) != IF_OK)
-        return IF_ERR;
+int pac1934_read_ch(pac1934_t *d, uint8_t ch, pac1934_chan_t *out)
+{
+    if (!d || !out || ch >= 4U || !(d->active_mask & (1U << ch)))
+        return pac_fail(d, PAC1934_ERROR_PARAM);
+    d->last_error = PAC1934_ERROR_NONE;
+    /* 本接口不发REFRESH；调用方必须已刷新并完成最短等待，且持有事务锁。 */
+    if (check_sample_configuration(d) != IF_OK) return IF_ERR;
+    return read_channel(d, ch, out);
+}
 
-    /* Microchip要求所有结果寄存器在REFRESH_V后等待1ms才稳定。 */
+int pac1934_read_all(pac1934_t *d, pac1934_chan_t *out)
+{
+    pac1934_chan_t values[4] = {0};
+    if (!d || !out || !d->wait_ms || d->active_mask == 0U ||
+        (d->active_mask & ~PAC1934_CH_MASK_ALL) != 0U || d->sample_rate > 3U)
+        return pac_fail(d, PAC1934_ERROR_PARAM);
+    d->last_error = PAC1934_ERROR_NONE;
+    if (send_command(d, PAC1934_REG_REFRESH_V) != IF_OK) return IF_ERR;
     d->wait_ms(1U);
-
-    /*
-     * 禁用通道时PAC1934默认会让自动递增指针跳过对应寄存器。逐通道读取
-     * 可保持通道号与结果一一对应，也避免把CH4后的寄存器误当成CH4数据。
-     */
-    for (int i = 0; i < 4; i++) {
-        ch[i].vbus = 0U;
-        ch[i].vsense = 0U;
-        ch[i].vpower = 0U;
-        if (!(d->active_mask & (1U << i))) continue;
-        if (pac1934_read_ch(d, (uint8_t)i, &ch[i]) != IF_OK) return IF_ERR;
-    }
-
+    if (check_sample_configuration(d) != IF_OK) return IF_ERR;
+    /* 不依赖跨通道自动递增，避免禁用通道造成寄存器指针跳跃。 */
+    for (uint8_t ch = 0U; ch < 4U; ++ch)
+        if ((d->active_mask & (1U << ch)) && read_channel(d, ch, &values[ch]) != IF_OK)
+            return IF_ERR;
+    memcpy(out, values, sizeof(values));
     return IF_OK;
 }
 
 int pac1934_measure_all(pac1934_t *d, pac1934_measurement_t *out)
 {
     pac1934_chan_t raw[4];
-    if (!d || !out || pac1934_read_all(d, raw) != IF_OK) return IF_ERR;
-
-    for (uint8_t ch = 0U; ch < 4U; ch++) {
-        out[ch].vbus_mv = 0U;
-        out[ch].current_ma = 0U;
-        out[ch].power_mw = 0U;
+    pac1934_measurement_t values[4] = {0};
+    if (!d || !out || d->rsense_uohm == 0U) return pac_fail(d, PAC1934_ERROR_PARAM);
+    if (pac1934_read_all(d, raw) != IF_OK) return IF_ERR;
+    for (uint8_t ch = 0U; ch < 4U; ++ch) {
         if (!(d->active_mask & (1U << ch))) continue;
-        out[ch].vbus_mv = pac1934_vbus_mv(raw[ch].vbus);
-        out[ch].current_ma = pac1934_current_ma(raw[ch].vsense,
-                                                d->rsense_uohm);
-        out[ch].power_mw = pac1934_power_mw(raw[ch].vpower,
-                                            d->rsense_uohm);
+        values[ch].vbus_mv = pac1934_vbus_mv(raw[ch].vbus);
+        values[ch].current_ua = pac1934_current_ua(raw[ch].vsense, d->rsense_uohm);
+        values[ch].current_ma = (uint32_t)(values[ch].current_ua / 1000U);
+        values[ch].power_mw = pac1934_power_mw(raw[ch].vpower, d->rsense_uohm);
     }
+    memcpy(out, values, sizeof(values));
     return IF_OK;
 }
 
-/* ── 换算 (unipolar) ── */
-uint32_t pac1934_vbus_mv(uint16_t vbus_reg)
+uint32_t pac1934_vbus_mv(uint16_t raw)
 {
-    /* Vbus = VBUS_reg × 32V / 2^16  → mV = VBUS_reg × 32000 / 65536 */
-    return (uint32_t)vbus_reg * 32000u / 65536u;
+    return (uint32_t)raw * 32000U / 65536U;
 }
 
-uint32_t pac1934_current_ma(uint16_t vsense_reg, uint32_t rsense_uohm)
+uint64_t pac1934_current_ua(uint16_t raw, uint32_t rsense_uohm)
 {
-    /* I = FSC × VSENSE_reg / 2^16,  FSC = 100mV/Rsense
-     * I_mA = (0.1V/rsense) × VSENSE_reg/65536 × 1000
-     *      = 1e8 / rsense_uohm × VSENSE_reg / 65536
-     * 0.01Ω(10000µΩ): 满量程 10A=10000mA @ VSENSE_reg=65536 ✓ */
+    /* 单极性100mV满量程；64位保留所有非零微欧参数的计算范围。 */
     if (rsense_uohm == 0U) return 0U;
-    uint64_t v = (uint64_t)vsense_reg * 100000000u / rsense_uohm;
-    return (uint32_t)(v / 65536u);
+    return (uint64_t)raw * UINT64_C(100000000000) / rsense_uohm / 65536U;
 }
 
-uint32_t pac1934_power_mw(uint32_t vpower_reg, uint32_t rsense_uohm)
+uint32_t pac1934_current_ma(uint16_t raw, uint32_t rsense_uohm)
 {
-    /* P = PowerFSR × VPOWER_reg / 2^28
-     * PowerFSR = (0.1V/Rsense) × 32V = 3.2/rsense_ohm W
-     * P_mW = 3.2e9/rsense_uohm × VPOWER_reg / 2^28
-     * 0.01Ω(10000µΩ): 满量程 320W=320000mW @ VPOWER_reg=2^28 ✓ */
-    if (rsense_uohm == 0U) return 0U;
-    uint64_t v = (uint64_t)vpower_reg * 3200000000u / rsense_uohm;
-    return (uint32_t)(v / 268435456u);   /* 2^28 */
+    return (uint32_t)(pac1934_current_ua(raw, rsense_uohm) / 1000U);
+}
+
+uint32_t pac1934_power_mw(uint32_t raw, uint32_t rsense_uohm)
+{
+    /* raw是已经右移对齐的28位功率码，不是线上四字节值。 */
+    if (rsense_uohm == 0U || raw > 0x0FFFFFFFU) return 0U;
+    return (uint32_t)((uint64_t)raw * UINT64_C(3200000000) / rsense_uohm / 268435456U);
 }

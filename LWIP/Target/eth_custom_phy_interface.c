@@ -64,7 +64,7 @@
   */
 int32_t  USER_PHY_RegisterBusIO(user_phy_Object_t *pObj, user_phy_IOCtx_t *ioctx)
 {
-  if(!pObj || !ioctx->ReadReg || !ioctx->WriteReg || !ioctx->GetTick)
+  if(!pObj || !ioctx || !ioctx->ReadReg || !ioctx->WriteReg || !ioctx->GetTick)
   {
     return USER_PHY_STATUS_ERROR;
   }
@@ -78,63 +78,26 @@ int32_t  USER_PHY_RegisterBusIO(user_phy_Object_t *pObj, user_phy_IOCtx_t *ioctx
   return USER_PHY_STATUS_OK;
 }
 
+/* 扫描0..31，仅接受YT8512C/H完整ID，不把浮空总线当作器件。 */
 int32_t USER_PHY_Init(user_phy_Object_t *pObj)
 {
-  uint32_t regvalue = 0, addr = 0;
-  int32_t status = USER_PHY_STATUS_OK;
+  if (!pObj || !pObj->IO.ReadReg || !pObj->IO.WriteReg || !pObj->IO.GetTick)
+    return USER_PHY_STATUS_ERROR;
+  if (pObj->Is_Initialized) return USER_PHY_STATUS_OK;
+  if (pObj->IO.Init && pObj->IO.Init() < 0) return USER_PHY_STATUS_ERROR;
 
-  /* USER CODE BEGIN PHY_INIT_0 */
-
-  /* USER CODE END PHY_INIT_0 */
-
-  if(pObj->Is_Initialized == 0)
-  {
-    if(pObj->IO.Init != 0)
-    {
-      /* GPIO and Clocks initialization */
-      pObj->IO.Init();
-    }
-
-    /* for later check */
-    pObj->DevAddr = USER_PHY_MAX_DEV_ADDR + 1;
-
-    /* Get the device address from special mode register */
-    for(addr = 0; addr <= USER_PHY_MAX_DEV_ADDR; addr ++)
-    {
-      if(pObj->IO.ReadReg(addr, USER_PHY_PHYI1R, &regvalue) < 0)
-      {
-        status = USER_PHY_STATUS_READ_ERROR;
-        /* Can't read from this device address
-           continue with next address */
-        continue;
-      }
-
-      if(regvalue != USER_PHY_PHYI1R_OUI_3_18)
-      {
-        pObj->DevAddr = addr;
-        status = USER_PHY_STATUS_OK;
-        break;
-      }
-    }
-
-    if(pObj->DevAddr > USER_PHY_MAX_DEV_ADDR)
-    {
-      status = USER_PHY_STATUS_ADDRESS_ERROR;
-    }
-
-    /* if device address is matched */
-    if(status == USER_PHY_STATUS_OK)
-    {
-
-  /* USER CODE BEGIN PHY_INIT_1 */
-
-  /* USER CODE END PHY_INIT_1 */
-
-      pObj->Is_Initialized = 1;
+  pObj->DevAddr = USER_PHY_MAX_DEV_ADDR + 1U;
+  for (uint32_t addr = 0U; addr <= USER_PHY_MAX_DEV_ADDR; ++addr) {
+    uint32_t id1, id2;
+    if (pObj->IO.ReadReg(addr, USER_PHY_PHYI1R, &id1) < 0 ||
+        pObj->IO.ReadReg(addr, USER_PHY_PHYI2R, &id2) < 0) continue;
+    if (id1 == USER_PHY_EXPECTED_ID1 && id2 == USER_PHY_EXPECTED_ID2) {
+      pObj->DevAddr = addr;
+      pObj->Is_Initialized = 1U;
+      return USER_PHY_STATUS_OK;
     }
   }
-
-  return status;
+  return USER_PHY_STATUS_ADDRESS_ERROR;
 }
 
 /**
@@ -191,7 +154,7 @@ int32_t USER_PHY_SoftwareReset(user_phy_Object_t *pObj)
   /* Wait until reset bit is cleared or timeout */
   while (regvalue & USER_PHY_BCR_SOFT_RESET)
   {
-    if ((pObj->IO.GetTick() - tickstart) > USER_PHY_SW_RESET_TO)
+    if (((uint32_t)pObj->IO.GetTick() - tickstart) > USER_PHY_SW_RESET_TO)
     {
       status = USER_PHY_STATUS_RESET_TIMEOUT;
       break;
@@ -208,176 +171,53 @@ int32_t USER_PHY_SoftwareReset(user_phy_Object_t *pObj)
 }
 
 /**
-  * @brief  Get the link state of USER_PHY device.
-  * @param  pObj: Pointer to device object.
-  * @param  pLinkState: Pointer to link state
-  * @retval USER_PHY_STATUS_LINK_DOWN  if link is down
-  *         USER_PHY_STATUS_AUTONEGO_NOTDONE if Auto nego not completed
-  *         USER_PHY_STATUS_100MBITS_FULLDUPLEX if 100Mb/s FD
-  *         USER_PHY_STATUS_100MBITS_HALFDUPLEX if 100Mb/s HD
-  *         USER_PHY_STATUS_10MBITS_FULLDUPLEX  if 10Mb/s FD
-  *         USER_PHY_STATUS_10MBITS_HALFDUPLEX  if 10Mb/s HD
-  *         USER_PHY_STATUS_READ_ERROR if cannot read register
-  *         USER_PHY_STATUS_WRITE_ERROR if cannot write to register
-  */
+ * @brief 读取已解析的真实速率/双工，不从双方能力广播推测工作模式。
+ * @return 四种10/100M工作模式、未连接/未解析或负值IO错误。
+ */
 int32_t USER_PHY_GetLinkState(user_phy_Object_t *pObj)
 {
-  uint32_t readval = 0;
-
-  /* Read Status register  */
-  if(pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_BSR, &readval) < 0)
-  {
+  uint32_t status;
+  if (!pObj || !pObj->Is_Initialized || !pObj->IO.ReadReg)
+    return USER_PHY_STATUS_ERROR;
+  /* BSR链路位低锁存，读两次排除历史掉线。 */
+  if (pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_BSR, &status) < 0 ||
+      pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_BSR, &status) < 0)
     return USER_PHY_STATUS_READ_ERROR;
-  }
-
-  /* Read Status register again */
-  if(pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_BSR, &readval) < 0)
-  {
+  if ((status & USER_PHY_BSR_LINK_STATUS) == 0U) return USER_PHY_STATUS_LINK_DOWN;
+  if (pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_SPECIFIC_STATUS, &status) < 0)
     return USER_PHY_STATUS_READ_ERROR;
-  }
+  if ((status & USER_PHY_REALTIME_LINK) == 0U) return USER_PHY_STATUS_LINK_DOWN;
+  if ((status & USER_PHY_RESOLVED) == 0U) return USER_PHY_STATUS_AUTONEGO_NOTDONE;
 
-  if((readval & USER_PHY_BSR_LINK_STATUS) == 0)
-  {
-    /* Return Link Down status */
-    return USER_PHY_STATUS_LINK_DOWN;
-  }
-
-  /* Check Auto negotiation */
-  if(pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_BCR, &readval) < 0)
-  {
-    return USER_PHY_STATUS_READ_ERROR;
-  }
-
-  if((readval & USER_PHY_BCR_AUTONEGO_EN) != USER_PHY_BCR_AUTONEGO_EN)
-  {
-    if(((readval & USER_PHY_BCR_SPEED_SELECT) == USER_PHY_BCR_SPEED_SELECT) && ((readval & USER_PHY_BCR_DUPLEX_MODE) == USER_PHY_BCR_DUPLEX_MODE))
-    {
-      return USER_PHY_STATUS_100MBITS_FULLDUPLEX;
-    }
-    else if ((readval & USER_PHY_BCR_SPEED_SELECT) == USER_PHY_BCR_SPEED_SELECT)
-    {
-      return USER_PHY_STATUS_100MBITS_HALFDUPLEX;
-    }
-    else if ((readval & USER_PHY_BCR_DUPLEX_MODE) == USER_PHY_BCR_DUPLEX_MODE)
-    {
-      return USER_PHY_STATUS_10MBITS_FULLDUPLEX;
-    }
-    else
-    {
-      return USER_PHY_STATUS_10MBITS_HALFDUPLEX;
-    }
-  }
-  else /* Auto Nego enabled */
-  {
-    /* Read Basic Status Register (BSR) to check if auto-negotiation is done */
-    if(pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_BSR, &readval) < 0)
-    {
-      return USER_PHY_STATUS_READ_ERROR;
-    }
-
-    if((readval & USER_PHY_BSR_AUTONEGO_CPLT) == 0)
-    {
-      return USER_PHY_STATUS_AUTONEGO_NOTDONE;
-    }
-
-    /* Read Auto-Negotiation Advertisement Register (ANAR) */
-    if(pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_ANAR, &readval) < 0)
-    {
-      return USER_PHY_STATUS_READ_ERROR;
-    }
-    uint16_t anar = (uint16_t)readval;
-
-    /* Read Auto-Negotiation Link Partner Advertisement Register (ANLPAR) */
-    if(pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_ANLPAR, &readval) < 0)
-    {
-      return USER_PHY_STATUS_READ_ERROR;
-    }
-    uint16_t anlpar = (uint16_t)readval;
-
-    /* Calculate common advertised capabilities */
-    uint16_t common_adv = anar & anlpar;
-
-    /* Priority: 100BASE-TX Full Duplex */
-    if((common_adv & USER_PHY_ANLPAR_100BASE_TX_FD) == USER_PHY_ANLPAR_100BASE_TX_FD)
-    {
-      return USER_PHY_STATUS_100MBITS_FULLDUPLEX;
-    }
-    /* Then 100BASE-TX Half Duplex */
-    else if((common_adv & USER_PHY_ANLPAR_100BASE_TX) == USER_PHY_ANLPAR_100BASE_TX)
-    {
-      return USER_PHY_STATUS_100MBITS_HALFDUPLEX;
-    }
-    /* Then 10BASE-T Full Duplex */
-    else if((common_adv & USER_PHY_ANLPAR_10BASE_T_FD) == USER_PHY_ANLPAR_10BASE_T_FD)
-    {
-      return USER_PHY_STATUS_10MBITS_FULLDUPLEX;
-    }
-    /* Otherwise 10BASE-T Half Duplex */
-    else if((common_adv & USER_PHY_ANLPAR_10BASE_T) == USER_PHY_ANLPAR_10BASE_T)
-    {
-      return USER_PHY_STATUS_10MBITS_HALFDUPLEX;
-    }
-    else
-    {
-      /* No common mode detected, link down or error */
-      return USER_PHY_STATUS_LINK_DOWN;
-    }
-  }
+  uint32_t speed = status & USER_PHY_RESOLVED_SPEED;
+  if (speed != 0U && speed != 0x4000U) return USER_PHY_STATUS_ERROR;
+  if (speed == 0x4000U)
+    return (status & USER_PHY_RESOLVED_DUPLEX) ? USER_PHY_STATUS_100MBITS_FULLDUPLEX :
+                                              USER_PHY_STATUS_100MBITS_HALFDUPLEX;
+  return (status & USER_PHY_RESOLVED_DUPLEX) ? USER_PHY_STATUS_10MBITS_FULLDUPLEX :
+                                            USER_PHY_STATUS_10MBITS_HALFDUPLEX;
 }
 
 /**
-  * @brief  Set the link state of USER_PHY device.
-  * @param  pObj: Pointer to device object.
-  * @param  LinkState: link state can be one of the following
-  *         USER_PHY_STATUS_100MBITS_FULLDUPLEX if 100Mb/s FD
-  *         USER_PHY_STATUS_100MBITS_HALFDUPLEX if 100Mb/s HD
-  *         USER_PHY_STATUS_10MBITS_FULLDUPLEX  if 10Mb/s FD
-  *         USER_PHY_STATUS_10MBITS_HALFDUPLEX  if 10Mb/s HD
-  * @retval USER_PHY_STATUS_OK  if OK
-  *         USER_PHY_STATUS_ERROR  if parameter error
-  *         USER_PHY_STATUS_READ_ERROR if cannot read register
-  *         USER_PHY_STATUS_WRITE_ERROR if cannot write to register
-  */
+ * @brief 强制10/100M速率与双工；参数或读取失败时不写PHY。
+ * @param LinkState 仅接受四种USER_PHY_STATUS_xxMBITS_xxDUPLEX。
+ * @return 0成功；负值表示参数、MDIO读取或写入失败。
+ */
 int32_t USER_PHY_SetLinkState(user_phy_Object_t *pObj, uint32_t LinkState)
 {
-  uint32_t bcrvalue = 0;
-  int32_t status = USER_PHY_STATUS_OK;
-
-  if(pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_BCR, &bcrvalue) < 0)
-  {
-    status = USER_PHY_STATUS_READ_ERROR;
-  }
-
-  /* Disable auto-negotiation, speed and duplex bits cleared */
-  bcrvalue &= ~(USER_PHY_BCR_AUTONEGO_EN | USER_PHY_BCR_SPEED_SELECT | USER_PHY_BCR_DUPLEX_MODE);
-
-  if (LinkState == USER_PHY_STATUS_100MBITS_FULLDUPLEX)
-  {
-    bcrvalue |= (USER_PHY_BCR_SPEED_SELECT | USER_PHY_BCR_DUPLEX_MODE);
-  }
-  else if (LinkState == USER_PHY_STATUS_100MBITS_HALFDUPLEX)
-  {
-    bcrvalue |= USER_PHY_BCR_SPEED_SELECT;
-  }
-  else if (LinkState == USER_PHY_STATUS_10MBITS_FULLDUPLEX)
-  {
-    bcrvalue |= USER_PHY_BCR_DUPLEX_MODE;
-  }
-  else if (LinkState == USER_PHY_STATUS_10MBITS_HALFDUPLEX)
-  {
-    /* No bits to set */
-  }
-  else
-  {
-    status = USER_PHY_STATUS_ERROR;
-  }
-
-  if(pObj->IO.WriteReg(pObj->DevAddr, USER_PHY_BCR, bcrvalue) < 0)
-  {
-    status = USER_PHY_STATUS_WRITE_ERROR;
-  }
-
-  return status;
+  uint32_t control;
+  if (!pObj || !pObj->Is_Initialized || !pObj->IO.ReadReg || !pObj->IO.WriteReg ||
+      LinkState < USER_PHY_STATUS_100MBITS_FULLDUPLEX ||
+      LinkState > USER_PHY_STATUS_10MBITS_HALFDUPLEX) return USER_PHY_STATUS_ERROR;
+  if (pObj->IO.ReadReg(pObj->DevAddr, USER_PHY_BCR, &control) < 0)
+    return USER_PHY_STATUS_READ_ERROR;
+  control &= ~(USER_PHY_BCR_AUTONEGO_EN | USER_PHY_BCR_SPEED_SELECT | USER_PHY_BCR_DUPLEX_MODE);
+  if (LinkState == USER_PHY_STATUS_100MBITS_FULLDUPLEX ||
+      LinkState == USER_PHY_STATUS_100MBITS_HALFDUPLEX) control |= USER_PHY_BCR_SPEED_SELECT;
+  if (LinkState == USER_PHY_STATUS_100MBITS_FULLDUPLEX ||
+      LinkState == USER_PHY_STATUS_10MBITS_FULLDUPLEX) control |= USER_PHY_BCR_DUPLEX_MODE;
+  return pObj->IO.WriteReg(pObj->DevAddr, USER_PHY_BCR, control) < 0 ?
+         USER_PHY_STATUS_WRITE_ERROR : USER_PHY_STATUS_OK;
 }
 
 /**

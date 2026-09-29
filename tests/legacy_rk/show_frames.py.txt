@@ -139,3 +139,4 @@ if __name__ == '__main__':
          ['Len=1024 (最大值), 总帧长=1040B (TLV_FRAME_MAX)',
           'CmdID=0x0024 (idd_end), 传输 1018B IDD 测试结果',
           '超过此限: C 侧 tlv_pack_cmd() 返回 0 拒绝打包'])
+# 已停用的历史参考，不适用于当前PC或RK协议，不作为测试入口。

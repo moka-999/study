@@ -15,7 +15,9 @@
  *   0x00000000 - 0x0000FFFF  元数据区（版本 A/B、FRU A/B、后续扩展）
  *   0x00010000 - 0x0020FFFF  OTA下载区（2 MiB，完整.ota包）
  *   0x00210000 - 0x0040FFFF  稳定版包（2 MiB，只由授权维护/量产写入）
- *   0x00410000 - 0x01FEFFFF  预留数据区（日志/标定等用途尚未冻结）
+ *   0x00410000 - 0x00C0FFFF  RK固件空间A（8 MiB，仅预留）
+ *   0x00C10000 - 0x0140FFFF  RK固件空间B（8 MiB，仅预留）
+ *   0x01410000 - 0x01FEFFFF  预留数据区（日志/标定等用途尚未冻结）
  *   0x01FF0000 - 0x01FFFFFF  开发与产测自检区（64 KiB，可擦除）
  * ============================================================================
  */
@@ -54,8 +56,16 @@
 #define FLASH_LAYOUT_OTA_SLOT_B_BASE        0x00210000UL
 #define FLASH_LAYOUT_OTA_SLOT_SIZE          0x00200000UL
 
-#define FLASH_LAYOUT_RESERVED_DATA_BASE     0x00410000UL
-#define FLASH_LAYOUT_RESERVED_DATA_SIZE     0x01BE0000UL
+/*
+ * RK的两个独立固件存放空间，每块8 MiB；此处只保留地址，不读写或擦除。
+ * A/B不表示RK双槽回滚，也不预先绑定SPL/EDK；记录格式与传输协议另行确定。
+ */
+#define FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE 0x00410000UL
+#define FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE 0x00C10000UL
+#define FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE   0x00800000UL
+
+#define FLASH_LAYOUT_RESERVED_DATA_BASE     0x01410000UL
+#define FLASH_LAYOUT_RESERVED_DATA_SIZE     0x00BE0000UL
 
 #define FLASH_LAYOUT_SELF_TEST_BASE         0x01FF0000UL
 #define FLASH_LAYOUT_SELF_TEST_SIZE         0x00010000UL
@@ -248,6 +258,21 @@ _Static_assert(offsetof(fru_info_t, reserved) == 202U,
                "FRU reserved offset changed");
 _Static_assert(FLASH_LAYOUT_OTA_SLOT_A_BASE + FLASH_LAYOUT_OTA_SLOT_SIZE ==
                FLASH_LAYOUT_OTA_SLOT_B_BASE, "OTA slots must be adjacent");
+/* 按地址连续性与扇区对齐锁定预留边界，防止后续扩展覆盖既有MCU或自检区。 */
+_Static_assert(FLASH_LAYOUT_METADATA_BASE + FLASH_LAYOUT_METADATA_SIZE ==
+               FLASH_LAYOUT_OTA_SLOT_A_BASE, "元数据区必须与MCU下载区相邻");
+_Static_assert(FLASH_LAYOUT_OTA_SLOT_B_BASE + FLASH_LAYOUT_OTA_SLOT_SIZE ==
+               FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE, "RK空间不得覆盖MCU稳定区");
+_Static_assert(FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE + FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE ==
+               FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE, "两个RK固件空间必须相邻");
+_Static_assert(FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE + FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE ==
+               FLASH_LAYOUT_RESERVED_DATA_BASE, "RK空间必须与余下预留区相邻");
+_Static_assert(FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE == 8UL * 1024UL * 1024UL,
+               "每个RK固件空间必须为8 MiB");
+_Static_assert(FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE % FLASH_LAYOUT_SECTOR_SIZE == 0UL &&
+               FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE % FLASH_LAYOUT_SECTOR_SIZE == 0UL &&
+               FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE % FLASH_LAYOUT_SECTOR_SIZE == 0UL,
+               "RK固件空间必须按擦除扇区对齐");
 _Static_assert(FLASH_LAYOUT_RESERVED_DATA_BASE + FLASH_LAYOUT_RESERVED_DATA_SIZE ==
                FLASH_LAYOUT_SELF_TEST_BASE, "reserved data range is inconsistent");
 _Static_assert(FLASH_LAYOUT_SELF_TEST_BASE + FLASH_LAYOUT_SELF_TEST_SIZE ==

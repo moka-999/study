@@ -7,7 +7,7 @@
 
 ## 一、项目是什么
 
-STM32H743 **阿波罗 V2** 板，作为 **TCP server + 双协议网关**：PC–MCU 使用固定18字节头+JSON的新协议，MCU–RK 保留现有0x5A/0xA5 TLV协议；MCU负责业务转换，不做原始帧透传。
+STM32H743 **阿波罗 V2** 板，作为 **TCP server + 双协议网关**：PC–MCU 使用固定18字节头+JSON，MCU–RK以RK工程师的`D:/pro/tlv_proto`为协议基线；MCU负责业务转换，不做原始帧透传。
 
 **拓扑**：
 ```
@@ -35,24 +35,28 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 ```
 
 - `Length`是头部与JSON包体的总长度，字段宽度为u32；MCU完整PDU上限已确认为4096字节。
-- 初版固定`Version=1`、`Flag=8`；长度、版本或Flag非法时关闭连接并清空接收状态。
+- 初版固定`Version=1`、`Flag=8`、`ServiceID=0`。非法头前缀逐字节丢弃并有界寻找下一头；两次完整帧消费之间累计丢弃超过4096字节才关闭连接。完整帧的UTF-8/JSON错误回`0006 failed/invalidArgument`并继续；认可长度后不扫描正文内部。仍无法收齐的半帧超过500ms字节间空闲则断连，正常空闲不受此限制。详见[TCP接收恢复](doc/pc_tcp_recovery_20260929.md)。
 - 每条连接中PC和MCU分别维护发送u32 Seq，每发一帧本端加1，不回显请求Seq；接收不改变本端发送计数，两个方向允许同号且可同时发送。Seq仅是发送流水号，业务关联另行定义；绝不能把内部RK Seq写入PC响应头。ServiceID保留2字节但固定0、不参与分发。首值、重连初始化和回绕边界仍待PC双方最终确认，暂定实现与验证状态见任务清单，测试通过不等于批准。
 - 心跳固定为PC主动发送`CMD_CLIENT_HEART_BEAT(0x0002)+{}`，MCU返回`CMD_SERVER_HEART_BEAT(0x0001)+{}`，新合同使用MCU本端递增Seq；心跳不承载其他状态。
 - TCP解析必须支持半包、粘包和连续多包；第一组测试JSON已确认，其余命令与字段分批冻结。
 - 已固定引入cJSON v1.7.19，使用FreeRTOS堆、递归深度16；完整PDU上限4096字节。
+- 固件升级沿用0x0901–0x0903，MCU动作统一`mcu_begin/mcu_write/mcu_finish/mcu_query/mcu_cancel`；对应五个`rk_*`仅保留并回notSupported，不访问Flash/RK。W25Q256为RK预留0x00410000和0x00C10000起始的两块8MiB，不定义RK包体。旧版首次迁移须显式旧动作选项，见`doc/ota_daily_download.md`。
 
-### MCU–RK（现行协议，继续保留）
+### MCU–RK（2026-09-23替换后的协议）
 
 ```
-[0x5A] [Len:2B BE] [HCRC:2B] [Seq:8B] [TLV...] [FCRC:2B] [0xA5]
+[0x5A] [Len:2B BE] [HCRC:2B LE] [Seq:8B BE] [TLV...] [FCRC:2B LE] [0xA5]
 ```
-- CRC = Modbus CRC-16（多项式 0x8005，初值 0xFFFF）
-- TLV 单元：`[Type:2B][TLV_Len:2B][Value]`
-- 命令容器 `Type=0x5000`（Value = `[CmdID:2B][Params]`）；心跳 `Type=0x0000`
+- CRC = Modbus CRC-16（多项式0x8005，右移实现0xA001，初值0xFFFF）。HCRC覆盖前3字节；FCRC仅覆盖Seq及TLV，不含Length。
+- TLV 单元：`[Type:2B BE][TLV_Len:2B BE][Value]`；Value内多字节整数为小端。
+- 命令容器`0x5000`的前两字节是小端CmdID，任务仅发送无参数命令1..20；17=MATS，21..36的IDD不宣称支持。心跳`0x0000`、空Value。
+- 最终结果同帧包含`0x5001/0x9001/0x3001/0x9002`，分别为命令u16、首错地址u64（0=PASS）、die u8、耗时u64毫秒；必须全部有效、每种恰好一次，按RK Seq＋命令匹配后原子交付。
 - 帧内 TLV 数量：**至少 1 个，最多 16 个**（`TLV_MAX_PER_FRAME`）
 - 状态机 5 态：IDLE→HEADER→DATA→CRC→FOOTER；仅用于MCU–RK串口链路。
 
-> ✅ 正式TCP不使用本TLV状态机和原始帧回传；RK组帧/串口状态机仍在使用。`dispatch.c/.h`是未接正式TCP的旧PC–TLV业务适配器，不代表整套RK协议已废弃。上述Type/CRC/Seq是当前实现基线；外部文档差异待RK双方确认，不能单侧宣布原结果命令号作废。
+> 旧PC–TLV `dispatch.c/.h`已删除。RK参考工程中的POSIX/UART演示代码不直接移植，复用本工程串口/FreeRTOS并补齐边界。V2正式0103支持用户确认的外部已启动模式：power/bootMode均null、reboot=false，仅执行功能算法，不接管电源/启动；默认不设算法等待超时。B1也已接入该模式，但额外要求真实电源状态ON；测量用实际采样，完整上电/冷重启/RK-ready流程仍拒绝执行，默认未配置时序门禁不变。`ENABLE_RK_GATEWAY_TEST`仅保留旧隔离模拟用途，真实RK接入不打开该开关。详见[真实RK接入](doc/rk_real_test_20260928.md)及[B1同步记录](../b1/docs/real_test_sync_20260929.md)。
+
+V2可显式启用`ENABLE_V2_POWER_SIMULATION`：沿用上述正式任务及真实RK，仅电源/Boot/测量改用内存模型，PC响应不附加`simulation`字段；0601在测试中只读且不因算法在途回busy。是否模拟以构建配置与安装记录为准，不能因无标记就认作实测。默认关闭、B1禁止，与旧网关联调开关互斥，不作为真实电源/IDD验收。详见[V2电源模拟](doc/v2_power_simulation_20260928.md)。
 
 ---
 
@@ -61,15 +65,15 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 | 目录 | 内容 |
 |------|------|
 | `App/protocol/pc/` | PC–MCU独立字节流状态机、JSON/命令分发、固定头响应组帧和PC业务JSON辅助层 |
-| `App/protocol/rk/` | 现行RK组帧/CRC/TLV状态机；另含未接正式TCP的旧PC–TLV适配器 |
+| `App/protocol/rk/` | RK新线格式组帧/CRC/TLV状态机及四TLV结果解码 |
 | `App/tasks/pc/` | PC侧TCP server任务；负责socket生命周期和传输编排，业务由PC命令表分发 |
-| `App/tasks/rk/` | RK串口、pending/重传和RK心跳任务 |
+| `App/tasks/rk/` | 单个RK任务统一推进串口、请求/最终结果和每2秒心跳；不自动重发测试 |
 | `App/tasks/common/` | LED、采样监控等不隶属单一通信对象的正式任务 |
 | `App/tasks/test/` | Mock、自检和逻辑分析仪波形任务；不代表生产业务 |
 | `BSP/` | 板级驱动：AD7124 / Flash / IIC / LED / PCF8574 / WDT |
 | `HAL_Drv/` | 硬件抽象：uart_router.c（串口路由）等 |
 | `Core/` `Drivers/` `Middlewares/` | 生成代码/第三方不作无关修改；允许USER CODE区及第八节列明的已有恢复项，修改后运行相关构建检查 |
-| `tests/` | Python 测试：`full_chain_stress.py`（12场景）、`stability_test.py`（6项） |
+| `tests/` | `verify_rk_protocol_c.py`实际C离线回归；`rk_gateway_network_test.py`仅用于V2临时镜像。旧RK脚本在`legacy_rk/`以文本归档 |
 | `cmake/stm32cubemx/` | CubeMX 生成，**勿手改**（自定义源放顶层 CMakeLists.txt） |
 
 ---
@@ -88,6 +92,8 @@ powershell -ExecutionPolicy Bypass -File tools/dev.ps1 build
 
 ### 烧录（SWD）— 下列仅适用于非OTA旧布局
 
+日常修改V2 App请用 `tools/dev.ps1 ota-build -Version <新版本>`，或 `ota-swd -Version <新版本> -Serial <ST-Link序列号> -ConfirmIdle YES`；网络入口为 `ota-net`。VS Code默认Ctrl+Shift+B已指向安全SWD入口；操作与验证边界见[日常下载说明](doc/ota_daily_download.md)。这些入口复用完整B安装，不能用于空片首部署或B1。
+
 > 已部署完整OTA的板卡禁止用下面的`build_debug/boot.elf`覆盖B，或绕过启动日志直接覆盖App。OTA使用同级`../bootloader`完整B及`ENABLE_OTA_BOOT=ON`的槽限App；构建、备份、安装与当前板卡状态见[OTA网络验证](doc/ota_network_validation_20260916.md)。
 ```bash
 STM32_Programmer_CLI.exe -c port=SWD -w build_debug/boot.elf   # Bootloader @ 0x08000000
@@ -103,8 +109,9 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 ```
 
 ### 串口 / 网络
-- 串口：COM3 = CH340 → USART1（阿波罗阶段接 PC 模拟 RK3588）
-- MCU IP：`192.168.1.201:8888`
+- 串口：2026-09-23实测COM5 = CH340 → USART1（阿波罗阶段接PC模拟RK3588）；每次先枚举确认，不硬编码旧COM3。
+- 当前测试MCU IP：`192.168.1.201:8888`，继续使用本地配置。
+- 正式B1 IP由B2 MCU告知（2026-09-22确认），不以本地固定地址或FRU配置IP作为正式来源。通知链路/协议/时机及异常处理待双方确定；当前仅记录，保留测试配置和FRU布局，不据此新增SPI命令。详见[需求基线](doc/requirements_baseline.md)。
 
 ### 崩溃诊断（HardFault 排查）
 - 诊断地址随链接变化，读写前必须从**实际烧录的同一份ELF**用`arm-none-eabi-nm -S -n`查询`crash_log`（16×uint32）和`tcp_diag`（8×uint32）。禁止把历史地址的`-w32`命令直接套用到新镜像。`.crash_log`为NOLOAD，复位不清零。
@@ -117,11 +124,11 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 
 ### 运行测试
 ```bash
-powershell -ExecutionPolicy Bypass -File tools/dev.ps1 protocol-test  # 离线帧/CRC/状态机模型
+powershell -ExecutionPolicy Bypass -File tools/dev.ps1 protocol-test  # 实际C帧/状态机/事务的QEMU回归
 powershell -ExecutionPolicy Bypass -File tools/dev.ps1 style-test     # 自定义层边界/事件模型+纯接口头独立编译
 powershell -ExecutionPolicy Bypass -File tools/dev.ps1 pc-protocol-test # PC固定头/cJSON离线合同
-python -X utf8 tests/stability_test.py                                # 需板卡/网络/COM3
-python -X utf8 tests/full_chain_stress.py                             # 需板卡/网络/COM3
+python -B -X utf8 tests/verify_rk_protocol_c.py --app-root ../b1       # 编译并运行B1实际RK源码
+python -B -X utf8 tests/rk_gateway_network_test.py --serial COM5 --report build/rk-chain.json # 仅限已备份并安装临时联调镜像；结束恢复正式镜像
 ```
 
 ### 工具依赖分层（换 AI 必读）
@@ -146,16 +153,16 @@ python -X utf8 tests/full_chain_stress.py                             # 需板�
 自有代码、汇编及脚本的注释统一使用中文，说明用途、参数/返回值及关键约束；触及的自有代码遗留英文注释一并整理，第三方版权和许可保留原文。
 
 1. **MCU 是单客户端 TCP server**：`listen(listenfd, 1)` + 单 accept 循环，一次只服务 1 个连接。测试脚本开新连接前必须 `close_tcp()`。
-2. **历史RK背压基线**：`pcToRk_Queue`(8槽) + rk pending(4槽) = 最多12条排队/跟踪中的命令；旧TLV入口队列满回BUSY，pending满则暂不出队。正式PC JSON尚未接入这条业务链；结果入队失败、命令回插失败仍有丢消息风险，不称为当前完整闭环。**uart_send可能因锁竞争或TX环满失败，每处调用须有失败策略**；审查见`doc/code_quality_review.md`。
-3. **当前RK响应匹配不到pending一律静默丢弃，绝不回ACK**（否则会引发ACK回环）。匹配只比较RK Seq，不要求同CmdID；首个匹配单元即释放pending。因此未匹配包也可能是尚未支持的异步/第二阶段结果，不能一概称为陈旧包；多阶段生命周期待双方评审。
-4. **重传**：500ms 超时 + 指数退避 500/1000/2000ms，封顶 3 次（`RK_MAX_RETRIES`）。
-5. 历史`tlv_dispatch`不再由正式`tcp_task`调用；若后续RK业务层复用其同步handler，仍禁止在handler中`vTaskDelay`阻塞。
+2. **RK背压**：`rkRequestQueue`与`rkResponseQueue`各8槽，但只允许一个已发出的测试在途。结果队列满时保留待交付副本，不取下一请求。`uart_send`整帧入队失败返回TX_FAILED，不自动回插或重发。
+3. **RK结果匹配**：四个结果TLV原子解码后，同时匹配RK Seq及命令号；不匹配/重复/畸形结果不回ACK，也不提前释放请求。
+4. **超时**：timeout_ms=0表示不限制算法等待（用户确认十几分钟算法不设时限）；非零仍为显式最终结果时限。超时只报一次TIMEOUT，RK状态未知时暂停后续命令。匹配迟到结果/B1确定掉电通过内部RECOVERED解除未知，不再报成功；恢复通知不得覆盖尚未交付的TIMEOUT。无自动重试，心跳不是完成/DDR-ready。
+5. **正式业务门禁**：V2外部已启动模式仅下发功能算法，完整电源/Boot请求保留notReady/otaNotReady。未确认的训练电压范围、启动/安全下电不能被临时旁路带入生产。每算法一个整体结果，首错地址保留但不猜芯片，未编号/未测量如实留空。断线不撤销在途算法；新测试、电源修改和升级写操作在算法结束前返回busy。命令handler禁止阻塞等RK结果。
 6. **D-Cache 已关** → 无 cache 一致性顾虑，**勿再加 `SCB_InvalidateDCache_by_Addr`**（否则 UsageFault 升级 HardFault）。
 7. **DMA 够不到 DTCMRAM**（DMA 在 D2 域），DMA 缓冲放 AXI SRAM (RAM, 0x24000000)。
 8. **FreeRTOS 堆(128KB)手动挪到 AXI SRAM**（`heap_4.c` 的 `.heap` section + linker），不是 CubeMX 默认位置。
 9. **SPI2按板型互斥**：Apollo V2临时给AD7124开发（主机Mode 3）；最终B1以SPI2从机连接B2主机，AD7124改SPI4。两个任务不得同时占用SPI2。
 10. **自定义接口归属**：总线实例统一由`board_interfaces.h`声明，UART内部钩子只在`uart_hw.h`；RK任务用`rk_link_next_sequence()`分配独立序号，禁止外部直接修改计数器。`uart_start_all()`在调度前初始化TX互斥锁；分配失败拒绝发送。注释/风格及剩余耦合约束见`doc/code_quality_review.md`。
-11. **RK解析错误必须上送调用方**：`tlv_sm_feed()==1`仅表示帧边界/CRC通过，随后必须检查`tlv_sm_get_frame()`返回值；`-1`时整份输出清零，任务拒绝整帧。Len为4..1024；所有线上TLV（含未知Type/心跳）合计1..16个，任何残缺TLV不得部分交付。未知Type结构有效时仍跳过，不擅自接纳其他命令容器。
+11. **RK解析错误必须上送调用方**：`tlv_sm_feed()==1`后仍须检查`tlv_sm_get_frame()`；失败清空输出、拒绝整帧。Len为4..1024，所有TLV合计1..16个，残缺TLV不得部分交付。未知TLV完整保留给业务层决定，已知结果标量长度须合法。`tlv_unpack`输入为从5A开始的完整帧及真实总字节数，不再接受旧Seq起点/负载长度接口。字节间超时50ms，连续完整帧无需外部reset。
 12. **信息类响应的数据源**：固件版本、FRU和测试仪信息响应每次通过加载接口读取W25Q256持久化记录，禁止直接使用`firmware_version_current()`或编译期常量组帧。完整OTA由B同步运行槽版本，OTA查询每次加载并与启动记录交叉核对；普通镜像/FRU的首次初始化兼容路径另行保留，不能借OTA接入擅自删除。OTA接入范围与硬件验收状态见任务清单。
 
 ---
@@ -191,10 +198,11 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 
 | 事项 | 状态 | 何时定 |
 |------|------|--------|
-| MCU–RK TLV type 语义（枚举 0x5000 vs 结构化高4位+低12位） | 搁置 | RK协议评审时 |
-| 0x5000→0x5002 的语义（命令请求 vs 结果响应？） | 待确认 | 同上 |
-| 打包侧一帧一 TLV vs 解包侧一帧多 TLV 不对称 | 待改 | 同上（多TLV打包三段式 builder） |
-| `tlv_dispatch` 多单元响应互相覆盖 | 待改 | 同上 |
+| RK启动就绪、安全下电/取消、超时后恢复 | 参考包未提供完整可执行接口 | RK业务联合评审 |
+| 四TLV的die如何映射到PC板卡/颗粒、每算法最终结果次数 | 保留原始结果，不擅自定生产映射 | PC/RK联合评审 |
+| IDD命令21..36、测量窗口、真实算法时长 | 参考文档标未实现 | RK算法接入时 |
+
+旧Type/CRC/0x5002分歧已按用户指示由`tlv_proto`替换；多TLV打包与四TLV结果聚合已实现，旧待定表不再作为开发基线。
 
 ---
 
@@ -212,11 +220,12 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 > ✅ 已入 .ioc 自动保留：`SPI2.CPolarity=HIGH + ClockPhase=2EDGE`（**AD7124 模式 3** CPOL=1/CPHA=1，手册 P8 明确"operates in SPI Mode 3"，20260819 修正——此前误判为模式1）；`freertos.c` StartTestTask 自检在 USER CODE 区；boot/ 与顶层 CMakeLists 不受 CubeMX 影响。
 
 ### 测试脚本坑
-- 清串口缓冲必须先 settle（等 pending+重传排空）再 `reset_input_buffer()`，否则抓到旧帧
-- 全链路测试 `_drain_serial_commands()` 动态排空，别用固定 sleep
+- 清串口缓冲前必须确认无在途测试；等待时间过去不等于RK已结束，超时后的RK仍可能执行。
+- 新全链路脚本只适用于临时联调镜像；`tests/legacy_rk/`的旧CRC/大端命令/重传脚本不得用于现行固件。
 
 ### 内存布局
-- 任务栈：rk 32KB / tcp 16KB / hb 4KB；堆 128KB 实际占用约 85-100KB，余 ~30KB
+- 任务栈：rk 32KB（含心跳）/ tcp 16KB，不再创建独立hb任务；堆128KB，实际余量须以当前镜像运行时测量为准。
+- OTA健康观察对象为默认任务、TCP、监测和RK共四项，B1 OFF时RK仍须推进；不得恢复已删除的HB健康要求或用RK伪报两项进度。
 - 确认堆余量用 `xPortGetFreeHeapSize()`
 
 ---

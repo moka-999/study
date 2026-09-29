@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""在QEMU执行正式0103解析和拒绝式分发；只替换硬件/其他命令端口，不连接真板。"""
+"""在QEMU执行0103 JSON合同及旧电源模式拒绝；真实RK业务另见verify_pc_rk_service.py。"""
 import argparse
 from pathlib import Path
 import shutil
@@ -24,9 +24,32 @@ def main():
         "typedef enum { HAL_OK=0, HAL_ERROR=1 } HAL_StatusTypeDef;\nuint32_t HAL_GetTick(void);\n",
         encoding="utf-8")
     (build / "main.h").write_text('#include "stm32h7xx_hal.h"\n', encoding="utf-8")
-    sources = [Path(__file__).with_name("test_pc_start.c"),
+    # 本回归专注解析和旧电源门禁，不代替真实RK服务的独立回归。
+    (build / "service_stub.c").write_text('''#include "pc_test_service.h"
+#include "ota_app.h"
+#include <stdio.h>
+#include <string.h>
+int pc_test_service_busy(void) { return 0; }
+pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
+    uint32_t sequence, pc_dispatch_response_t *response)
+{
+    char json[160];
+    const char *error = ota_app_is_confirmed() ? "notReady" : "otaNotReady";
+    int length = snprintf(json, sizeof(json),
+        "{\\"requestCommandId\\":259,\\"algorithmIndex\\":%lu,\\"status\\":\\"failed\\",\\"errorCode\\":\\"%s\\"}",
+        (unsigned long)start->algorithm_index, error);
+    if (length <= 0 || (size_t)length >= sizeof(json)) return PC_DISPATCH_ERROR;
+    return pc_protocol_build_response(PC_COMMAND_COMMAND_RESP, sequence,
+        (const uint8_t *)json, (uint32_t)length, response->data, sizeof(response->data),
+        &response->length) == 0 ? PC_DISPATCH_RESPONSE_READY : PC_DISPATCH_ERROR;
+}
+int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
+{ (void)sequence; (void)response; return 0; }
+void pc_test_service_disconnected(void) { }
+''', encoding="utf-8")
+    sources = [Path(__file__).with_name("test_pc_start.c"), build / "service_stub.c",
                *[root / p for p in ("App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_protocol.c",
-                                   "App/protocol/pc/pc_test_message.c", "HAL_Drv/ddr_power.c", "BSP/PAC1934/pac1934.c",
+                                   "App/protocol/pc/pc_state_machine.c", "App/protocol/pc/pc_test_message.c", "HAL_Drv/ddr_power.c", "BSP/PAC1934/pac1934.c",
                                    "Middlewares/Third_Party/cJSON/cJSON.c")],
                args.boot_root / "tests/qemu_start.s"]
     includes = [build, *[root / p for p in ("App/protocol/pc", "App/tasks/common", "App/ota", "HAL_Drv",
@@ -38,6 +61,8 @@ def main():
                "-ffunction-sections", "-fdata-sections", *["-I" + str(path) for path in includes],
                *map(str, sources), "-nostartfiles", "--specs=nosys.specs",
                "-T" + str(args.boot_root / "tests/qemu_test.ld"), "-Wl,--gc-sections", "-o", str(build / "test.elf")]
+    if (root / "b1.ioc").exists():
+        command.insert(1, "-DB1_RK_UART=4")
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode:

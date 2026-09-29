@@ -10,8 +10,8 @@
  * 也不会把RK TLV或监测文本原样发给PC。
  *
  * 数据流:
- *   PC → TCP 8888 → pc_state_machine → pc_dispatch → 后续业务适配层
- *   后续适配层 → 独立RK Seq/TLV → RK3588；业务结果关联合同另行冻结
+ *   PC → TCP 8888 → pc_state_machine → pc_dispatch → pc_test_service
+ *   pc_test_service → 独立RK Seq/TLV → RK3588；最终结果按algorithmIndex关联
  * ===================================================================
  */
 #include "main.h"
@@ -65,7 +65,8 @@ __attribute__((section(".crash_log"), used)) volatile uint32_t tcp_diag[8];
  * @brief FreeRTOS单客户端TCP服务入口，拥有连接及MCU发送Seq。
  * @param[in] argument 未使用，可为NULL。
  * @note 等待lwIP/IP后监听8888，逐字节解析并同步分发；建服失败删除任务。
- *       协议错误、半帧超时或传输失败关闭当前连接，再等待下一客户端。
+ *       帧头垃圾有界丢弃，完整坏JSON回错后继续；恢复超限、半帧超时或
+ *       传输/组包失败关闭当前连接，再等待下一客户端。
  *       JSON/硬件业务由pc_dispatch负责，本任务不透传RK原始帧。
  */
 void StartTcpServerTask(void *argument)
@@ -174,14 +175,21 @@ void StartTcpServerTask(void *argument)
         for (;;) {
             ota_app_progress(OTA_TASK_TCP);
             pc_dispatch_poll();
+            /* 正式异步结果由业务层组包，TCP只负责传输及本端Seq。 */
+            pc_dispatch_response_t async_response;
+            int ready = pc_dispatch_next_response(mcu_tx_sequence, &async_response);
+            if (ready < 0 || (ready > 0 && pc_send_all(connfd, async_response.data,
+                                                    async_response.length) != 0)) break;
+            if (ready > 0) ++mcu_tx_sequence;
             int n = recv(connfd, rx, sizeof(rx), 0);
 
             if (n > 0) {
                 int close_for_protocol_error = 0;
                 pc_last_byte_tick = xTaskGetTickCount();
+
                 /*
                  * 逐字节喂流解析器是为了处理任意TCP切分。完成一帧并reset后，
-                * 循环会继续消费rx剩余字节，所以一次recv中的多个粘包不会丢失。
+                 * 循环会继续消费rx剩余字节，所以一次recv中的多个粘包不会丢失。
                  */
                 for (int i = 0; i < n; i++) {
                     /*
@@ -223,8 +231,8 @@ void StartTcpServerTask(void *argument)
                             mcu_tx_sequence++;
                         }
                         /*
-                         * NO_RESPONSE仅保留给无同步应答的扩展路径；0103当前明确
-                         * 回复未就绪或参数错误，不代表RK已经执行。
+                         * 0103的accepted只表示请求已入队；真实测试结论由后续
+                         * 异步0105给出，不能把受理应答当作算法PASS。
                          */
                         TCP_DIAG(5, frame.command_id);
                         /* frame.json借用状态机缓冲，必须在处理完成后再reset。 */

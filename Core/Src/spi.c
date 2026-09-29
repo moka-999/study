@@ -64,6 +64,9 @@ void MX_SPI2_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN SPI2_Init 2 */
+  /* ADC的SCLK高低时间均须至少100ns；129MHz内核时钟除256约504kHz。 */
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
+  if (HAL_SPI_Init(&hspi2) != HAL_OK) Error_Handler();
 
   /* USER CODE END SPI2_Init 2 */
 
@@ -146,4 +149,3 @@ void HAL_SPI_MspDeInit(SPI_HandleTypeDef* spiHandle)
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
-

@@ -16,8 +16,9 @@
 #define CHECK(c) do { if (!(c)) die("FAIL " S(__LINE__) ": " #c "\n"); } while (0)
 static uint8_t nor[0x210000];
 static uint32_t now, locked, maintenance, power_on, bad_io, bad_commit;
-static uint32_t erases, writes, resets;
+static uint32_t erases, writes, resets, reads, transactions;
 ota_test_scb_t ota_test_scb;
+extern volatile uint32_t ota_app_diag[8];
 
 /* QEMU专用有界堆供真实cJSON/newlib使用；与生产FreeRTOS分配器无关。 */
 void *_sbrk(ptrdiff_t increment)
@@ -48,7 +49,7 @@ uint32_t HAL_GetTick(void) { return now; }
 void NVIC_SystemReset(void) { ++resets; }
 int flash_transaction_begin(uint32_t timeout)
 {
-    CHECK(timeout <= 1000U && !locked); locked = 1U; return 0;
+    CHECK(timeout <= 1000U && !locked); ++transactions; locked = 1U; return 0;
 }
 void flash_transaction_end(void) { CHECK(locked); locked = 0U; }
 int monitor_get_latest(monitor_snapshot_t *s)
@@ -65,7 +66,7 @@ void monitor_ota_leave(void) { CHECK(maintenance); maintenance = 0U; }
 int qspi_read_data(uint32_t address, uint8_t *data, uint32_t size)
 {
     CHECK(locked && address + size <= sizeof(nor));
-    memcpy(data, nor + address, size); return 0;
+    ++reads; memcpy(data, nor + address, size); return 0;
 }
 int qspi_write_page(uint32_t address, const uint8_t *data, uint16_t size)
 {
@@ -105,7 +106,15 @@ static boot_record_t loaded(void)
 }
 static void progress(void)
 {
-    for (uint32_t i = 0; i < 5U; ++i) ota_app_progress(i);
+    for (uint32_t i = 0; i < OTA_TASK_COUNT; ++i) ota_app_progress(i);
+}
+
+/** 只推进非RK任务，检查RK缺席或卡死时不能由其他任务代替报健康。 */
+static void progress_without_rk(void)
+{
+    for (uint32_t i = 0; i < OTA_TASK_COUNT; ++i) {
+        if (i != OTA_TASK_RK) ota_app_progress(i);
+    }
 }
 
 /** 实际cJSON和PC OTA处理函数，校验返回命令/流水号及JSON；不伪造协议实现。 */
@@ -113,7 +122,7 @@ static cJSON *request(const char *json, uint16_t expected_command)
 {
     cJSON *root = NULL, *body = NULL;
     pc_dispatch_response_t response;
-    pc_protocol_frame_t frame = {.command_id = PC_COMMAND_MCU_OTA_REQUEST,
+    pc_protocol_frame_t frame = {.command_id = PC_COMMAND_FIRMWARE_UPGRADE_REQUEST,
         .json = (const uint8_t *)json, .json_length = (uint32_t)strlen(json), .sequence = 999U};
     CHECK(pc_json_parse_object(frame.json, frame.json_length, &root, NULL) == PC_JSON_OK);
     CHECK(pc_ota_handle(&frame, 77U, root, &response) == PC_DISPATCH_RESPONSE_READY);
@@ -130,13 +139,48 @@ static void expect_error(const char *json, const char *error)
     cJSON_Delete(body);
 }
 
+/** RK保留动作及旧无前缀动作不进入MCU后台，连超时轮询也不能由这些请求触发。 */
+static void reserved_action_checks(void)
+{
+    static const char *const names[] = {
+        "rk_begin", "rk_write", "rk_finish", "rk_query", "rk_cancel",
+        "begin", "write", "finish", "query", "cancel",
+    };
+    uint32_t saved_now = now;
+    uint32_t before[] = {reads, writes, erases, resets, transactions, maintenance};
+    ota_download_progress_t previous, current;
+    ota_download_get_progress(&previous);
+    now += 60000U;
+    for (size_t i = 0U; i < sizeof(names) / sizeof(names[0]); ++i) {
+        char json[160];
+        /* 故意带无效包字段：RK包体未定义，拒绝响应不得沿用MCU字段解释或回显它们。 */
+        (void)snprintf(json, sizeof(json),
+            "{\"action\":\"%s\",\"packageId\":\"12345678\",\"offset\":0,\"data\":\"AAAA\"}", names[i]);
+        cJSON *body = request(json, PC_COMMAND_COMMAND_RESP);
+        CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(body, "status")->valuestring, "failed") == 0);
+        CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(body, "errorCode")->valuestring, "notSupported") == 0);
+        CHECK(cJSON_GetObjectItemCaseSensitive(body, "requestCommandId")->valueint == 0x0901);
+        CHECK(!cJSON_GetObjectItemCaseSensitive(body, "packageId") &&
+              !cJSON_GetObjectItemCaseSensitive(body, "offset"));
+        const cJSON *action = cJSON_GetObjectItemCaseSensitive(body, "action");
+        CHECK(i < 5U ? cJSON_IsString(action) && strcmp(action->valuestring, names[i]) == 0 : !action);
+        cJSON_Delete(body);
+    }
+    ota_download_get_progress(&current);
+    CHECK(current.state == previous.state && current.package_id == previous.package_id &&
+          current.total_bytes == previous.total_bytes && current.received_bytes == previous.received_bytes);
+    CHECK(before[0] == reads && before[1] == writes && before[2] == erases &&
+          before[3] == resets && before[4] == transactions && before[5] == maintenance);
+    now = saved_now;
+}
+
 /** 测试侧标准Base64编码；仅生成请求，不代替生产解码和Flash写入。 */
 static void make_write(char *json, size_t capacity, uint32_t id, uint32_t offset,
                        const uint8_t *data, uint32_t bytes)
 {
     static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     int prefix = snprintf(json, capacity,
-        "{\"action\":\"write\",\"packageId\":\"%08lX\",\"offset\":%lu,\"data\":\"",
+        "{\"action\":\"mcu_write\",\"packageId\":\"%08lX\",\"offset\":%lu,\"data\":\"",
         (unsigned long)id, (unsigned long)offset);
     CHECK(prefix > 0 && (size_t)prefix + 4U * ((bytes + 2U) / 3U) + 3U <= capacity);
     char *out = json + prefix;
@@ -155,25 +199,26 @@ static void make_write(char *json, size_t capacity, uint32_t id, uint32_t offset
 static void protocol_checks(uint32_t id, uint32_t length)
 {
     char json[PC_PROTOCOL_MAX_PDU];
-    cJSON *body = request("{\"action\":\"query\",\"packageId\":\"11223344\"}", 0x0903U);
+    reserved_action_checks();
+    cJSON *body = request("{\"action\":\"mcu_query\",\"packageId\":\"11223344\"}", 0x0903U);
     CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(body, "confirmed"))); cJSON_Delete(body);
     expect_error("{\"action\":\"x\"}", "notSupported");
-    expect_error("{\"action\":\"query\",\"unknown\":1}", "invalidArgument");
-    expect_error("{\"action\":\"query\",\"packageId\":\"aabbccdd\"}", "invalidArgument");
-    expect_error("{\"action\":\"begin\",\"packageId\":\"00000000\",\"packageSize\":true}", "invalidArgument");
-    expect_error("{\"action\":\"begin\",\"packageId\":\"00000000\",\"packageSize\":116.5}", "invalidArgument");
+    expect_error("{\"action\":\"mcu_query\",\"unknown\":1}", "invalidArgument");
+    expect_error("{\"action\":\"mcu_query\",\"packageId\":\"aabbccdd\"}", "invalidArgument");
+    expect_error("{\"action\":\"mcu_begin\",\"packageId\":\"00000000\",\"packageSize\":true}", "invalidArgument");
+    expect_error("{\"action\":\"mcu_begin\",\"packageId\":\"00000000\",\"packageSize\":116.5}", "invalidArgument");
     const char *bad[] = {"", "Zg", "Zh==", "Zm9=", "Zg==AAAA", "====", "AA-A", "AA_A", "AA A"};
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
-        (void)snprintf(json, sizeof(json), "{\"action\":\"write\",\"packageId\":\"%08lX\",\"offset\":0,\"data\":\"%s\"}", (unsigned long)id, bad[i]);
+        (void)snprintf(json, sizeof(json), "{\"action\":\"mcu_write\",\"packageId\":\"%08lX\",\"offset\":0,\"data\":\"%s\"}", (unsigned long)id, bad[i]);
         expect_error(json, "invalidArgument");
     }
-    (void)snprintf(json, sizeof(json), "{\"action\":\"begin\",\"packageId\":\"%08lX\",\"packageSize\":%lu}", (unsigned long)id, (unsigned long)length);
+    (void)snprintf(json, sizeof(json), "{\"action\":\"mcu_begin\",\"packageId\":\"%08lX\",\"packageSize\":%lu}", (unsigned long)id, (unsigned long)length);
     body = request(json, 0x0902U);
     CHECK(cJSON_GetObjectItemCaseSensitive(body, "blockSize")->valueint == OTA_DOWNLOAD_BLOCK_BYTES);
     cJSON_Delete(body);
     cJSON_Delete(request(json, 0x0902U)); /* begin重试不能擦写。 */
     uint32_t before = writes;
-    (void)snprintf(json, sizeof(json), "{\"action\":\"write\",\"packageId\":\"%08lX\",\"offset\":0,\"data\":\"T1RBMQ==\"}", (unsigned long)id);
+    (void)snprintf(json, sizeof(json), "{\"action\":\"mcu_write\",\"packageId\":\"%08lX\",\"offset\":0,\"data\":\"T1RBMQ==\"}", (unsigned long)id);
     cJSON_Delete(request(json, 0x0902U)); CHECK(writes == before + 1U);
     cJSON_Delete(request(json, 0x0902U)); CHECK(writes == before + 1U);
     CHECK(ota_download_write(id, 0U, (const uint8_t *)"diff", 4U) == OTA_DOWNLOAD_DATA);
@@ -181,11 +226,12 @@ static void protocol_checks(uint32_t id, uint32_t length)
     CHECK(ota_download_begin(id, length + 1U) == OTA_DOWNLOAD_ARGUMENT);
     CHECK(ota_download_begin(id ^ 1U, length) == OTA_DOWNLOAD_BUSY);
     ota_download_progress_t p; ota_download_get_progress(&p); CHECK(p.received_bytes == 4U);
-    body = request("{\"action\":\"query\"}", 0x0902U);
+    reserved_action_checks();
+    body = request("{\"action\":\"mcu_query\"}", 0x0902U);
     CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(body, "confirmed")) &&
           cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(body, "download"))); cJSON_Delete(body);
     now += 29999U; ota_download_poll(); CHECK(maintenance);
-    cJSON_Delete(request("{\"action\":\"query\"}", 0x0902U));
+    cJSON_Delete(request("{\"action\":\"mcu_query\"}", 0x0902U));
     CHECK(ota_download_begin(id, length) == 0);
     ++now; ota_download_poll(); CHECK(!maintenance);
     CHECK(ota_download_cancel(id) == 0); /* 同连接超时取消也可重复确认取消。 */
@@ -214,7 +260,10 @@ static void protocol_checks(uint32_t id, uint32_t length)
     before = writes;
     expect_error(json, "invalidArgument");
     CHECK(writes == before);
-    CHECK(ota_download_cancel(id) == 0);
+    (void)snprintf(json, sizeof(json), "{\"action\":\"mcu_cancel\",\"packageId\":\"%08lX\"}", (unsigned long)id);
+    body = request(json, PC_COMMAND_FIRMWARE_UPGRADE_RESP);
+    CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(body, "state")->valuestring, "cancelled") == 0);
+    cJSON_Delete(body);
     /* 包ID为0合法，不能当作“没有ID”；这里只开启/取消，不伪造CRC为0的文件。 */
     CHECK(ota_download_begin(0U, length) == 0 && ota_download_cancel(0U) == 0);
     /* 前116字节即拒绝错误包，不必等整个下载结束；每次失败释放维护门。 */
@@ -239,7 +288,7 @@ static void protocol_checks(uint32_t id, uint32_t length)
     firmware_version_info_t version;
     flash_transaction_begin(1000); CHECK(firmware_version_load(&flash_if, &version, NULL) == 0);
     version.version_patch++; CHECK(firmware_version_save(&flash_if, &version, NULL) == 0); flash_transaction_end();
-    expect_error("{\"action\":\"query\"}", "flashError");
+    expect_error("{\"action\":\"mcu_query\"}", "flashError");
     flash_transaction_begin(1000); version.version_patch--;
     CHECK(firmware_version_save(&flash_if, &version, NULL) == 0); flash_transaction_end();
     progress();
@@ -260,8 +309,31 @@ void test_main(void)
     CHECK(firmware_version_save(&flash_if, &version, NULL) == 0); flash_transaction_end();
     ota_test_scb.VTOR = OTA_A1_BASE; ota_app_prepare();
     CHECK(!ota_app_is_confirmed() && ota_download_begin(id, length) != 0);
-    for (now = 0; now <= 30000; now += 500) { progress(); CHECK(ota_app_watchdog_tick() == 1); }
+    if (CONFIG == 4U) {
+        /* RK从未启动：25秒初始化宽限内不确认，到期停喂狗且不写健康确认。 */
+        for (now = 0; now < 25000U; now += 500U) {
+            progress_without_rk(); CHECK(ota_app_watchdog_tick() == 1);
+            CHECK(!ota_app_is_confirmed());
+        }
+        progress_without_rk(); CHECK(ota_app_watchdog_tick() == 0);
+        progress(); CHECK(ota_app_watchdog_tick() == 0 && !ota_app_is_confirmed());
+        CHECK(loaded().pending == 1U); goto done;
+    }
+    /* 只需四个真实任务持续30秒；无效COUNT上报不得污染健康位图。 */
+    for (now = 0; now <= 30000U; now += 500U) {
+        progress(); ota_app_progress(OTA_TASK_COUNT); CHECK(ota_app_watchdog_tick() == 1);
+        CHECK(ota_app_diag[4] == 0x0FU);
+        CHECK(ota_app_is_confirmed() == (now == 30000U));
+    }
     CHECK(ota_app_is_confirmed()); r = loaded(); CHECK(r.pending == 0 && r.phase == BOOT_NORMAL);
+    if (CONFIG == 5U) {
+        /* 确认后RK停止进展：其他三个任务仍运行，超过5秒仍须停喂狗并锁存失败。 */
+        for (; now <= 35000U; now += 500U) {
+            progress_without_rk(); CHECK(ota_app_watchdog_tick() == 1);
+        }
+        progress_without_rk(); CHECK(ota_app_watchdog_tick() == 0 && !ota_app_is_confirmed());
+        progress(); CHECK(ota_app_watchdog_tick() == 0); goto done;
+    }
     protocol_checks(id, length);
     CHECK(ota_download_begin(id, 0) != 0 && ota_download_begin(id, OTA_PACKAGE_LIMIT + 1U) != 0);
     power_on = 1; CHECK(ota_download_begin(id, length) != 0); power_on = 0;
@@ -287,6 +359,15 @@ void test_main(void)
     CHECK(memcmp(nor + OTA_DOWNLOAD_BASE, PACKAGE, length) == 0);
     if (CONFIG == 2U) nor[OTA_DOWNLOAD_BASE + length - 1U] ^= 1U;
     if (CONFIG == 3U) bad_commit = 1U;
+    char finish_json[80];
+    (void)snprintf(finish_json, sizeof(finish_json),
+        "{\"action\":\"mcu_finish\",\"packageId\":\"%08lX\"}", (unsigned long)id);
+    cJSON *finish_body = request(finish_json,
+        CONFIG == 0U ? PC_COMMAND_FIRMWARE_UPGRADE_RESP : PC_COMMAND_COMMAND_RESP);
+    CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(finish_body, "action")->valuestring, "mcu_finish") == 0);
+    CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(finish_body, "status")->valuestring,
+                 CONFIG == 0U ? "accepted" : "failed") == 0);
+    cJSON_Delete(finish_body);
     int result = ota_download_finish(id);
     if (CONFIG == 2U) {
         CHECK(result != 0 && !maintenance && ota_app_is_confirmed());
@@ -294,6 +375,7 @@ void test_main(void)
     } else {
         CHECK((result == 0) == (CONFIG == 0U));
         CHECK(maintenance && !ota_app_is_confirmed() && loaded().phase == BOOT_READY);
+        reserved_action_checks();
         CHECK(ota_download_cancel(id) != 0); CHECK(maintenance && ota_download_begin(id, length) != 0);
         uint32_t before = writes;
         CHECK(ota_download_finish(id) == result && writes == before);

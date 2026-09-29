@@ -5,6 +5,7 @@
  * 输出一组固定、容易解码的事务，用逻辑分析仪确认 SPI Mode 3、CS 时序、
  * MSB 顺序及寄存器命令。MISO 未接从设备时的读回值没有业务意义。
  *
+ * PB12与PCF INT共线，只用开漏输出供分析仪观察，不能作为独立ADC片选。
  * 接线：PB12=CS、PB13=SCK、PB15=MOSI、PB14=MISO，并与分析仪共地。
  * 该任务仅在 ENABLE_AD7124_WAVE_TEST 隔离镜像中创建，不进入正式固件。
  */
@@ -33,7 +34,7 @@ static void ad_wave_configure_cs(void)
 
     __HAL_RCC_GPIOB_CLK_ENABLE();
     gpio.Pin = GPIO_PIN_12;
-    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Mode = GPIO_MODE_OUTPUT_OD;
     gpio.Pull = GPIO_PULLUP;
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &gpio);

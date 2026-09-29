@@ -13,6 +13,21 @@
  */
 #define UART_RX_BUF_SIZE 1056
 
+/* 已丢失字节连续性；消费者必须先重置半帧状态，再继续poll，不能按字节数使用。 */
+#define UART_RX_GAP (-1)
+
+typedef struct {
+    uint32_t queue_overflows;  /* ISR投队列失败次数。 */
+    uint32_t dropped_blocks;   /* 已知丢弃块数，含断流后清队列；不是物理丢失字节数。 */
+    uint32_t errors;           /* HAL错误回调次数。 */
+    uint32_t last_hal_error;   /* 最近一次HAL UART错误位图。 */
+    uint32_t invalid_events;   /* 非HT事件的长度非法次数。 */
+    uint32_t restart_failures; /* 首次/回调/恢复后启动RX失败次数。 */
+    uint32_t recovery_failures;/* 任务停止RX失败次数。 */
+    uint32_t recoveries;       /* 任务停止并重新启动RX成功次数。 */
+    uint8_t recovery_pending; /* 1等待任务恢复；不表示线缆/对端已在线。 */
+} uart_rx_diagnostics_t;
+
 /**
  * @brief 调度前为逻辑UART槽注册接口并创建接收队列。
  * @param[in] id 槽编号0或1。
@@ -24,20 +39,26 @@ void uart_register(int id, uart_if_t *interface);
 
 /**
  * @brief 调度前创建TX互斥锁、挂接HAL TxISR并启动已注册槽接收。
- * @note 调用方须先初始化外设。锁分配失败时send拒绝发送；当前启动RX的
- *       返回值未向上传递，因此本函数返回不等于所有DMA都已成功启动。
+ * @note 调用方须先初始化外设；失败槽记录恢复请求，须由唯一接收任务周期poll。
+ *       返回不表示所有DMA已成功启动；通过诊断接口查询。TX锁失败拒绝发送。
  */
 void uart_start_all(void);
 
 /**
- * @brief 在任务上下文无等待取走一个UART接收块。
+ * @brief 在任务上下文驱动RX恢复，并无队列等待地取走一个接收块。
  * @param[in] id 已注册槽编号0或1。
  * @param[out] buffer 非NULL调用方缓冲，至少UART_RX_BUF_SIZE字节。
  * @param[in] capacity 缓冲实际字节容量；小于要求时不出队。
- * @return 实际复制字节数；无数据或参数无效返回0，输出保持原值。
- * @note 输出是复制的数据，可立即交状态机；一个接收块不保证是一帧。
+ * @return >0实际字节数；0无数据/参数无效；UART_RX_GAP表示断流且已丢弃旧队列。
+ *         返回<=0时输出不变；GAP时必须重置组帧状态并继续poll。
+ * @note 每槽只允许一个任务消费，须周期调用以驱动100ms间隔的RX恢复。
+ *       出队不等待，但恢复可等待HAL Abort自身超时；不得ISR调用。
+ *       一个接收块不保证是一帧，队列满/异常时不保证可靠传输。
  */
 int uart_poll_rx(int id, uint8_t *buffer, uint16_t capacity);
+
+/** 任务上下文复制本次开机累计诊断：1成功，0参数/槽无效且输出不变；计数饱和。 */
+int uart_get_rx_diagnostics(int id, uart_rx_diagnostics_t *out);
 
 /**
  * @brief 在任务上下文将载荷交给已注册UART发送接口。

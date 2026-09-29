@@ -72,7 +72,27 @@ int qspi_erase_sector(uint32_t);
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode:
         raise ValueError(result.stdout + result.stderr)
-    cases = ["ready", "partial_program_error", "corrupt_package", "commit_written_but_error"]
+    # 普通镜像单独链接正式协议层，不提供Flash/复位/OTA后台符号，防止保留动作误接入。
+    disabled_sources = [harness.with_name("test_pc_ota_disabled.c"),
+        root / "App/protocol/pc/pc_ota.c", root / "App/protocol/pc/pc_protocol.c",
+        root / "Middlewares/Third_Party/cJSON/cJSON.c", args.boot_root / "tests/qemu_start.s"]
+    disabled_command = [arg for arg in command if arg not in map(str, sources)]
+    disabled_command[disabled_command.index("-DENABLE_OTA_BOOT=1")] = "-DENABLE_OTA_BOOT=0"
+    disabled_command[-1] = str(build / "disabled.elf")
+    disabled_command.extend(map(str, disabled_sources))
+    result = subprocess.run(disabled_command, capture_output=True, text=True, env=env, timeout=60)
+    (build / "disabled-build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+    if result.returncode:
+        raise ValueError(result.stdout + result.stderr)
+    result = subprocess.run([str(args.qemu), "-M", "mps2-an500", "-display", "none", "-monitor", "none",
+        "-serial", "none", "-no-reboot", "-semihosting-config", "enable=on,target=native", "-kernel",
+        str(build / "disabled.elf")], capture_output=True, text=True, env=env, timeout=60)
+    (build / "disabled.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+    if result.returncode:
+        raise ValueError(f"普通镜像拒绝回归失败：{result.returncode}, {result.stdout + result.stderr}")
+    print("PASS: disabled firmware upgrade rejection", flush=True)
+    cases = ["ready", "partial_program_error", "corrupt_package", "commit_written_but_error",
+             "rk_missing_at_start", "rk_stalled_after_confirm"]
     for mode, name in enumerate(cases):
         (build / "config.bin").write_bytes(struct.pack("<I", mode))
         result = subprocess.run([str(args.qemu), "-M", "mps2-an500", "-display", "none", "-monitor", "none",
@@ -85,7 +105,8 @@ int qspi_erase_sector(uint32_t);
         if result.returncode or "PASS: actual App" not in output:
             raise ValueError(f"{name}: {output}")
         print(f"PASS: {name}", flush=True)
-    report = {"scope": "actual App/PC OTA C in QEMU, mocked board ports, no network or hardware proof", "passed": cases,
+    report = {"scope": "actual App/PC OTA C in QEMU, mocked board ports, no network or hardware proof",
+        "passed": ["disabled_firmware_upgrade_rejection", *cases],
         "ota_app_sha256": hashlib.sha256((root / "App/ota/ota_app.c").read_bytes()).hexdigest()}
     (build / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 

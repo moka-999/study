@@ -35,8 +35,7 @@
 #include "led.h"
 #include "qspi_hw.h"
 #include "frame.h"
-#include "dispatch.h"
-#include "hb_task.h"
+#include "rk_link.h"
 #include "uart_router.h"
 #include "pwr_ctrl.h"
 #include "pc_protocol.h"
@@ -67,8 +66,8 @@ TaskHandle_t      ledBlinkTaskHandle;
 TaskHandle_t      tcpClientTaskHandle;
 TaskHandle_t      monitorTaskHandle;
 QueueHandle_t     monitorQueue;             /* 监测→TCP 消息队列 */
-QueueHandle_t     rkToPc_Queue;             /* RK→PC 上报队列     */
-QueueHandle_t     pcToRk_Queue;             /* PC→RK 转发队列     */
+QueueHandle_t     rkRequestQueue;          /* 业务层→RK的结构化请求。 */
+QueueHandle_t     rkResponseQueue;         /* RK→业务层的完整结果。 */
 char              mon_msg[128];            /* 监测报文缓冲(非static, tcp_task用) */
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
@@ -85,7 +84,6 @@ void StartLedBlinkTask(void *argument);
 void StartTcpServerTask(void *argument);
 void StartMonitorTask(void *argument);
 void StartRkTask(void *argument);
-void StartHbTask(void *argument);
 void StartWdtFeedTask(void *argument);
 /* USER CODE END FunctionPrototypes */
 
@@ -184,7 +182,7 @@ void MX_FREERTOS_Init(void) {
   xTaskCreate(StartMonitorTask, "monitor", 512, NULL, 2, &monitorTaskHandle);
   xTaskCreate(StartWdtFeedTask, "wdtFeed", 128, NULL, 25, NULL);
 #else
-  /* creation of ledBlinkTask */
+  /* 创建板载运行指示任务。 */
   xTaskCreate(StartLedBlinkTask, "ledBlinkTask", 128, NULL, 1, &ledBlinkTaskHandle);
   /*
    * PC TCP server栈设为16KiB（4096个StackType_t）：任务栈上同时存在4KiB
@@ -195,13 +193,11 @@ void MX_FREERTOS_Init(void) {
   /* 监测任务包含AD/PAC采集栈帧，保留2KiB栈空间。 */
   xTaskCreate(StartMonitorTask, "monitor", 512, NULL, 2, &monitorTaskHandle);
   monitorQueue = xQueueCreate(4, 128);
-  /* rk 任务: 栈上 6.5KB 大缓冲(buf+sm+frame+msg+ack+fwd), 8KB 会溢出踩 TCB,
-     加大到 32KB(8192字) */
+  /* RK任务栈保留32KiB，容纳RX块、状态机及命令/心跳组帧，统一推进收发。 */
   xTaskCreate(StartRkTask, "rk", 8192, NULL, 3, NULL);
-  /* hb 任务: hb[TLV_FRAME_MAX]=1040B 单这一项就超 1KB, 加大到 4KB(1024字) */
-  xTaskCreate(StartHbTask, "hb", 1024, NULL, 3, NULL);
-  rkToPc_Queue  = xQueueCreate(8, sizeof(rk_msg_t));   /* RK→PC 上报队列     */
-  pcToRk_Queue  = xQueueCreate(8, sizeof(pc2rk_msg_t)); /* PC→RK 命令转发队列 */
+  rkRequestQueue = xQueueCreate(8, sizeof(rk_request_t));
+  rkResponseQueue = xQueueCreate(8, sizeof(rk_response_t));
+  if (rkRequestQueue == NULL || rkResponseQueue == NULL) Error_Handler();
   /* OTA确认需读写256B日志及校验缓冲，留4KiB栈；不再无条件给卡死任务喂狗。 */
   xTaskCreate(StartWdtFeedTask, "wdtFeed", 1024, NULL, 25, NULL);
 

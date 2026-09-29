@@ -3,6 +3,7 @@
 #define MONITOR_TASK_H
 
 #include "memory_monitor.h"
+#include "idd_stats.h"
 #include "mcp4725.h"
 #include "pwr_ctrl.h"
 #include <stdint.h>
@@ -30,6 +31,21 @@ typedef enum {
  *       memory.valid_mask及timestamp_ms新鲜度；存在快照不等于测量有效。
  */
 int monitor_get_latest(monitor_snapshot_t *snapshot);
+
+/**
+ * 任务上下文启动统计：IF_OK成功；IF_ERR参数无效；IF_TIMEOUT器件事务锁忙；
+ * IF_ERR也表示电源非ON、OTA维护/未健康或已有窗口。拒绝时旧统计保持不变。
+ * 参数范围同idd_stats_begin；仅收集后续实际新采样，不重复使用s_latest。
+ * ponytail: 沿用约2秒后台采样；高频需求须先冻结RK/器件时窗再调整调度。
+ * 不保证短窗口足够样本，不触发RK/温控动作。
+ */
+int monitor_idd_start(uint32_t duration_ms, uint32_t minimum_samples);
+/** 任务上下文取消当前窗口，不停ADC、不清空部分统计、不改变电源。 */
+void monitor_idd_cancel(void);
+/** 冻结当前统计，采样足够为COMPLETE，否则TIMEOUT；不代表算法PASS/FAIL。 */
+void monitor_idd_finish(void);
+/** 复制并推进到期状态：1成功，0空指针；检查state及每项valid_count后使用。 */
+int monitor_idd_get(idd_stats_t *out);
 
 /**
  * @brief 调度前建立采样/电源/PC配置共用事务锁并绑定Boot DAC。

@@ -1,9 +1,23 @@
 ﻿param(
-    [ValidateSet('build', 'rebuild', 'style-test', 'protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build', 'ota-probe')]
-    [string]$Task = 'build'
+    [ValidateSet('build', 'rebuild', 'style-test', 'protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build', 'ota-probe', 'ota-build', 'ota-swd', 'ota-net')]
+    [string]$Task = 'build',
+    [string]$Version = '',
+    [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
+    [string]$Serial = '',
+    [string]$BoardIP = '192.168.1.201',
+    [int]$Port = 8888,
+    [ValidateSet('NO', 'YES')][string]$ConfirmIdle = 'NO',
+    [switch]$LegacyOtaActions,
+    [switch]$PowerSimulation
 )
 
 $ErrorActionPreference = 'Stop'
+if ($PowerSimulation -and $Task -notin @('ota-build', 'ota-swd', 'ota-net')) {
+    throw '-PowerSimulation 仅用于V2的OTA构建/下载入口，RK必须已经独立启动。'
+}
+if ($LegacyOtaActions -and $Task -ne 'ota-net') {
+    throw '-LegacyOtaActions 仅用于 ota-net 对旧版固件进行协议迁移。'
+}
 # 本文件保留UTF-8 BOM，避免Windows PowerShell 5按本地编码误读中文注释。
 $repo = Split-Path -Parent $PSScriptRoot
 $buildDirName = if ($Task -eq 'pwr-wave-build') {
@@ -49,6 +63,38 @@ function Find-Python {
     if (Test-Path -LiteralPath $codexPython) { return $codexPython }
 
     throw 'Python not found. Install Python 3 or add python.exe to PATH.'
+}
+
+if ($Task -in @('ota-build', 'ota-swd', 'ota-net')) {
+    # 日常修改仍走完整B的安装/校验，不直接覆盖App，也不改启动记录的CRC。
+    $python = Find-Python
+    $action = switch ($Task) {
+        'ota-build' { 'build' }
+        'ota-swd' { 'swd' }
+        'ota-net' { 'network' }
+    }
+    $otaArgs = @(
+        '-B', '-X', 'utf8', (Join-Path $repo 'tools\ota_dev.py'), $action,
+        '--version', $Version, '--configuration', $Configuration,
+        '--compiler', (Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe'),
+        '--cmake', (Find-BundledExe 'cmake' 'cmake.exe'),
+        '--ninja', (Find-BundledExe 'ninja' 'ninja.exe')
+    )
+    if ($PowerSimulation) { $otaArgs += '--power-simulation' }
+    if ($action -ne 'build') {
+        if ($ConfirmIdle -ne 'YES') { throw '请先停止测试并协调B2温控；确认允许复位后加 -ConfirmIdle YES。' }
+        $otaArgs += '--confirm-idle'
+    }
+    if ($action -eq 'swd') {
+        $otaArgs += @('--serial', $Serial,
+            '--server', (Find-BundledExe 'stlink-gdbserver' 'ST-LINK_gdbserver.exe'),
+            '--programmer', (Find-BundledExe 'programmer' 'STM32_Programmer_CLI.exe'))
+    } elseif ($action -eq 'network') {
+        $otaArgs += @('--host', $BoardIP, '--port', $Port)
+        if ($LegacyOtaActions) { $otaArgs += '--legacy-ota-actions' }
+    }
+    & $python @otaArgs
+    exit $LASTEXITCODE
 }
 
 if ($Task -eq 'ota-probe') {
@@ -97,7 +143,7 @@ if ($Task -eq 'protocol-test' -or $Task -eq 'pc-protocol-test' -or $Task -eq 'pw
     } elseif ($Task -eq 'flash-test') {
         'tests\test_version.py'
     } else {
-        'tests\verify_protocol_v2.py'
+        'tests\verify_rk_protocol_c.py'
     }
     & $python -B -X utf8 (Join-Path $repo $script)
     exit $LASTEXITCODE
@@ -152,6 +198,8 @@ $cmakeArgs = @(
     $driverMockOption
     $adWaveOption
     $pcNetTestOption
+    '-DENABLE_RK_GATEWAY_TEST=OFF'
+    '-DENABLE_V2_POWER_SIMULATION=OFF'
 )
 if (-not (Test-Path -LiteralPath $cache)) {
     $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake"

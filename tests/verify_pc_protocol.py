@@ -27,23 +27,34 @@ class StreamModel:
     def __init__(self) -> None:
         self.buffer = bytearray()
         self.expected = 0
+        self.discarded = 0
 
     def reset(self) -> None:
         self.buffer.clear()
         self.expected = 0
+        self.discarded = 0
+
+    def header_possible(self) -> bool:
+        prefix = self.buffer[:4]
+        minimum = int.from_bytes(prefix.ljust(4, b"\x00"), "big")
+        maximum = int.from_bytes(prefix.ljust(4, b"\xff"), "big")
+        if minimum > MAX_PDU or maximum < HEADER_SIZE:
+            return False
+        for offset, value in ((4, VERSION), (6, FLAG_JSON), (8, 0)):
+            available = min(2, max(0, len(self.buffer) - offset))
+            if self.buffer[offset:offset + available] != value.to_bytes(2, "big")[:available]:
+                return False
+        return True
 
     def push(self, value: int) -> bytes | None:
         self.buffer.append(value)
-        if len(self.buffer) == 4:
-            self.expected = struct.unpack_from(">I", self.buffer)[0]
-            if not HEADER_SIZE <= self.expected <= MAX_PDU:
-                raise ProtocolError("length")
-        if len(self.buffer) == 6 and struct.unpack_from(">H", self.buffer, 4)[0] != VERSION:
-            raise ProtocolError("version")
-        if len(self.buffer) == 8 and struct.unpack_from(">H", self.buffer, 6)[0] != FLAG_JSON:
-            raise ProtocolError("flag")
-        if len(self.buffer) == 10 and struct.unpack_from(">H", self.buffer, 8)[0] != 0:
-            raise ProtocolError("service")
+        if len(self.buffer) <= HEADER_SIZE:
+            while self.buffer and not self.header_possible():
+                if self.discarded >= MAX_PDU:
+                    raise ProtocolError("recovery limit")
+                del self.buffer[0]
+                self.discarded += 1
+            self.expected = int.from_bytes(self.buffer[:4], "big") if len(self.buffer) >= 4 else 0
         if self.expected and len(self.buffer) == self.expected:
             return bytes(self.buffer)
         return None
@@ -55,14 +66,14 @@ def build_frame(body: bytes, service: int, command: int, sequence: int) -> bytes
                        service, command, sequence, 0) + body
 
 
-def expect_protocol_error(data: bytes, label: str) -> None:
+def expect_header_recovery(data: bytes, label: str) -> None:
     stream = StreamModel()
-    try:
-        for value in data:
-            stream.push(value)
-    except ProtocolError:
-        return
-    raise AssertionError(f"未拒绝非法{label}")
+    heartbeat = build_frame(b"{}", 0, 2, 99)
+    for value in data:
+        assert stream.push(value) is None, f"非法{label}被当作完整帧"
+    assert stream.discarded > 0
+    frames = [frame for value in heartbeat if (frame := stream.push(value)) is not None]
+    assert frames == [heartbeat], f"非法{label}之后未恢复正常帧"
 
 
 def sha256(path: Path) -> str:
@@ -117,27 +128,27 @@ def main() -> None:
     assert json.loads(decoded[0][HEADER_SIZE:].decode("utf-8"))["board"] == "B1"
     passed += 1
 
-    expect_protocol_error(struct.pack(">I", 17), "最小Length")
-    expect_protocol_error(struct.pack(">I", MAX_PDU + 1), "最大Length")
-    expect_protocol_error(struct.pack(">IH", HEADER_SIZE, 2), "Version")
-    expect_protocol_error(struct.pack(">IHH", HEADER_SIZE, VERSION, 7), "Flag")
-    expect_protocol_error(struct.pack(">IHHH", HEADER_SIZE, VERSION, FLAG_JSON, 1),
+    expect_header_recovery(struct.pack(">I", 17), "最小Length")
+    expect_header_recovery(struct.pack(">I", MAX_PDU + 1), "最大Length")
+    expect_header_recovery(struct.pack(">IH", HEADER_SIZE, 2), "Version")
+    expect_header_recovery(struct.pack(">IHH", HEADER_SIZE, VERSION, 7), "Flag")
+    expect_header_recovery(struct.pack(">IHHH", HEADER_SIZE, VERSION, FLAG_JSON, 1),
                           "ServiceID")
     passed += 5
 
-    # 字段刚到齐时就拒绝，不因拆分状态处理函数而延迟到整帧结束。
-    for invalid, reject_at in ((struct.pack(">I", MAX_PDU + 1), 4),
-                               (struct.pack(">IH", 20, 2), 6),
-                               (struct.pack(">IHH", 20, VERSION, 7), 8)):
-        stream.reset()
-        rejected_at = None
-        for index, value in enumerate(invalid, 1):
-            try:
-                stream.push(value)
-            except ProtocolError:
-                rejected_at = index
-                break
-        assert rejected_at == reject_at
+    # 明确垃圾立即丢弃，不留下半帧；恢复预算用完才产生致命错误。
+    stream.reset()
+    for value in b"TEXT":
+        assert stream.push(value) is None
+    assert not stream.buffer and stream.discarded == 4
+    for _ in range(MAX_PDU - 4):
+        assert stream.push(ord("T")) is None
+    try:
+        stream.push(ord("T"))
+    except ProtocolError:
+        pass
+    else:
+        raise AssertionError("垃圾扫描超过4KiB时必须停止")
     passed += 1
 
     # 固定依赖版本和文件摘要，防止无意中升级或改写第三方源码。
@@ -343,7 +354,10 @@ def main() -> None:
     assert "ddr_power_build_step_targets" in business_source
     assert "isfinite" in business_source and "pc_test_start_read_index" in business_source
     start_handler = dispatch_source.split("static pc_dispatch_result_t handle_start_test(", 1)[1].split("\n}", 1)[0]
-    assert '"notReady"' in start_handler and '"otaNotReady"' in start_handler
+    service_source = (ROOT / "App/protocol/pc/pc_test_service.c").read_text(encoding="utf-8")
+    assert "pc_test_service_start" in start_handler
+    assert '"notReady"' in service_source and '"otaNotReady"' in service_source
+    assert "pc_dispatch_next_response" in tcp_source
     assert "PC_DISPATCH_NO_RESPONSE" not in start_handler
     assert "build_command_failure_with_index" in start_handler
     passed += 1

@@ -49,13 +49,17 @@ def main() -> None:
     assert "static uint64_t s_next_sequence;" in link
     assert link.index("taskENTER_CRITICAL();") < link.index("s_next_sequence++")
     assert link.index("s_next_sequence++") < link.index("taskEXIT_CRITICAL();")
-    assert "extern QueueHandle_t pcToRk_Queue;" in link_header
-    assert "extern QueueHandle_t rkToPc_Queue;" in link_header
-    for relative in ("App/tasks/rk/hb_task.c", "App/tasks/rk/rk_task.c"):
-        source = code(relative)
-        assert "rk_link_next_sequence()" in source and "g_rk_seq_counter" not in source
-        assert not re.search(r"extern\s+.*Queue", source)
-    assert "extern void *" not in code("App/protocol/rk/dispatch.c")
+    assert "extern QueueHandle_t rkRequestQueue;" in link_header
+    assert "extern QueueHandle_t rkResponseQueue;" in link_header
+    source = code("App/tasks/rk/rk_task.c")
+    assert "rk_link_next_sequence()" in source and "g_rk_seq_counter" not in source
+    assert not re.search(r"extern\s+.*Queue", source)
+    # 心跳随RK主循环推进，不能残留独立线程创建或失效的头文件引用。
+    assert "process_heartbeat(&last_heartbeat);" in source
+    for suffix in ("c", "h"):
+        assert not (ROOT / f"App/tasks/rk/hb_task.{suffix}").exists()
+    assert "StartHbTask" not in code("Core/Src/freertos.c")
+    assert not (ROOT / "App/protocol/rk/dispatch.c").exists()
     passed += 1
 
     router = code("HAL_Drv/uart_router.c")

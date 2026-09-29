@@ -21,13 +21,15 @@
 
 extern UART_HandleTypeDef huart1;
 
-/* AD7124 轮询等待回调: 注入 vTaskDelay 让出 CPU (HAL_Delay 是 TIM 忙等) */
+#include "device_wait.h"
+
+/* 器件自检同样保证最短等待，不把一个RTOS节拍误当作完整1ms。 */
 static void _adc_wait_ms(uint32_t ms)
-{ vTaskDelay(pdMS_TO_TICKS(ms)); }
+{ device_wait_ms(ms); }
 
 /* PAC1934的REFRESH_V后同样必须让出CPU并等待至少1ms。 */
 static void _pac_wait_ms(uint32_t ms)
-{ vTaskDelay(pdMS_TO_TICKS(ms)); }
+{ device_wait_ms(ms); }
 
 static void _uart_puts(const char *s)
 {
@@ -63,7 +65,7 @@ static int _test_spi2_loopback(void)
 
     extern SPI_HandleTypeDef hspi2;
 
-    /* 降低速率到 ~197KHz (MBR=7), 跳线友好 */
+    /* 降低速率到 约504kHz (MBR=7), 跳线友好 */
     uint32_t cfg1_save = hspi2.Instance->CFG1;
     uint32_t cfg1_new = (cfg1_save & ~(7u << 28)) | (7u << 28);
     hspi2.Instance->CFG1 = cfg1_new;
@@ -118,17 +120,17 @@ static void _test_ad7124(void)
     _uart_puts("--- AD7124 Driver Test (SPI2, PB12=CS) ---\r\n");
     _uart_puts("  (挂逻辑分析仪: CS/SCK/MOSI/MISO)\r\n");
 
-    /* PB12 作 CS (输出推挽, 初始高) */
+    /* PB12与PCF的开漏INT共线，仅供分析仪波形；禁止推挽驱动高电平。 */
     __HAL_RCC_GPIOB_CLK_ENABLE();
     GPIO_InitTypeDef g = {0};
     g.Pin   = GPIO_PIN_12;
-    g.Mode  = GPIO_MODE_OUTPUT_PP;
+    g.Mode  = GPIO_MODE_OUTPUT_OD;
     g.Pull  = GPIO_PULLUP;
     g.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &g);
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
 
-    /* 降速到 ~197KHz (MBR=7), 逻辑分析仪友好 */
+    /* 降速到 约504kHz (MBR=7), 逻辑分析仪友好 */
     extern SPI_HandleTypeDef hspi2;
     uint32_t cfg1_save = hspi2.Instance->CFG1;
     uint32_t cfg1_new = (cfg1_save & ~(7u << 28)) | (7u << 28);
@@ -157,14 +159,15 @@ static void _test_ad7124(void)
     _uart_print("%s (raw=%ld)\r\n", ret == 0 ? "OK" : "FAIL", raw);
 
     _uart_puts("[5] Read all 3ch... ");
-    int32_t raw_all[4]; uint8_t got;
+    int32_t raw_all[4] = {0}; uint8_t got;
     ret = ad7124_read_all(&adc, raw_all, 4, &got);
     _uart_print("%s (got=%d: CH0=%ld CH1=%ld CH2=%ld)\r\n",
                ret == 0 ? "OK" : "FAIL", got, raw_all[0], raw_all[1], raw_all[2]);
 
     _uart_puts("[6] Voltage with B2 divider (×1.01, REF 2.5V)... ");
-    for (int i = 0; i < got; i++) {
-        int32_t mv = ad7124_raw_to_mv_div(raw_all[i], 2.5f, 0 /*PGA1*/, 0 /*unipolar*/,
+    /* got仅供诊断；失败的快照不允许按数量换算前缀。 */
+    for (int i = 0; ret == IF_OK && i < got; i++) {
+        int32_t mv = ad7124_raw_to_mv_div(raw_all[i], 2.5f, 0 /*增益1*/, 0 /*单极性*/,
                                           AD7124_DIV_100R_10K);
         _uart_print("CH%d=%ldmV ", i, mv);
     }

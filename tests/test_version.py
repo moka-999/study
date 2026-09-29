@@ -29,8 +29,8 @@ FRU_FORMAT = "<HH32s32s16s16s6sB4s4s4sxH16s32s32s22s"
 FRU_SIZE = 224
 
 
-def header_define(name: str) -> int:
-    text = (ROOT / "BSP/Flash/flash_layout.h").read_text(encoding="utf-8")
+def header_define(name: str, root: Path = ROOT) -> int:
+    text = (root / "BSP/Flash/flash_layout.h").read_text(encoding="utf-8")
     match = re.search(rf"^#define\s+{name}\s+(0x[0-9A-Fa-f]+|\d+)", text, re.MULTILINE)
     assert match, f"未找到布局常量 {name}"
     return int(match.group(1), 0)
@@ -102,35 +102,50 @@ def load_latest(slots: list[bytes], record_type: int, payload_size: int) -> Reco
     return latest
 
 
-def verify_partition_map() -> None:
-    total = header_define("FLASH_LAYOUT_TOTAL_SIZE")
-    metadata_base = header_define("FLASH_LAYOUT_METADATA_BASE")
-    metadata_size = header_define("FLASH_LAYOUT_METADATA_SIZE")
-    ota_a = header_define("FLASH_LAYOUT_OTA_SLOT_A_BASE")
-    ota_b = header_define("FLASH_LAYOUT_OTA_SLOT_B_BASE")
-    ota_size = header_define("FLASH_LAYOUT_OTA_SLOT_SIZE")
-    reserved = header_define("FLASH_LAYOUT_RESERVED_DATA_BASE")
-    reserved_size = header_define("FLASH_LAYOUT_RESERVED_DATA_SIZE")
-    self_test = header_define("FLASH_LAYOUT_SELF_TEST_BASE")
-    self_test_size = header_define("FLASH_LAYOUT_SELF_TEST_SIZE")
+def verify_partition_map(root: Path = ROOT) -> None:
+    """核对指定App工程的完整分区，不连接硬件或改写Flash。"""
+    total = header_define("FLASH_LAYOUT_TOTAL_SIZE", root)
+    metadata_base = header_define("FLASH_LAYOUT_METADATA_BASE", root)
+    metadata_size = header_define("FLASH_LAYOUT_METADATA_SIZE", root)
+    ota_a = header_define("FLASH_LAYOUT_OTA_SLOT_A_BASE", root)
+    ota_b = header_define("FLASH_LAYOUT_OTA_SLOT_B_BASE", root)
+    ota_size = header_define("FLASH_LAYOUT_OTA_SLOT_SIZE", root)
+    rk_a = header_define("FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE", root)
+    rk_b = header_define("FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE", root)
+    rk_size = header_define("FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE", root)
+    reserved = header_define("FLASH_LAYOUT_RESERVED_DATA_BASE", root)
+    reserved_size = header_define("FLASH_LAYOUT_RESERVED_DATA_SIZE", root)
+    self_test = header_define("FLASH_LAYOUT_SELF_TEST_BASE", root)
+    self_test_size = header_define("FLASH_LAYOUT_SELF_TEST_SIZE", root)
 
     assert total == 32 * 1024 * 1024
     assert metadata_base == 0
+    assert metadata_size == 0x10000
+    assert (ota_a, ota_b, ota_size) == (0x10000, 0x210000, 0x200000)
+    assert (rk_a, rk_b, rk_size) == (0x410000, 0xC10000, 8 * 1024 * 1024)
+    assert (self_test, self_test_size) == (0x1FF0000, 0x10000)
     assert metadata_base + metadata_size == ota_a
     assert ota_a + ota_size == ota_b
-    assert ota_b + ota_size == reserved
+    assert ota_b + ota_size == rk_a
+    assert rk_a + rk_size == rk_b
+    assert rk_b + rk_size == reserved
     assert reserved + reserved_size == self_test
     assert self_test + self_test_size == total
-    assert ota_size >= 1920 * 1024, "单个 OTA 预留槽必须容纳当前最大 App"
+    assert reserved_size > 0, "RK预留后仍须保留独立扩展区"
 
     for name in (
         "FLASH_LAYOUT_VERSION_SLOT_A",
         "FLASH_LAYOUT_VERSION_SLOT_B",
         "FLASH_LAYOUT_FRU_SLOT_A",
         "FLASH_LAYOUT_FRU_SLOT_B",
+        "FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE",
+        "FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE",
+        "FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE",
+        "FLASH_LAYOUT_RESERVED_DATA_BASE",
+        "FLASH_LAYOUT_RESERVED_DATA_SIZE",
         "FLASH_LAYOUT_SELF_TEST_BASE",
     ):
-        assert header_define(name) % SECTOR_SIZE == 0, f"{name} 未按扇区对齐"
+        assert header_define(name, root) % SECTOR_SIZE == 0, f"{name} 未按扇区对齐"
 
 
 def verify_crc_and_payload_layout() -> None:

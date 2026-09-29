@@ -1,0 +1,100 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "🔨 OTA 编译打包（不下载）",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/dev.ps1",
+                "ota-build",
+                "-Version",
+                "${input:otaVersion}"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "编译Debug槽限App，验证A1/A2，生成一个test.ota；不占用ST-Link"
+        },
+        {
+            "label": "⚡ OTA 安全下载（ST-Link，会复位）",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/dev.ps1",
+                "ota-swd",
+                "-Version",
+                "${input:otaVersion}",
+                "-Serial",
+                "${input:stlinkSerial}",
+                "-ConfirmIdle",
+                "${input:otaIdle}"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "detail": "Ctrl+Shift+B：构建、备份、W25下载区写入、B安装、30秒健康确认；不覆盖B/原运行槽"
+        },
+        {
+            "label": "🌐 OTA 网络升级（会复位）",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/dev.ps1",
+                "ota-net",
+                "-Version",
+                "${input:otaVersion}",
+                "-BoardIP",
+                "${input:otaIP}",
+                "-ConfirmIdle",
+                "${input:otaIdle}"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "构建后复用正式0901/0902/0903升级，等待健康确认；不连接ST-Link"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "otaVersion",
+            "type": "promptString",
+            "description": "新固件版本（必须大于板上版本；同版本代码修改也要递增）",
+            "default": "0.1.9"
+        },
+        {
+            "id": "stlinkSerial",
+            "type": "promptString",
+            "description": "V2所接ST-Link序列号（更换烧录器时修改）",
+            "default": "54FF6D067182505239431087"
+        },
+        {
+            "id": "otaIP",
+            "type": "promptString",
+            "description": "V2 IP地址；先关闭网络助手/PC软件的现有连接",
+            "default": "192.168.1.201"
+        },
+        {
+            "id": "otaIdle",
+            "type": "pickString",
+            "description": "已停止测试并协调温控，允许复位升级？YES继续，NO取消",
+            "options": [
+                "NO",
+                "YES"
+            ],
+            "default": "NO"
+        }
+    ]
+}

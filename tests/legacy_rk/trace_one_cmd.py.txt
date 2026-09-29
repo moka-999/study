@@ -178,3 +178,4 @@ print('    → 执行 _h_reboot():  GPIO 复位 RK3588')
 print('    → _h_test_cmd():     入队 pcToRk_Queue, 立即回 ACK')
 print('    → rk_task 取队:      用 rk_seq=31 打包单个 CmdID=0x0001 → USART1')
 print()
+# 已停用的历史参考，不适用于当前PC或RK协议，不作为测试入口。

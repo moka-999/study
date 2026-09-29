@@ -92,3 +92,4 @@ print()
 print('='*95)
 print('  完成 | MCU-RK seq=%d | PC-MCU seq范围 0x1000~0x%04X | ACK status=0x03' % (mcu_seq, pc_seq))
 print('='*95)
+# 已停用的历史参考，不适用于当前PC或RK协议，不作为测试入口。

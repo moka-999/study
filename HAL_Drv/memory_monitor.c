@@ -22,15 +22,13 @@ void memory_monitor_configure(memory_monitor_t *monitor,
 
 int memory_monitor_init(memory_monitor_t *monitor)
 {
-    if (!monitor || !monitor->pac.bus || !monitor->adc.spi ||
-        !monitor->adc.cs_port)
-        return IF_ERR;
+    if (!monitor) return IF_ERR;
 
     /* 失败器件可独立重试，不重置已就绪的另一颗器件。 */
-    if (!monitor->pac_ready)
+    if (!monitor->pac_ready && monitor->pac.bus)
         monitor->pac_ready = pac1934_init(&monitor->pac,
                                           PAC1934_CH_MASK_B1_RAILS, 0U) == IF_OK;
-    if (!monitor->adc_ready)
+    if (!monitor->adc_ready && monitor->adc.spi && monitor->adc.cs_port)
         monitor->adc_ready = ad7124_init(&monitor->adc) == IF_OK;
     return monitor->pac_ready && monitor->adc_ready ? IF_OK : IF_ERR;
 }
@@ -52,12 +50,19 @@ int memory_monitor_sample(memory_monitor_t *monitor,
         got == MEMORY_MONITOR_RAIL_COUNT)
         sample->valid_mask |= MEMORY_MONITOR_VALID_VOLTAGE;
 
+    /* 故障样本不发布；下次监测独立重初始化ADC，不影响PAC和TPS。 */
+    if ((sample->valid_mask & MEMORY_MONITOR_VALID_VOLTAGE) == 0U)
+        monitor->adc_ready = 0U;
+
     /* PAC返回4通道数组，本项目只保存已启用的前3路。 */
     if (monitor->pac_ready) {
         pac1934_measurement_t all[4];
         if (pac1934_measure_all(&monitor->pac, all) == IF_OK) {
             memcpy(sample->idd, all, sizeof(sample->idd));
             sample->valid_mask |= MEMORY_MONITOR_VALID_IDD;
+        } else if (monitor->pac.active_mask == 0U) {
+            /* 读取失败且器件配置已失信：不发布旧值，下一监测周期重新初始化。 */
+            monitor->pac_ready = 0U;
         }
     }
 

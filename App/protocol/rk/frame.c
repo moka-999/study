@@ -1,239 +1,202 @@
-/*
- * ===================================================================
- * TLV 协议帧 — 打包/解包实现
- * ===================================================================
- */
 #include "frame.h"
 #include "crc.h"
 #include <string.h>
 
-/* ═══════════════════════════════════════════════════════════════════
- * 打包: 命令帧
- *
- *   [0x5A][Len:2B][HCRC:2B][Seq:8B][Type=0x5000][TLV_Len:2B][CmdID:2B][data][FCRC:2B][0xA5]
- *
- *   Len      = 6 + data_len  (TLV 总字节)
- *   TLV_Len  = 2 + data_len  (Value 字节)
- *   FrameCRC = CRC16(Len:2B) + CRC16_continue(TLV data)
- * ═══════════════════════════════════════════════════════════════════ */
+/* 结果聚合数组的下标，不是线上Type/命令号；COUNT同时代表非结果字段。 */
+typedef enum {
+    RK_RESULT_FIELD_COMMAND,
+    RK_RESULT_FIELD_ADDRESS,
+    RK_RESULT_FIELD_DIE,
+    RK_RESULT_FIELD_TIME,
+    RK_RESULT_FIELD_COUNT
+} rk_result_field_t;
 
-int tlv_pack_cmd(uint16_t cmd,
-                 const uint8_t *data, uint16_t data_len,
-                 uint64_t seq,
-                 uint8_t *out, uint16_t out_max)
+typedef struct {
+    uint16_t type;                 /* 完整TLV Type，用于查表。 */
+    uint16_t min_value_length;     /* Value下限，字节；命令容器最少有2字节CmdID。 */
+    uint16_t max_value_length;     /* Value上限，字节；标量上下限相同。 */
+    rk_result_field_t result_field; /* 结果写入哪一栏；COUNT表示心跳或下行命令。 */
+} rk_tlv_rule_t;
+
+/* TLV字段规则表：编码、解码和最终结果聚合共用，避免宽度定义散落。
+ * 此处只识别字段，不执行算法；真正算法由RK收到0x5000之后分发。
+ */
+static const rk_tlv_rule_t s_tlv_rules[] = {
+    /* Type                  最小 最大             结果栏 */
+    {TLV_TYPE_HEARTBEAT,      0U,  0U,              RK_RESULT_FIELD_COUNT},
+    {TLV_TYPE_CMD,            2U,  TLV_VALUE_MAX,    RK_RESULT_FIELD_COUNT},
+    {TLV_TYPE_RESULT_CMD,     2U,  2U,              RK_RESULT_FIELD_COMMAND},
+    {TLV_TYPE_RESULT_ADDR,    8U,  8U,              RK_RESULT_FIELD_ADDRESS},
+    {TLV_TYPE_RESULT_DIE,     1U,  1U,              RK_RESULT_FIELD_DIE},
+    {TLV_TYPE_RESULT_TIME,    8U,  8U,              RK_RESULT_FIELD_TIME},
+};
+
+/* 返回只读规则；NULL代表未知扩展类型，由上层决定是否消费。 */
+static const rk_tlv_rule_t *find_tlv_rule(uint16_t type)
 {
-    uint16_t tlv_len     = 2 + data_len;  /* Value = CmdID(2) + params */
-    uint16_t payload_len = 4 + tlv_len;   /* Type(2) + TLV_Len(2) + Value */
-    uint16_t total_len   = 1 + 2 + 2 + 8 + payload_len + 2 + 1;  /* 16 + payload */
-
-    if (total_len > out_max) return 0;
-
-    uint16_t pos = 0;
-
-    /* ── Header ── */
-    out[pos++] = TLV_SYNC_HEADER;               /* [0]  Sync      */
-    out[pos++] = (uint8_t)(payload_len >> 8);   /* [1]  Len_H     */
-    out[pos++] = (uint8_t)(payload_len);        /* [2]  Len_L     */
-
-    uint16_t hcrc = crc16_modbus(out + pos - 3, 3);  /* 0x5A + Len(2) */
-    out[pos++] = (uint8_t)(hcrc);               /* [3]  HCRC_L    */
-    out[pos++] = (uint8_t)(hcrc >> 8);          /* [4]  HCRC_H    */
-
-    /* ── Sequence ── */
-    out[pos++] = (uint8_t)(seq >> 56);          /* [5]  */
-    out[pos++] = (uint8_t)(seq >> 48);          /* [6]  */
-    out[pos++] = (uint8_t)(seq >> 40);          /* [7]  */
-    out[pos++] = (uint8_t)(seq >> 32);          /* [8]  */
-    out[pos++] = (uint8_t)(seq >> 24);          /* [9]  */
-    out[pos++] = (uint8_t)(seq >> 16);          /* [10] */
-    out[pos++] = (uint8_t)(seq >> 8);           /* [11] */
-    out[pos++] = (uint8_t)(seq);                /* [12] */
-
-    /* ── TLV: Type=0x5000 + TLV_Len + Value=[CmdID:2B][params] ── */
-    uint16_t tlv_start = pos;                   /* 记 TLV 起始 → Frame CRC */
-
-    out[pos++] = 0x50;                          /* Type_H   */
-    out[pos++] = 0x00;                          /* Type_L   */
-    out[pos++] = (uint8_t)(tlv_len >> 8);       /* TLV Len_H */
-    out[pos++] = (uint8_t)(tlv_len);            /* TLV Len_L */
-
-    /* Value: CmdID (2B BE) */
-    out[pos++] = (uint8_t)(cmd >> 8);
-    out[pos++] = (uint8_t)(cmd);
-
-    /* Value: params */
-    if (data_len > 0) {
-        memcpy(out + pos, data, data_len);
-        pos += data_len;
+    for (unsigned i = 0U; i < sizeof(s_tlv_rules) / sizeof(s_tlv_rules[0]); ++i) {
+        if (s_tlv_rules[i].type == type) {
+            return &s_tlv_rules[i];
+        }
     }
+    return NULL;
+}
 
-    /* ── Frame CRC: Len(2B) + TLVs ── */
-    uint16_t fcrc = crc16_modbus(out + 1, 2);   /* CRC Len(2)   */
-    fcrc = crc16_modbus_continue(fcrc, out + tlv_start,
-                                  (uint16_t)(pos - tlv_start)); /* + TLVs */
-    out[pos++] = (uint8_t)(fcrc);               /* FCRC_L       */
-    out[pos++] = (uint8_t)(fcrc >> 8);          /* FCRC_H       */
+/* 已知类型查表检查宽度；未知类型仍须经过整帧边界与容量检查。 */
+static int value_length_valid(uint16_t type, uint16_t length)
+{
+    const rk_tlv_rule_t *rule = find_tlv_rule(type);
+    return rule == NULL ||
+           (length >= rule->min_value_length && length <= rule->max_value_length);
+}
 
+/* 写入2字节大端值；调用者已校验输出容量，用于Length和TLV头。 */
+static void write_be16(uint8_t *out, uint16_t value)
+{
+    out[0] = (uint8_t)(value >> 8);
+    out[1] = (uint8_t)value;
+}
+/* 读取小端Value；只在已知结果规则校验后调用，length为1、2或8。 */
+static uint64_t read_le(const uint8_t *value, uint16_t length)
+{
+    uint64_t result = 0U;
+    for (uint16_t i = 0U; i < length; ++i) result |= (uint64_t)value[i] << (8U * i);
+    return result;
+}
+void frame_init(tlv_frame_t *frame)
+{
+    if (frame != NULL) memset(frame, 0, sizeof(*frame));
+}
+/* 返回线上TLV总长度，非法帧返回0；32位累加避免长度回绕。 */
+static uint16_t payload_length(const tlv_frame_t *frame)
+{
+    if (frame == NULL || frame->count == 0U || frame->count > TLV_MAX_PER_FRAME ||
+        frame->payload_used > TLV_PAYLOAD_MAX) return 0U;
+    uint32_t length = 0U;
+    for (uint8_t i = 0U; i < frame->count; ++i) {
+        const tlv_unit_t *unit = &frame->units[i];
+        if (unit->data_off > frame->payload_used ||
+            unit->data_len > frame->payload_used - unit->data_off ||
+            !value_length_valid(unit->type, unit->data_len)) return 0U;
+        length += 4U + unit->data_len;
+        if (length > TLV_PAYLOAD_MAX) return 0U;
+    }
+    return (uint16_t)length;
+}
+int tlv_pack(tlv_frame_t *frame, uint16_t type, const uint8_t *value, uint16_t value_len)
+{
+    if (frame == NULL || frame->count >= TLV_MAX_PER_FRAME ||
+        frame->payload_used > TLV_PAYLOAD_MAX ||
+        (value == NULL && value_len != 0U) || !value_length_valid(type, value_len)) return -1;
+    uint16_t used = frame->count == 0U ? 0U : payload_length(frame);
+    if ((frame->count != 0U && used == 0U) ||
+        (uint32_t)used + 4U + value_len > TLV_PAYLOAD_MAX ||
+        value_len > TLV_PAYLOAD_MAX - frame->payload_used) return -1;
+    tlv_unit_t *unit = &frame->units[frame->count];
+    unit->type = type;
+    unit->data_off = frame->payload_used;
+    unit->data_len = value_len;
+    if (value_len != 0U) memcpy(frame->payload + frame->payload_used, value, value_len);
+    frame->payload_used += value_len;
+    ++frame->count;
+    return 0;
+}
+int tlv_pack_frame(const tlv_frame_t *in, uint64_t seq, uint8_t *out, uint16_t out_max)
+{
+    uint16_t length = payload_length(in);
+    if (out == NULL || length == 0U || out_max < length + 16U) return 0;
+    out[0] = TLV_SYNC_HEADER;
+    write_be16(out + 1, length);
+    uint16_t crc = crc16_modbus(out, 3U);
+    out[3] = (uint8_t)crc;
+    out[4] = (uint8_t)(crc >> 8);
+    for (uint8_t i = 0U; i < 8U; ++i) out[5U + i] = (uint8_t)(seq >> (56U - 8U * i));
+    uint16_t pos = 13U;
+    for (uint8_t i = 0U; i < in->count; ++i) {
+        const tlv_unit_t *unit = &in->units[i];
+        write_be16(out + pos, unit->type);
+        write_be16(out + pos + 2U, unit->data_len);
+        if (unit->data_len != 0U) memcpy(out + pos + 4U, tlv_unit_get_data(in, unit), unit->data_len);
+        pos += 4U + unit->data_len;
+    }
+    crc = crc16_modbus(out + 5, length + 8U);
+    out[pos++] = (uint8_t)crc;
+    out[pos++] = (uint8_t)(crc >> 8);
     out[pos++] = TLV_SYNC_FOOTER;
     return pos;
 }
-
-/* ═══════════════════════════════════════════════════════════════════
- * 打包: 心跳帧
- *
- *   [0x5A][Len=4][HCRC][Seq:8B][Type=0x0000][TLV_Len=0][FCRC][0xA5]
- *
- *   Len = 4  (Type:2 + TLV_Len:2, Value 空)
- * ═══════════════════════════════════════════════════════════════════ */
-
-int tlv_pack_heartbeat(uint64_t seq,
-                       uint8_t *out, uint16_t out_max)
+int tlv_pack_cmd(uint16_t cmd, const uint8_t *data, uint16_t data_len,
+                 uint64_t seq, uint8_t *out, uint16_t out_max)
 {
-    uint16_t payload_len = 4;   /* Type(2) + TLV_Len(2), Value 空 */
-    uint16_t total_len   = 1 + 2 + 2 + 8 + payload_len + 2 + 1;
-
-    if (total_len > out_max) return 0;
-
-    uint16_t pos = 0;
-
-    /* Header */
-    out[pos++] = TLV_SYNC_HEADER;
-    out[pos++] = 0x00;                          /* Len_H = 0  */
-    out[pos++] = 0x04;                          /* Len_L = 4  */
-
-    uint16_t hcrc = crc16_modbus(out + pos - 3, 3);
-    out[pos++] = (uint8_t)(hcrc);
-    out[pos++] = (uint8_t)(hcrc >> 8);
-
-    /* Sequence */
-    out[pos++] = (uint8_t)(seq >> 56);
-    out[pos++] = (uint8_t)(seq >> 48);
-    out[pos++] = (uint8_t)(seq >> 40);
-    out[pos++] = (uint8_t)(seq >> 32);
-    out[pos++] = (uint8_t)(seq >> 24);
-    out[pos++] = (uint8_t)(seq >> 16);
-    out[pos++] = (uint8_t)(seq >> 8);
-    out[pos++] = (uint8_t)(seq);
-
-    /* TLV: Type=0x0000, TLV_Len=0 */
-    uint16_t tlv_start = pos;
-    out[pos++] = 0x00;                          /* Type_H   */
-    out[pos++] = 0x00;                          /* Type_L   */
-    out[pos++] = 0x00;                          /* Len_H    */
-    out[pos++] = 0x00;                          /* Len_L    */
-
-    /* Frame CRC: Len(2) + TLVs */
-    uint16_t fcrc = crc16_modbus(out + 1, 2);
-    fcrc = crc16_modbus_continue(fcrc, out + tlv_start, (uint16_t)(pos - tlv_start));
-    out[pos++] = (uint8_t)(fcrc);
-    out[pos++] = (uint8_t)(fcrc >> 8);
-
-    out[pos++] = TLV_SYNC_FOOTER;
-    return pos;
+    if (out == NULL || data_len > TLV_CMD_DATA_MAX || out_max < TLV_CMD_FRAME_SIZE + data_len ||
+        (data_len != 0U && data == NULL)) return 0;
+    tlv_frame_t frame;
+    frame_init(&frame);
+    frame.count = 1U;
+    frame.payload_used = data_len + 2U;
+    frame.units[0].type = TLV_TYPE_CMD;
+    frame.units[0].data_len = data_len + 2U;
+    frame.payload[0] = (uint8_t)cmd;
+    frame.payload[1] = (uint8_t)(cmd >> 8);
+    if (data_len != 0U) memcpy(frame.payload + 2, data, data_len);
+    return tlv_pack_frame(&frame, seq, out, out_max);
 }
-
-/* ═══════════════════════════════════════════════════════════════════
- * 解包
- *
- * frame_buf 指向 Seq 起始处: [Seq:8B] [TLV...]
- * frame_len = Len (TLV 字节数, 不含 Seq)
- * ═══════════════════════════════════════════════════════════════════ */
-
-uint64_t tlv_get_sequence(const uint8_t *buf)
+int tlv_pack_heartbeat(uint64_t seq, uint8_t *out, uint16_t out_max)
 {
-    uint64_t seq = 0;
-    for (int i = 0; i < 8; i++)
-        seq = (seq << 8) | buf[i];
-    return seq;
+    tlv_frame_t frame;
+    frame_init(&frame);
+    (void)tlv_pack(&frame, TLV_TYPE_HEARTBEAT, NULL, 0U);
+    return tlv_pack_frame(&frame, seq, out, out_max);
 }
-
-int tlv_unpack(const uint8_t *frame_buf, uint16_t frame_len,
-               tlv_frame_t *out)
+int tlv_unpack(const uint8_t *wire, uint16_t wire_len, tlv_frame_t *out)
 {
-    /* 先清空输出，保证短帧或后续任一TLV损坏时，调用方都拿不到旧数据。 */
-    if (out == NULL) {
-        return -1;
-    }
-    memset(out, 0, sizeof(*out));
-    if (frame_buf == NULL || frame_len < TLV_PAYLOAD_MIN ||
-        frame_len > TLV_PAYLOAD_MAX) {
-        return -1;
-    }
-
-    /* frame_buf[0..7] = Seq, frame_buf[8..8+frame_len-1] = TLVs */
-    out->sequence = tlv_get_sequence(frame_buf);
-
-    uint16_t offset = 8;           /* 跳过 Seq */
-    uint16_t end    = 8 + frame_len;
-    uint8_t  has_heartbeat = 0;
-    uint8_t  unit_count = 0;       /* 线上TLV总数，不只是已识别的命令数 */
-
+    if (out == NULL) return -1;
+    frame_init(out);
+    if (wire == NULL || wire_len < TLV_PAYLOAD_MIN + 16U || wire_len > TLV_FRAME_MAX) return -1;
+    uint16_t length = tlv_get_length(wire + 1);
+    if (length < TLV_PAYLOAD_MIN || length > TLV_PAYLOAD_MAX || wire_len != length + 16U ||
+        wire[0] != TLV_SYNC_HEADER || wire[wire_len - 1U] != TLV_SYNC_FOOTER ||
+        crc16_modbus(wire, 5U) != 0U || crc16_modbus(wire + 5, length + 10U) != 0U) return -1;
+    for (uint8_t i = 0U; i < 8U; ++i) out->sequence = (out->sequence << 8) | wire[5U + i];
+    uint16_t offset = 13U, end = 13U + length;
     while (offset < end) {
-        /* 尾部1~3字节不是填充；它们意味着下一TLV头不完整。超限也不能
-         * 静默截取前16个，否则一帧只执行一部分会造成业务状态不一致。 */
-        if (end - offset < 4 || unit_count >= TLV_MAX_PER_FRAME) {
-            goto invalid_frame;
-        }
-        unit_count++;
-        uint16_t type  = ((uint16_t)frame_buf[offset] << 8)
-                       | frame_buf[offset + 1];
-        uint16_t t_len = ((uint16_t)frame_buf[offset + 2] << 8)
-                       | frame_buf[offset + 3];
-        offset += 4;
-
-        if (t_len > end - offset) {  /* Value被截断 */
-            goto invalid_frame;
-        }
-
-        /* ── 心跳: Type=0x0000 ── */
-        if (type == TLV_TYPE_HEARTBEAT) {
-            if (t_len != 0) {  /* 现行心跳合同要求空Value */
-                goto invalid_frame;
-            }
-            has_heartbeat = 1;
-            continue;
-        }
-
-        /* ── 命令容器: Type=0x5000, Value=[CmdID:2B][params:N] ── */
-        if (type == TLV_TYPE_CMD) {
-            if (t_len < 2) {  /* CmdID必须占满2字节 */
-                goto invalid_frame;
-            }
-            uint16_t cmd   = ((uint16_t)frame_buf[offset] << 8)
-                           | frame_buf[offset + 1];
-            uint16_t d_len = t_len - 2;  /* 参数长度 */
-
-            if (out->payload_used + d_len > TLV_PAYLOAD_MAX) {
-                goto invalid_frame;
-            }
-
-            tlv_unit_t *u = &out->units[out->count];
-            u->type     = TLV_TYPE_CMD;
-            u->cmd      = cmd;
-            u->data_off = out->payload_used;
-            u->data_len = d_len;
-            if (d_len > 0) {
-                memcpy(out->payload + out->payload_used,
-                       frame_buf + offset + 2, d_len);
-                out->payload_used += d_len;
-            }
-            out->count++;
-        }
-        /* 未知Type仍按既有行为跳过，但其长度/数量也必须有效。 */
-
-        offset += t_len;
+        if ((uint16_t)(end - offset) < 4U) goto invalid_frame;
+        uint16_t type = tlv_get_length(wire + offset);
+        uint16_t size = tlv_get_length(wire + offset + 2U);
+        offset += 4U;
+        if (size > end - offset || tlv_pack(out, type, wire + offset, size) != 0) goto invalid_frame;
+        offset += size;
     }
-
-    /* 纯心跳帧: 无命令 TLV 时记为心跳 */
-    if (has_heartbeat && out->count == 0) {
-        out->units[0].type = TLV_TYPE_HEARTBEAT;
-        out->count = 1;
-    }
-
-    return (int)out->count;
-
+    return out->count;
 invalid_frame:
-    /* 后段出错时撤销前段结果，防止调用方消费损坏帧中的部分命令。 */
-    memset(out, 0, sizeof(*out));
+    frame_init(out);
     return -1;
+}
+int rk_result_decode(const tlv_frame_t *frame, rk_test_result_t *result)
+{
+    if (result == NULL) return -1;
+    memset(result, 0, sizeof(*result));
+    if (payload_length(frame) == 0U) return -1;
+    /* 先在临时数组汇总，四个字段全部合法后才写result，失败保持全零输出。 */
+    uint64_t values[RK_RESULT_FIELD_COUNT] = {0U};
+    uint8_t seen = 0U;
+    for (uint8_t i = 0U; i < frame->count; ++i) {
+        const tlv_unit_t *unit = &frame->units[i];
+        const rk_tlv_rule_t *rule = find_tlv_rule(unit->type);
+        if (unit->type == TLV_TYPE_CMD) return -1;
+        if (rule == NULL || rule->result_field == RK_RESULT_FIELD_COUNT) {
+            continue; /* 未知扩展和空心跳不补齐任何必需结果字段。 */
+        }
+        uint8_t field_bit = (uint8_t)(1U << rule->result_field);
+        if ((seen & field_bit) != 0U) return -1;
+        seen |= field_bit;
+        values[rule->result_field] = read_le(tlv_unit_get_data(frame, unit), unit->data_len);
+    }
+    /* 四栏分别占bit0..3，全部到齐为0b1111；不使用地址默认0来冒充PASS。 */
+    if (seen != (1U << RK_RESULT_FIELD_COUNT) - 1U) return -1;
+    result->command_id = (uint16_t)values[RK_RESULT_FIELD_COMMAND];
+    result->error_address = values[RK_RESULT_FIELD_ADDRESS];
+    result->die = (uint8_t)values[RK_RESULT_FIELD_DIE];
+    result->elapsed_ms = values[RK_RESULT_FIELD_TIME];
+    return 0;
 }

@@ -4,11 +4,11 @@
  * ===================================================================
  *
  * 硬件:
- *   阿波罗 V2: SPI2 (PB13=SCK, PB14=MISO, PB15=MOSI, PB12=NCS)
+ *   阿波罗V2：SPI2 PB13/14/15；PB12与PCF INT共线，仅供隔离波形测试
  *   B1正式板: SPI4 (PE11=NSS, PE12=SCK, PE13=MISO, PE14=MOSI)
  * 移植: 换 spi_if + cs_port/cs_pin 即可
  *
- * 参考: AD7124-4 datasheet (Rev. D), ADI no-OS ad7124 driver
+ * 参考：AD7124-4数据手册Rev.E，ADI no-OS ad7124驱动。
  * ===================================================================
  */
 #ifndef __AD7124_H
@@ -31,7 +31,7 @@
 #define AD7124_REG_ERROR_EN     0x07    /* RW, 24-bit */
 #define AD7124_REG_MCLK_COUNT   0x08    /* R, 8-bit   */
 
-/* 每组 8 个: CH0-15, CFG0-7, FILTER0-7, OFFSET0-7, GAIN0-7 */
+/* 16个逻辑通道CH0..15；配置、滤波及校准寄存器分别8组，按setup共用。 */
 #define AD7124_REG_CH0          0x09    /* RW, 16-bit, CH0..CH15: 0x09..0x18 */
 #define AD7124_REG_CFG0         0x19    /* RW, 16-bit, CFG0..CFG7: 0x19..0x20 */
 #define AD7124_REG_FILTER0      0x21    /* RW, 24-bit, FILTER0..FILTER7: 0x21..0x28 */
@@ -62,7 +62,7 @@
  *   [7] RDY            1=转换未完成  0=数据就绪
  *   [6] ERROR_FLAG     1=错误 (读 ERROR 寄存器后自动清除)
  *   [5] 0
- *   [4] POR_FLAG       1=上电复位发生 (读 STATUS 后自动清除)
+ *   [4] POR_FLAG       1=正在执行上电复位，读回0才可继续配置
  *   [3:0] CH_ACTIVE    当前转换通道号 (0-15)
  * ═══════════════════════════════════════════════════════════════════ */
 #define AD7124_STATUS_RDY           (1 << 7)
@@ -97,11 +97,12 @@
 #define AD7124_MODE_SINGLE          1   /* 单次转换          */
 #define AD7124_MODE_STANDBY         2   /* 待机              */
 #define AD7124_MODE_POWERDOWN       3   /* 掉电              */
-#define AD7124_MODE_IDLE            4   /* 空闲 (默认)       */
+#define AD7124_MODE_IDLE            4   /* 空闲       */
 #define AD7124_MODE_CAL_INT_Z       5   /* 内部零位校准       */
 #define AD7124_MODE_CAL_INT_F       6   /* 内部满量程校准     */
 #define AD7124_MODE_CAL_SYS_Z       7   /* 系统零位校准       */
 #define AD7124_MODE_CAL_SYS_F       8   /* 系统满量程校准     */
+#define AD7124_MODE_UNKNOWN       0xFFU /* 软件专用：恢复失败，必须重新初始化；禁止写入器件。 */
 
 /* 功耗模式 */
 #define AD7124_PWR_LOW              0
@@ -207,7 +208,7 @@
 #define AD7124_FILT_FS(x)           ((x) & 0x7FF)
 
 /* ── 常用输出速率 FS 值 (全功率, SINC4) ── */
-#define AD7124_FS_9P6HZ             3199    /* ~9.6 Hz  */
+#define AD7124_FS_9P6HZ             2000    /* 全功率SINC4：19200/2000=9.6Hz，合法11位FS。 */
 #define AD7124_FS_16P7HZ            1152    /* 16.7 Hz  */
 #define AD7124_FS_50HZ              384     /* 50 Hz    */
 #define AD7124_FS_60HZ              320     /* 60 Hz    */
@@ -237,6 +238,15 @@
 #define AD7124_ERR_SPI_READ          (1u << 4)
 #define AD7124_ERR_SPI_WRITE         (1u << 3)
 #define AD7124_ERR_SPI_CRC           (1u << 2)
+#define AD7124_ERR_ALDO_PSM         (1u << 7)
+#define AD7124_ERR_DLDO_PSM         (1u << 9)
+/* 内部基准不启用外部REF_DET；CRC未接入帧格式，不启用SPI_CRC。 */
+#define AD7124_DIAGNOSTIC_MASK (AD7124_ERR_ADC_SAT | AD7124_ERR_ADC_CONV | \
+    AD7124_ERR_ADC_CAL | AD7124_ERR_AINP_OV | AD7124_ERR_AINP_UV | \
+    AD7124_ERR_AINM_OV | AD7124_ERR_AINM_UV | AD7124_ERR_ALDO_PSM | \
+    AD7124_ERR_DLDO_PSM | AD7124_ERR_SPI_IGNORE | AD7124_ERR_SPI_SCLK_CNT | \
+    AD7124_ERR_SPI_READ | AD7124_ERR_SPI_WRITE)
+#define AD7124_ERROR_UNREADABLE 0xFFFFFFFFUL /* 软件标记：ERROR寄存器读取失败。 */
 
 /* ═══════════════════════════════════════════════════════════════════
  * 设备句柄
@@ -246,7 +256,9 @@ typedef struct {
     GPIO_TypeDef *cs_port;       /* CS GPIO 端口                    */
     uint16_t      cs_pin;        /* CS GPIO 引脚                    */
     uint8_t       id;            /* ID 寄存器值 (上电后读取)         */
-    uint8_t       adc_mode;      /* 当前转换模式 (MODE 字段)         */
+    uint32_t      last_error;    /* 最近一次非零ERROR，重新初始化不覆盖历史故障证据。 */
+    uint8_t       last_status;   /* 最近一次转换/就绪状态，包含ERROR及POR标志。 */
+    uint8_t       adc_mode;      /* MODE缓存；UNKNOWN表示恢复失败。  */
     uint8_t       num_ch;        /* 实际使能的通道数 (init 写入)     */
     void        (*wait_ms)(uint32_t ms);  /* 延时回调, NULL=HAL_Delay 忙等 */
 } ad7124_t;
@@ -258,16 +270,18 @@ typedef struct {
 /* ── 基础操作 ── */
 /*
  * 本驱动为同步、不可重入接口；调用方负责串行访问同一SPI总线及片选。
- * 配置/读取不在ISR执行；wait_ms可让出CPU，但不会使整个API变成异步。
+ * 配置/读取不在ISR执行；wait_ms须实际等待至少给定毫秒，可让出CPU。
+ * 每个SPI事务结束后等待至少1ms覆盖t12，不是高吞吐连续采样接口。
  * 读写缓冲由调用方持有，函数返回后可复用；len单位为字节。
  * IF_OK表示本次操作完成；ID/实测值验收仍需真实器件，Mock不代表校准。
  */
 /**
- * @brief 发送64个高电平数据时钟复位ADC，等待1ms后尝试读STATUS。
- * @param[in,out] d 非NULL句柄，含有效SPI send及CS端口；wait_ms可为NULL。
- * @return 参数错误为IF_ERR；否则返回复位序列的SPI发送结果。
- * @note 当前不根据STATUS读取或POR_FLAG判定成功；缓存模式置IDLE。
- *       返回IF_OK只代表序列发送成功，不证明复位完成。
+ * @brief 发送64个高电平数据时钟，轮询POR结束后再等待4ms。
+ * @param[in,out] d 含有效SPI send/transfer及CS端口；wait_ms可为NULL。
+ * @return IF_OK复位就绪；IF_TIMEOUT百次POR轮询耗尽；IF_ERR参数/读取错误，
+ *         发送失败透传底层结果。
+ * @note 先清空通道缓存并标记UNKNOWN；成功后的ADC_CTRL复位模式为CONT，
+ *       但DATA_STATUS、基准和通道尚未配置，必须完成init后才能读取采样。
  */
 int  ad7124_reset(ad7124_t *d);
 
@@ -286,7 +300,7 @@ int  ad7124_read_id(ad7124_t *d);
  * @param[out] buf 非NULL、至少len字节；失败保持原值。
  * @param[in] len 读取字节数1..4，须匹配寄存器及DATA_STATUS配置。
  * @return IF_OK成功；IF_ERR参数或SPI访问失败。
- * @note 不验证CS端口或寄存器实际宽度；CS在传输失败后也释放。
+ * @note 检查CS端口非NULL，不验证寄存器实际宽度；CS在传输失败后也释放。
  */
 int  ad7124_read_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len);
 
@@ -313,10 +327,10 @@ int  ad7124_init(ad7124_t *d);
 /**
  * @brief 写入固定ADC_CTRL基底及MODE，并在成功后更新模式缓存。
  * @param[in,out] d 非NULL且SPI/CS有效的句柄。
- * @param[in] mode AD7124_MODE_*模式，调用方须提供支持值。
+ * @param[in] mode 器件模式0..8；拒绝保留值及软件UNKNOWN标记。
  * @return IF_OK写入成功；IF_ERR参数无效，或透传SPI错误。
  * @note 本实现整寄存器写入内部时钟、全功率、内部基准和DATA_STATUS，
- *       不保留其他ADC_CTRL选项；模式按低4位编码，不等待转换/校准结束。
+ *       不保留其他ADC_CTRL选项，不等待转换/校准结束；内部校准请用calibrate。
  */
 int  ad7124_set_mode(ad7124_t *d, uint8_t mode);
 
@@ -342,8 +356,9 @@ int  ad7124_config_channel(ad7124_t *d, uint8_t ch,
  * @param[in] pga 增益编码0..7，对应1..128倍。
  * @param[in] bipolar 0单极性，非0双极性。
  * @param[in] ref_sel 基准编码0..3。
- * @param[in] filter 当前为8位原始值，直接与FS位或合并；不能承载高位滤波宏。
- * @param[in] fs 速率字段，调用方应传1..2047；当前仅拒绝大于2047。
+ * @param[in] filter uint32_t原始高位位图，如AD7124_FILT_SINC3；只允许bit23..16，
+ *                  禁止夹带低位FS/保留位，FILTER类型1/3/6保留值会被拒绝。
+ * @param[in] fs 速率字段1..2047，0或超范围拒绝；输出速率还取决于功耗/滤波模式。
  * @return IF_OK两项写入完成；IF_ERR参数无效，或透传底层访问错误。
  * @note 第二次写失败时CFG可能已生效；本通用接口打开所有输入/基准缓冲，
  *       不等同于init中针对B1负端接地的配置。
@@ -351,26 +366,31 @@ int  ad7124_config_channel(ad7124_t *d, uint8_t ch,
 int  ad7124_config_setup(ad7124_t *d, uint8_t setup,
                          uint8_t pga, uint8_t bipolar,
                          uint8_t ref_sel,
-                         uint8_t filter, uint16_t fs);
+                         uint32_t filter, uint16_t fs);
 
 /**
- * @brief 尝试执行单通道内部满量程及零位校准，再恢复连续模式。
+ * @brief 按增益执行内部校准，结束后恢复原通道选择与ADC_CTRL。
  * @param[in,out] d 非NULL、已配置的句柄，SPI/CS须有效。
- * @param[in] ch 校准通道0..7；调用方须确保更高通道未启用。
- * @return ch大于7返回IF_ERR；当前其余路径返回IF_OK。
- * @note 当前未检查保存/配置/恢复寄存器的返回值，轮询耗尽也未报超时，
- *       因此IF_OK不能证明校准成功或原通道状态已恢复。不得依此通过硬件验收。
+ * @param[in] ch 逻辑通道0..15，从CHx读取其setup；期间仅此通道使能。
+ * @return IF_OK校准及恢复均成功；IF_TIMEOUT就绪等待耗尽且恢复成功；
+ *         IF_ERR参数、器件错误或IO/恢复失败。读备份失败不会写寄存器。
+ * @note 增益1保留工厂增益，只校零位；增益>1先重置OFFSET，在低/中功耗
+ *       校满量程再校零位。每阶段最多20000次轮询，事务间至少1ms；覆盖
+ *       内部时钟各功耗档和FS=2047的校准，SPI/调度耗时另计。失败尽力恢复旧系数。
+ *       恢复失败令adc_mode=UNKNOWN、num_ch=0，调用方必须重新初始化。
+ *       不支持正在校准、掉电或CONT_READ模式；仅由维护调用，不在init自动执行。
  */
 int  ad7124_calibrate(ad7124_t *d, uint8_t ch);
 
 /**
  * @brief 等待数据就绪并读取单通道24位原始码。
  * @param[in] d 非NULL且已配置DATA_STATUS的设备，SPI/CS有效。
- * @param[in] ch 目标硬件通道；连续模式按返回状态匹配，其他模式接受当前结果。
- * @param[out] raw 非NULL输出；成功为0..0xFFFFFF，超时置0，IO失败可能保留旧值。
- * @return IF_OK读到结果；IF_ERR访问失败；IF_TIMEOUT轮询耗尽或未找到目标通道。
- * @note 未校验d/raw空指针。连续模式最多尝试8次转换，每次最多500轮1ms等待，
- *       另有SPI耗时；结果不作符号扩展，双极性使用offset-binary换算。
+ * @param[in] ch 目标逻辑通道0..15，连续/单次模式都必须匹配返回状态。
+ * @param[out] raw 非NULL，成功写入0..0xFFFFFF；所有失败均保持原值。
+ * @return IF_OK通道匹配且无错误；IF_ERR参数/模式/IO或ERROR_FLAG异常；
+ *         IF_TIMEOUT轮询耗尽或未找到目标通道。
+ * @note 连续模式最多16次转换；单次模式只读一次且仍核对通道。每次最多
+ *       500轮1ms等待，另有SPI耗时。错误时读取ERROR并保留last_error，丢弃当次数据；不作符号扩展。
  */
 int  ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw);
 
@@ -383,36 +403,35 @@ int  ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw);
  * @param[in] bipolar 0单极性，非0双极性，须与硬件一致。
  * @param[out] mv 非NULL，成功写入mV，读取失败保持原值。
  * @return 透传read_ch结果：IF_OK、IF_ERR或IF_TIMEOUT。
- * @note 未校验输出指针；等待行为同read_ch。
+ * @note 检查输出指针、有限正vref、整数毫伏可表示范围和pga；等待行为同read_ch。
  */
 int  ad7124_read_ch_mv(ad7124_t *d, uint8_t ch, float vref, uint8_t pga,
                        uint8_t bipolar, int32_t *mv);
 
 /**
  * @brief 轮询DATA_STATUS并按硬件通道号收集原始码。
- * @param[in] d 非NULL有效设备；启用通道应连续为0..num_ch-1，num_ch不超过8。
- * @param[out] raw 非NULL、至少max_ch项，按实际通道号写入，未收到项保持原值。
- * @param[in] max_ch 输出项数，内部取其与num_ch较小值。
- * @param[out] got 可为NULL；实际收到的不同通道数，不是连续有效前缀长度。
- * @return 收到至少一通道即IF_OK；一个都未收到则IF_TIMEOUT（包括IO失败）。
- * @note 不检查d/raw空指针；完整快照须有足够容量且got等于num_ch。
- *       最多num_ch * 4次转换尝试，每次最多500轮1ms等待，另有SPI耗时。
+ * @param[in] d 非NULL有效设备，通道连续0..num_ch-1，num_ch为1..16。
+ * @param[out] raw 至少max_ch项；仅完整成功时写入前num_ch项，失败全部保持原值。
+ * @param[in] max_ch 输出容量，必须不小于num_ch；容量不足时不访问SPI。
+ * @param[out] got 可为NULL；本次不同通道数，参数失败为0。失败时仅作诊断，
+ *                 不表示raw存在可用前缀或部分结果。
+ * @return IF_OK收齐；IF_ERR参数/模式/IO或ERROR_FLAG异常；IF_TIMEOUT未收齐。
+ * @note 最多num_ch*4次转换，每次最多500轮1ms等待，另加SPI耗时。
+ *       不检查模拟精度、不保证各通道同时采样；单次模式仅允许num_ch=1。
  */
 int  ad7124_read_all(ad7124_t *d, int32_t *raw, uint8_t max_ch, uint8_t *got);
 
 /**
  * @brief 批量读取并按每通道增益/极性换算为毫伏。
  * @param[in] d 非NULL有效设备，通道配置前提同read_all。
- * @param[out] mv 非NULL、至少max_ch项；成功路径按0..*got-1写入。
- * @param[in] max_ch 输出项数，应至少为d->num_ch且不超过临时数组容量16。
- * @param[out] got 必须非NULL；返回实际收集数。
+ * @param[out] mv 至少max_ch项；完整成功写入前num_ch项，所有失败保持原值。
+ * @param[in] max_ch 输出容量，必须不小于num_ch；内部数组最多16通道。
+ * @param[out] got 可为NULL，语义同read_all；失败时不能按它消费输出。
  * @param[in] vref 实际基准电压，单位V。
  * @param[in] pga 每通道增益编码数组，至少max_ch项；NULL默认全部0。
  * @param[in] bipolar 每通道极性数组，至少max_ch项；NULL默认全部单极性。
- * @return 透传read_all结果，IF_OK不保证收齐通道。
- * @note 当前按数量换算前缀，但read_all可能稀疏收集；缺通道时可能读取未
- *       初始化的局部raw项，输出不能使用。此为现有实现缺陷，不能仅靠检查
- *       返回值解决，后续应修正有效通道跟踪/换算路径。
+ * @return IF_OK完整成功；IF_ERR参数/IO/器件异常；IF_TIMEOUT未收齐。
+ * @note 仅在完整快照成功后换算，不把缺失通道补零伪装成实测；不补偿前端分压。
  */
 int  ad7124_read_all_mv(ad7124_t *d, int32_t *mv, uint8_t max_ch, uint8_t *got,
                         float vref, const uint8_t *pga, const uint8_t *bipolar);
@@ -422,7 +441,7 @@ int  ad7124_read_all_mv(ad7124_t *d, int32_t *mv, uint8_t max_ch, uint8_t *got,
  * @param[in] d SPI/CS有效的设备句柄。
  * @param[out] err_flags 非NULL，成功写入错误位，失败保持原值。
  * @return IF_OK读取成功；IF_ERR读取失败。
- * @note 未校验err_flags空指针；读取具有清除器件错误状态的副作用。
+ * @note 拒绝err_flags空指针；读取具有清除器件错误状态的副作用。
  */
 int  ad7124_read_error(ad7124_t *d, uint32_t *err_flags);
 

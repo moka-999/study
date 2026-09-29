@@ -61,7 +61,7 @@ int mcp4725_write_fast(mcp4725_t *device, uint16_t code,
  * @param[in] vdd_mv 非0供电mV，可用实测值标定。
  * @param[out] code 非NULL输出，失败保持原值。
  * @return IF_OK成功；IF_ERR空指针、零供电或目标超供电。
- * @note 使用output_mv * 4095 / vdd_mv的当前实现；不访问硬件，不限制Boot电压。
+ * @note 使用output_mv * 4096 / vdd_mv四舍五入并限幅到4095；不访问硬件，不限制Boot电压。
  */
 int mcp4725_mv_to_code(uint16_t output_mv, uint16_t vdd_mv, uint16_t *code);
 

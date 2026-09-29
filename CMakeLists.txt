@@ -45,6 +45,15 @@ option(ENABLE_AD7124_WAVE_TEST "Build isolated Apollo V2 AD7124 SPI waveform ima
 # 阿波罗 V2 PC业务网络验收；沿用正式分发，隔离RK任务。
 option(ENABLE_PC_PROTOCOL_NET_TEST "Build isolated PC protocol TCP business test image" OFF)
 
+# 隔离全链路镜像保留正式健康检查，只模拟0103业务门禁；正式构建默认关闭。
+# ON仅用于V2隔离联调：允许0103走模拟电源/ready路径并连接脚本扮演的RK。
+# OFF走正式服务及其外部就绪/电源门禁；不是RK协议总开关，禁止量产打开。
+option(ENABLE_RK_GATEWAY_TEST "Build temporary PC MCU RK gateway test image" OFF)
+
+# V2沿用正式TCP/RK/OTA任务，仅电源和测量业务使用无硬件副作用的联调模型。
+# 不替代真实RK算法；B1及量产构建禁用，只有显式选择才会编入。
+option(ENABLE_V2_POWER_SIMULATION "Simulate V2 power and measurements with real RK" OFF)
+
 # 固件身份由构建系统统一提供，禁止在 C 源文件中散落手写版本字符串。
 set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
 set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
@@ -88,6 +97,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/uart_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/i2c_hw.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/memory_monitor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/idd_stats.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/bsp_gpio.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/ddr_power.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/pwr_ctrl.c
@@ -100,14 +110,13 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_protocol.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_state_machine.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_test_message.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_test_service.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_tester_info.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/crc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/dispatch.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/frame.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/state_machine.c
     # 正式任务按通信对象分区，纯验证任务统一放test目录。
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pc/tcp_task.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/hb_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_link.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/led_task.c
@@ -142,6 +151,21 @@ if(ENABLE_OTA_BOOT)
 endif()
 
 # Mock任务体只进入隔离测试镜像，正式固件不编译测试代码。
+if(ENABLE_RK_GATEWAY_TEST)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE App/tasks/test/rk_gateway_test.c)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ENABLE_RK_GATEWAY_TEST=1)
+endif()
+
+if(ENABLE_V2_POWER_SIMULATION)
+    if(DEFINED B1_RK_UART OR ENABLE_RK_GATEWAY_TEST OR ENABLE_PC_PROTOCOL_NET_TEST OR
+       ENABLE_PWR_WAVE_TEST OR ENABLE_RESULT_LED_WAVE_TEST OR ENABLE_FLASH_SELF_TEST OR
+       ENABLE_DRIVER_MOCK_TEST OR ENABLE_AD7124_WAVE_TEST OR ENABLE_DRIVER_SELF_TEST)
+        message(FATAL_ERROR "V2 power simulation requires normal V2 tasks and real RK")
+    endif()
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE App/tasks/test/v2_power_sim.c)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ENABLE_V2_POWER_SIMULATION=1)
+endif()
+
 if(ENABLE_DRIVER_MOCK_TEST)
     target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/driver_mock_test.c

@@ -44,7 +44,7 @@ Seq只表示本端发送顺序，不作为请求与应答的匹配依据。控�
 
 ## 3. 命令编号
 
-已有编号沿用 `CommandEnum1.cs`，保留原枚举名称；本框架新增0x0006通用应答和0x0509 DDR配置入口，供双方同步枚举。
+已有编号沿用 `CommandEnum1.cs`；本框架新增0x0006通用应答和0x0509 DDR配置入口，0901–0903枚举名称统一为固件升级，供双方同步枚举。
 
 | 编号 | 枚举名称 | 用途 |
 |---|---|---|
@@ -76,13 +76,13 @@ Seq只表示本端发送顺序，不作为请求与应答的匹配依据。控�
 | 0x0703 | CMD_INDICATOR_STATUS_RESP | MCU→PC：结果灯状态响应 |
 | 0x0801 | CMD_QUERY_B2_HEARTBEAT_STATUS | PC→MCU：查询B1–B2保活状态 |
 | 0x0802 | CMD_B2_HEARTBEAT_STATUS_RESP | MCU→PC：B1–B2保活状态响应 |
-| 0x0901 | CMD_MCU_OTA_REQUEST | PC→MCU：固件升级操作请求 |
-| 0x0902 | CMD_MCU_OTA_RESP | MCU→PC：升级操作响应及状态 |
-| 0x0903 | CMD_MCU_OTA_COMPLETE | MCU→PC：目标固件已健康运行 |
+| 0x0901 | CMD_FIRMWARE_UPGRADE_REQUEST | PC→MCU：固件升级操作请求 |
+| 0x0902 | CMD_FIRMWARE_UPGRADE_RESP | MCU→PC：升级操作响应及状态 |
+| 0x0903 | CMD_FIRMWARE_UPGRADE_COMPLETE | MCU→PC：目标固件已健康运行 |
 
 原枚举中的0x0201～0x0204属于PC–B2温控接口，不列入本B1协议。新增命令按业务分组追加，不改变已有编号。
 
-没有专用响应的控制命令统一使用0x0006，区分已接受、已完成和失败；已接受不表示硬件操作完成，快速操作可直接返回已完成或失败。已有查询命令成功时仍使用各自的专用响应，命令不支持、参数错误、设备忙或执行失败等业务错误使用通用应答。非法长度、版本或Flag直接关闭连接，不作为业务错误应答。
+没有专用响应的控制命令统一使用0x0006，区分已接受、已完成和失败；已接受不表示硬件操作完成，快速操作可直接返回已完成或失败。已有查询命令成功时仍使用各自的专用响应，命令不支持、参数错误、设备忙或执行失败等业务错误使用通用应答。非法头前缀有界丢弃，不回应其中的命令；恢复后可继续处理正常帧。
 
 通用应答的JSON字段和错误码按第5节补充，至少说明对应命令及执行阶段；头部Seq始终使用MCU自己的发送计数，不回显请求值。
 
@@ -92,7 +92,7 @@ Seq只表示本端发送顺序，不作为请求与应答的匹配依据。控�
 
 | PC请求 | 成功时MCU响应 | 业务失败时MCU响应 |
 |---|---|---|
-| 0x0002 心跳 | 0x0001 + `{}` | 0x0006 failed；帧/JSON语法失步则断连 |
+| 0x0002 心跳 | 0x0001 + `{}` | 完整帧的JSON/参数错误回0x0006 failed |
 | 0x0101 查询测试仪 | 0x0102 测试仪信息 | 0x0006 failed |
 | 0x0103 开始测试 | 接入后0x0006 accepted/completed；测试结果0x0105，当前状态见4.7 | 0x0006 failed |
 | 0x0501 上电 | 0x0006 accepted；已ON为completed | 0x0006 failed |
@@ -102,14 +102,14 @@ Seq只表示本端发送顺序，不作为请求与应答的匹配依据。控�
 | 0x0506 设置Boot模式 | 0x0006 completed | 0x0006 failed |
 | 0x0507 查询Boot模式 | 0x0508 Boot模式信息 | 0x0006 failed |
 | 0x0509 设置DDR配置 | 0x0006 completed | 0x0006 failed |
-| 0x0601 查询电源采样 | 0x0602 采样快照 | 0x0006 failed |
+| 0x0601 查询电源采样 | 0x0602 最新采样及统计结果 | 0x0006 failed |
 | 0x0701 设置结果灯 | 0x0006 completed | 0x0006 failed |
 | 0x0702 查询结果灯 | 0x0703 结果灯状态 | 0x0006 failed |
 | 0x0901 OTA操作 | 0x0902；带目标包查询且健康确认完成时为0x0903 | 0x0006 failed |
 
 0x0006不是“错误命令”。它是通用命令执行结果，必须结合JSON中的`status`判断：
 `accepted`表示非阻塞操作已受理，`completed`表示操作已完成，`failed`才表示失败。
-若固定头、UTF-8或JSON语法本身非法，MCU直接关闭连接，不发送0x0006。
+固定头和完整长度有效、但UTF-8或JSON非法时，回0x0006 `failed/invalidArgument`，不执行该请求并保持连接。无有效头的垃圾字节不回应。
 
 
 ## 4. 指令与JSON包体
@@ -152,8 +152,10 @@ PC发送0x0002，MCU返回0x0001；双方包体均为 `{}`，各自使用本端�
 }
 ```
 
-已通过固定头和严格JSON语法校验后的参数错误、未支持命令或本地执行失败使用0x0006，
-保持TCP连接。非法Length、Version、Flag、ServiceID、UTF-8或JSON语法仍属于协议失步并断连。
+完整坏JSON、参数错误、未支持命令或本地执行失败使用0x0006，保持TCP连接。
+非法Length、Version、Flag或ServiceID会触发有界重新找头；累计丢弃超过4096字节仍未恢复时断连。
+尚未收齐的半帧若超过500ms没有新字节，仍会断连；已知长度的正文不会被拆成其他命令执行。
+PC应始终发送正确Length；连接失步后需重新连接，不能依赖容错保证找回所有被错误Length吞入的后续数据。
 
 ### 4.6 查询测试仪信息及响应（0x0101 / 0x0102）
 
@@ -176,6 +178,30 @@ PC发送0x0002，MCU返回0x0001；双方包体均为 `{}`，各自使用本端�
 字段分别表示测试仪名称、测试仪硬件版本、测试板名称。连接建立时不主动推送，由PC查询后返回。当前仅规定基本JSON格式，后续所需的固件版本等信息可在本响应JSON中追加，不必另增查询命令；新增字段不改变已有字段含义，接收端应允许扩展字段，整包仍不得超过4096字节。
 
 ### 4.7 开始测试（0x0103）
+
+#### 外部已启动的功能测试（V2真实RK接入）
+
+RK已由操作者启动并进入对应算法服务时，使用下列包体。MCU不改电压、不选启动介质、不重启RK；这不是模拟测试。
+
+```json
+{"algorithmType":"functional","algorithmName":"mats","algorithmIndex":1,"power":null,"reboot":false,"bootMode":null}
+```
+
+| 字段/响应 | 规则 |
+|---|---|
+| `power` / `bootMode` | 必须同时为null，表示保持外部状态；不是要求0V或标称电压 |
+| `reboot` | 必须false；本模式不能夹带重启要求 |
+| `algorithmName` | 精确匹配RK命令表1..20，例如mats、gtest-xor；未知算法/SLT/IDD不下发 |
+| `timeoutMs` | 可选整数，省略或0表示不限算法等待；非零1..86400000毫秒 |
+| `0x0006 accepted` | 请求已进入MCU的RK队列，不证明RK已收到/开始，不表示PASS |
+| `0x0105` | 一个算法的一个整体最终结果；PC以algorithmIndex关联并推进计划 |
+| 通信失败 | 0x0006 failed，含txFailed、timeout等；不是芯片FAIL |
+
+本模式不另发启动completed。算法在途时重复开始、变更电源/Boot/电压及升级写操作返回busy，心跳/查询仍可用。断网不停止RK，也不把旧结果发给重连的新会话；旧算法结束前仍busy。默认无限等待时，若RK没有回最终结果，MCU不会自行解除busy或重发。
+
+每算法仅一个最终结果，首错地址0按当前RK合同表示整体PASS；非0为FAIL并保留完整地址。不由该地址臆造芯片映射，不把整体PASS复制成两颗独立PASS。当前siteId读W25站点标签（未配置为空），mirrorIndex=0表示B2未分配，physicalAddr为空；measurementData为null。上述留空语义用于当前开发板接入，不替代后续整机编号分配。
+
+#### 完整B1训练电压/启动流程（原合同保留）
 
 三类测试共用0x0103，一次提交算法、训练电压和启动要求，不另拆开始测试命令。
 请求包体示例：
@@ -208,8 +234,8 @@ PC发送0x0002，MCU返回0x0001；双方包体均为 `{}`，各自使用本端�
 | `reboot` | boolean | PC是否主动要求重新启动；必须是`true`或`false` |
 | `bootMode` | string | 本次启动模式，沿用0x0506的`emmc`、`fspiM0`等取值，见4.15 |
 
-上述六个根字段均必填，`power`必须完整携带内存类型和三路档位，不能省略字段以继承上次值。
-根对象及`power`均不接受重复键或额外字段；`algorithmIndex`范围为0..4294967295。
+上述六个根字段均必填，可另带timeoutMs；本完整B1流程中`power`必须完整携带内存类型和三路档位，不能省略字段以继承上次值。
+根对象及`power`均不接受重复键或未定义字段；`algorithmIndex`范围为0..4294967295。
 字符串及字段名区分大小写；档位必须是整数，不能用字符串、小数或布尔值代替。
 算法只用“大类＋名称”标识，同一大类内名称必须唯一并按PC/RK共同约定的算法表匹配；
 不再单列小类。`algorithmIndex`标识计划中的算法项，不是算法固定ID或RK命令号：
@@ -247,43 +273,70 @@ PC串行提交开始测试，尚有活动测试时不覆盖配置，新开始请
 0x0506和0x0509先保留为独立调试/兼容入口，正常新测试流程不要求PC拆包调用。
 0x0509仍是原有类型/运行期拉偏语义，不替代本命令的训练电压，也不修改其现有包体。
 
-**固件接入状态（2026-09-21）**：V2/B1已严格解析本节全部字段，缺失、额外、重复或值非法时
+**完整B1流程接入状态**：带电压对象及启动要求的请求仍严格校验，缺失、额外、重复或值非法时
 返回0x0006 `failed/invalidArgument`。三路档位复用TPS可表示范围检查，不等于训练安全范围已获批准。
 完整合法请求在OTA启动健康未确认时返回`failed/otaNotReady`，否则返回`failed/notReady`；
 参数校验先于OTA门。响应按上述规则携带合法且唯一的`algorithmIndex`。
-当前未接RK测试执行，不修改电源/Boot配置，不发送RK命令，也不产生受理或启动完成响应。
-完整启动流程、安全训练白名单及新结果格式仍未接入，不能把参数解析通过当作测试已开始。
+此完整启动路径不修改电源/Boot配置、不发送RK命令，也不产生受理或启动完成响应。
+V2外部已启动模式另见本节前半段；它已接入真实结果组包，但不代替完整启动流程和安全训练白名单。
 
 ### 4.8 停止测试（0x0104）
 
 ### 4.9 上报测试结果（0x0105）
 
-命令0x0105，包体示例：
+`functional/parametric/slt`共用以下结果包，`resultDesc`为对象，子字段随测试大类变化。PC收到当前`algorithmIndex`约定的最终结果后再推进计划；跨计划或重连时，不能只凭index认领结果。
+
+#### 4.9.1 统一结果结构
+
+以下为功能测试示例，编号和测量值仅作示意，状态码按双方约定。
 
 ```json
 {
-  "algorithmType": "parametric",
-  "algorithmName": "idd_0",
+  "algorithmType": "functional",
+  "algorithmName": "mats",
   "algorithmIndex": 1,
+  "testTimeMs": 42000,
   "testResults": [
     {
-      "siteId": "",
+      "siteId": "1",
       "mirrorIndex": 1,
-      "resultDesc": "",
-      "testStatus": 1
+      "testStatus": 1,
+      "resultDesc": {"firstErrorAddress": null, "errorType": null},
+      "physicalAddr": "1",
+      "measurementData": {
+        "Vdd1Ave": 1800, "Vdd1Peak": 1810, "Vdd1Min": 1790,
+        "Vdd2Ave": 1100, "Vdd2Peak": 1110, "Vdd2Min": 1090,
+        "VddqAve": 600, "VddqPeak": 610, "VddqMin": 590,
+        "Idd1Ave": 300, "Idd1Peak": 330, "Idd1Min": 270,
+        "Idd2Ave": 140, "Idd2Peak": 155, "Idd2Min": 125,
+        "IddqAve": 85, "IddqPeak": 95, "IddqMin": 70
+      }
     }
   ]
 }
 ```
 
-`algorithmType/algorithmName/algorithmIndex`均沿用对应开始测试请求；名称标识具体算法，
-index标识PC当前计划中的算法项，MCU必须原样返回。PC收到该项约定的最终结果后推进计划，
-不按名称猜测index，也不能把局部结果当作整项完成。
-index不是跨计划/重连的全局唯一ID；当前按4.7节串行执行，残留结果必须按会话/任务边界处理。
-这是新结果格式，现有固件构造器仍为名称/编号格式，尚未增加大类。
+#### 4.9.2 字段及测量规则
 
+| 字段名 | 类型 | 含义 |
+|---|---|---|
+| `algorithmType` | string | 测试大类：functional、parametric、slt，与请求一致 |
+| `algorithmName` | string | 算法名称，与请求一致 |
+| `algorithmIndex` | int | 测试计划中的算法项编号，与请求一致 |
+| `testTimeMs` | uint64/null | 本次算法整体耗时，单位ms；FUNC取RK上报值，不含PC通信等待；未提供时为null |
+| `testResults` | array | 芯片测试结果列表，以下字段位于每个结果项中 |
+| `siteId` | string | B1板标识 |
+| `mirrorIndex` | int | B2标识，即测试机标识 |
+| `physicalAddr` | string | 同一B1内的LPDDR芯片标识，一个site最多两颗；不是首错地址 |
+| `testStatus` | int | 测试结果状态，按双方约定的状态码判断 |
+| `resultDesc` | object | 按测试大类提供结果；下列两个子字段用于FUNC（functional） |
+| ↳ `firstErrorAddress` | string/null | 首错地址，使用0x加16位十六进制字符串；通过或无地址时填null |
+| ↳ `errorType` | null | 错误类型；当前未提供，填null |
+| `measurementData` | object/null | 本次算法的测量统计，各子字段为数字或null，不含state |
 
-`testResults`包含各测试对象的结果；`siteId`和`mirrorIndex`先保留现有字段及类型，具体业务含义和编号规则后续统一规定，不在本框架中绑定物理测试位或软件镜像。`resultDesc`为每项结果的UTF-8字符串描述，无描述时填空字符串`""`，不省略字段或使用`null`。`testStatus`为测试状态码，具体取值由业务定义；描述不替代状态码。
+`Vdd1/Vdd2/Vddq`为三轨实测电压（mV），`Idd1/Idd2/Iddq`为三轨实测电流（mA）；`Ave/Peak/Min`分别表示有效样本平均值、最大值、最小值。无效字段填`null`，完全无数据时`measurementData`为`null`。
+
+新测试正式受理后清零，有效测量阶段才累计，结束后冻结；查询不清零。共轨电流为两颗DDR合计，不代表单颗电流；采样异常不作为芯片FAIL。
 
 ### 4.10 启动RK及内存电源（0x0501）
 
@@ -388,7 +441,7 @@ DDR-ready强制门待双方握手冻结。范围校验、事务互斥、三轨�
 ### 4.19 查询电源采样结果（0x0601）
 
 请求包体固定为`{}`。MCU只读取监测任务最近发布的缓存快照，不在TCP任务中即时访问
-PAC1934、AD7124或TPS。
+PAC1934、AD7124或TPS；同时返回已有统计，不启动、清零或重置统计。
 
 ### 4.20 电源采样结果响应（0x0602）
 
@@ -399,15 +452,50 @@ PAC1934、AD7124或TPS。
   "validMask": 3,
   "voltageMv": [1801, 1099, 601],
   "currentMa": [312, 145, 88],
-  "powerMw": [562, 159, 53]
+  "powerMw": [562, 159, 53],
+  "statistics": {
+    "state": "running",
+    "voltageAvgMv": [1800, 1100, 600],
+    "voltagePeakMv": [1810, 1110, 610],
+    "voltageMinMv": [1790, 1090, 590],
+    "currentAvgMa": [300, 140, 85],
+    "currentPeakMa": [330, 155, 95],
+    "currentMinMa": [270, 125, 70]
+  }
 }
 ```
 
-三个数组顺序固定为VDD1、VDD2、VDDQ。`validMask` bit0表示`voltageMv`有效，
-bit1表示`currentMa`和`powerMw`有效；无效组整体省略。`sampleAgeMs`表示快照年龄，
-`samplePowerState`为采样时状态。电压已应用B1前端1.01换算，真实标定仍待B1真板。
-B1 2134版三路分流电阻按20mΩ换算；V2保留10mΩ验证基线。MCU已完成电流/功率换算，
-PC继续使用原有`currentMa`/`powerMw`字段及mA/mW单位，不再乘除电阻系数。
+| 字段名 | 类型 | 含义 |
+|---|---|---|
+| sampleAgeMs | integer | 最新快照年龄，单位ms；过期快照不能视为即时测量 |
+| samplePowerState | string | 采样时的电源状态 |
+| validMask | integer | 仅表示快照有效性：bit0为voltageMv，bit1为currentMa和powerMw；无效组整体省略，不表示统计是否完整 |
+| voltageMv | number[3] | 最新电压，单位mV |
+| currentMa | number[3] | 最新电流，单位mA |
+| powerMw | number[3] | 最新功率，单位mW |
+| statistics | object / null | 本次测量阶段累计结果；尚未开始时为null |
+| statistics.state | string | 统计状态，见下表 |
+| statistics.voltageAvgMv | (number / null)[3] | 平均电压，单位mV |
+| statistics.voltagePeakMv | (number / null)[3] | 采样最大电压，单位mV |
+| statistics.voltageMinMv | (number / null)[3] | 采样最小电压，单位mV |
+| statistics.currentAvgMa | (number / null)[3] | 平均电流，单位mA |
+| statistics.currentPeakMa | (number / null)[3] | 采样最大电流，单位mA |
+| statistics.currentMinMa | (number / null)[3] | 采样最小电流，单位mA |
+
+| statistics.state | 含义 |
+|---|---|
+| running | 统计中，数值仍会变化 |
+| complete | 统计正常完成，不代表芯片PASS |
+| timeout | 窗口结束但有效样本不足，可能保留部分统计 |
+| cancelled | 取消、下电或调压等导致中断，可能保留部分统计 |
+
+- 所有数组顺序固定为VDD1、VDD2、VDDQ；使用JSON数字，无有效样本的统计元素为JSON `null`，不能用0代替。
+- MCU已完成电流/功率换算，PC直接使用mA/mW，不再乘除电阻系数。
+- 不上传统计年龄、样本数量或窗口时长；样本数量与有效性由MCU内部维护。清零、有效测量阶段及冻结规则见4.9.2节。
+
+<!-- 以下为内部换算记录，不同步到Word。 -->
+电压已应用B1前端1.01换算，真实标定仍待B1真板。
+B1 2134版三路分流电阻按20mΩ换算；V2保留10mΩ验证基线。
 
 ### 4.21 设置结果灯状态（0x0701）
 
@@ -442,112 +530,174 @@ GPIO或LED编号。
 
 ### 4.25 B1–B2保活状态响应（0x0802）
 
-### 4.26 MCU固件升级请求（0x0901）
+### 4.26 固件升级请求（0x0901）
 
-沿用现有连接、帧头和JSON，PC发送一个`.ota`文件；MCU自行选择安装区。以下五种操作共用0x0901，包体中的action区分操作，每次等待响应后再发送下一次OTA请求。
+沿用现有连接、帧头和JSON。PC发送一个`.ota`文件，由MCU选择安装区；以下五种`mcu_*`操作共用0x0901，每次等待响应后再发送下一次请求。新固件不接受旧无前缀动作。
+
+RK仅预留`rk_begin/rk_write/rk_finish/rk_query/rk_cancel`，当前统一返回0x0006 `failed/notSupported`并带回action，不下载、不擦写、不重启。RK文件和包体格式先不定义；以下字段、示例及完成条件仅适用于MCU。
 
 开始下载：
 
 ```json
-{"action":"begin","packageId":"5A1B2C3D","packageSize":139452}
+{"action":"mcu_begin","packageId":"5A1B2C3D","packageSize":139452}
 ```
 
 发送数据块：
 
 ```json
-{"action":"write","packageId":"5A1B2C3D","offset":0,"data":"T1RBMQ=="}
+{"action":"mcu_write","packageId":"5A1B2C3D","offset":0,"data":"T1RBMQ=="}
 ```
 
 完整文件发送后申请安装并重启：
 
 ```json
-{"action":"finish","packageId":"5A1B2C3D"}
+{"action":"mcu_finish","packageId":"5A1B2C3D"}
 ```
 
 查询目标包的升级结果；查询一般状态时省略packageId：
 
 ```json
-{"action":"query","packageId":"5A1B2C3D"}
+{"action":"mcu_query","packageId":"5A1B2C3D"}
 ```
 
 取消尚未提交的下载：
 
 ```json
-{"action":"cancel","packageId":"5A1B2C3D"}
+{"action":"mcu_cancel","packageId":"5A1B2C3D"}
 ```
 
-| 字段 | 类型 | 说明 |
+| 字段名 | 类型 | 含义 |
 |---|---|---|
-| action | string | begin开始、write写块、finish提交并重启、query查询、cancel取消 |
-| packageId | string | 包头CRC32，8位大写十六进制，不带0x；非Seq，同一文件保持不变 |
-| packageSize | integer | `.ota`总字节数，116..2097152；begin必填 |
-| offset | integer | 文件原始字节偏移，从0开始；write必填 |
-| data | string | 独立块的标准Base64，无换行、有必要填充；解码后1..3000字节，且不超过begin返回的blockSize |
+| action | string | mcu_begin开始、mcu_write写块、mcu_finish提交并重启、mcu_query查询、mcu_cancel取消 |
+| packageId | string | 包头CRC32，8位大写十六进制，不带0x；非Seq，同一文件保持不变。除mcu_query可省略外，其余动作必填 |
+| packageSize | integer | `.ota`总字节数，116..2097152（2MiB）；仅mcu_begin必填 |
+| offset | integer | 文件原始字节偏移，从0开始；mcu_write必填 |
+| data | string | mcu_write必填；独立块的标准Base64，无换行、有必要填充，解码后1..3000字节 |
 
-PC从文件偏移36..39读取小端u32包头CRC，并转为packageId；从偏移44/46/48读取三个小端u16组成目标版本major.minor.patch。文件数据原样编码传输，不随网络帧头转换字节序。示例ID、长度和版本仅演示格式；T1RBMQ==只有4字节，不能代替完整升级文件。
+PC从文件偏移36..39读取小端u32包头CRC作为packageId；从偏移44/46/48读取三个小端u16组成目标版本major.minor.patch。文件数据原样编码传输，不随网络帧头转换字节序。示例ID、长度和版本仅演示格式；T1RBMQ==只有4字节，不能代替完整升级文件。
 
-每个操作只发送示例列出的字段。每块原始数据不超过begin返回的blockSize（当前3000，旧版可能为1024），末块按剩余长度发送、不补零。使用紧凑JSON，Base64字符不额外转义；发送前检查UTF-8正文加18字节头≤4096字节，3000字节块的最大正常整帧为4086字节。升级前停止测试、使RK/DDR安全下电，并单独协调B2维护，避免因B1保活中断而复位或断电；MCU仍独立检查升级条件。
+- 每个操作只发送示例列出的字段；mcu_query的一般状态查询可省略packageId。
+- 每块原始数据不超过mcu_begin返回的blockSize（当前3000，旧版可能为1024），末块按剩余长度发送、不补零。
+- 使用紧凑JSON，Base64字符不额外转义；UTF-8正文加18字节头须≤4096字节，3000字节块的最大正常整帧为4090字节。
+- 升级前停止测试、使RK/DDR安全下电，并单独协调B2维护，避免因B1保活中断而复位或断电；MCU仍独立检查升级条件。
 
-### 4.27 MCU固件升级响应（0x0902）
+### 4.27 固件升级响应（0x0902）
 
-begin成功返回块上限和起始偏移；重复相同begin不会清空已收进度：
+mcu_begin成功：
 
 ```json
-{"action":"begin","packageId":"5A1B2C3D","status":"completed","state":"receiving","blockSize":3000,"nextOffset":0}
+{"action":"mcu_begin","packageId":"5A1B2C3D","status":"completed","state":"receiving","blockSize":3000,"nextOffset":0}
 ```
 
-write成功后返回本块offset和下一块nextOffset；PC按action、packageId及offset匹配，不按Seq匹配：
+mcu_write成功：
 
 ```json
-{"action":"write","packageId":"5A1B2C3D","status":"completed","state":"receiving","offset":0,"nextOffset":4}
+{"action":"mcu_write","packageId":"5A1B2C3D","status":"completed","state":"receiving","offset":0,"nextOffset":4}
 ```
 
-nextOffset按已写入并读回验证的原始字节计数。仅允许上一成功块以完全相同内容重发；其他错位或不同内容返回失败，不得自行跳过未确认数据。
-
-finish受理返回以下内容，随后MCU自动重启；accepted不是升级成功：
+mcu_finish受理，随后MCU自动重启；accepted不是升级成功：
 
 ```json
-{"action":"finish","packageId":"5A1B2C3D","status":"accepted","state":"ready"}
+{"action":"mcu_finish","packageId":"5A1B2C3D","status":"accepted","state":"ready"}
 ```
 
 一般状态查询响应示例：
 
 ```json
-{"action":"query","status":"completed","state":"confirmed","activePackageId":"11223344","firmwareVersion":"0.1.2","confirmed":true}
+{"action":"mcu_query","status":"completed","state":"confirmed","activePackageId":"11223344","firmwareVersion":"0.1.2","confirmed":true}
 ```
 
-query请求含packageId时响应也带回。activePackageId、firmwareVersion、confirmed表示实际运行包、固件版本及本次启动健康确认；旧镜像无有效包标识时activePackageId为null。下载中另带download对象，字段为packageId、receivedBytes、totalBytes；没有下载时省略。
+| 字段名 | 类型 | 含义 |
+|---|---|---|
+| action | string | 对应请求动作 |
+| packageId | string | 对应请求包；mcu_query请求带该字段时响应也带回，不代表实际运行包 |
+| status | string | completed为本次操作完成；accepted仅为安装已受理 |
+| state | string | 当前升级/启动状态，见下表 |
+| blockSize | integer | mcu_begin返回的单块原始字节上限 |
+| offset | integer | mcu_write确认的本块原始字节偏移 |
+| nextOffset | integer | 已连续写入并读回验证的原始字节数，也是下一块起点 |
+| activePackageId | string / null | mcu_query返回的实际运行包标识；旧镜像无有效标识时为null |
+| firmwareVersion | string | 实际运行固件版本，格式major.minor.patch |
+| confirmed | boolean | 实际运行固件是否通过本次启动健康确认 |
+| download | object | 仅mcu_query且state=receiving时返回的下载进度；其他状态省略，不是固件文件内容 |
+| download.packageId | string | 正在下载的包标识 |
+| download.receivedBytes | integer | 已接收的原始字节数 |
+| download.totalBytes | integer | 下载文件总字节数 |
 
-state为receiving下载中、ready已提交、commitUnknown提交结果不确定、trial启动待确认、confirmed当前固件健康、cancelled取消或failed未提交下载失败。cancel成功回0902、status=completed、state=cancelled；已提交后禁止取消。
+| state | 含义 |
+|---|---|
+| receiving | 下载中，按nextOffset继续 |
+| ready | 已提交，等待自动重启安装 |
+| commitUnknown | 提交结果不确定，等待复位后查询，不能重新下载 |
+| trial | 本次启动尚待健康确认 |
+| confirmed | 当前固件健康，不单独表示目标包升级成功 |
+| cancelled | 下载已取消 |
+| failed | 未提交下载失败 |
 
-业务失败返回0x0006，requestCommandId=2305，并带已合法解析的action/packageId；write可带offset和仍有效的nextOffset。例如：
+- PC按action、packageId匹配响应，mcu_write还须匹配offset；不按Seq匹配。
+- 重复相同mcu_begin不清空已收进度。仅上一成功块允许以完全相同内容重发；其他错位或不同内容返回失败，不得跳过未确认数据。
+- mcu_cancel成功回0x0902、status=completed、state=cancelled；已提交后禁止取消。
+
+业务失败返回0x0006，例如：
 
 ```json
-{"requestCommandId":2305,"status":"failed","action":"write","packageId":"5A1B2C3D","offset":1024,"nextOffset":0,"errorCode":"offsetMismatch"}
+{"requestCommandId":2305,"status":"failed","action":"mcu_write","packageId":"5A1B2C3D","offset":1024,"nextOffset":0,"errorCode":"offsetMismatch"}
 ```
 
-errorCode沿用invalidArgument、invalidDirection、notSupported、invalidState、busy、notReady；OTA补充offsetMismatch偏移错误、dataMismatch重复块内容不同、packageInvalid包结构错误、targetMismatch板型不符、versionRejected版本不允许、crcMismatch校验失败、flashError存储错误、commitUnknown提交不确定。commitUnknown须等待复位后查询，不能按普通失败立即重传。
+| 字段名 | 类型 | 含义 |
+|---|---|---|
+| requestCommandId | integer | 固定2305，即0x0901 |
+| status | string | 固定failed |
+| action / packageId | string | 仅带回已合法解析的字段 |
+| offset | integer | mcu_write可带回本块偏移 |
+| nextOffset | integer | mcu_write可带回仍有效的下一块偏移 |
+| errorCode | string | 错误码，见下表 |
 
-### 4.28 MCU固件升级完成（0x0903）
+| errorCode | 含义 |
+|---|---|
+| invalidArgument / invalidDirection / notSupported / invalidState / busy / notReady | 沿用通用参数、方向、支持能力、状态、忙碌及未就绪错误 |
+| offsetMismatch | 偏移错误 |
+| dataMismatch | 重复块内容不同 |
+| packageInvalid | 包结构错误 |
+| targetMismatch | 板型不符 |
+| versionRejected | 版本不允许 |
+| crcMismatch | 校验失败 |
+| flashError | 存储错误 |
+| commitUnknown | 提交结果不确定，等待复位后查询，不能按普通失败立即重传下载 |
 
-PC重连后发送query及目标packageId。只有该包正在运行、已通过本次启动30秒健康确认且没有活动升级，MCU才直接返回0x0903；否则返回0x0902当前状态，不主动推送完成通知。
+### 4.28 固件升级完成（0x0903）
+
+本节仅定义MCU的完成判定，RK完成上报暂未定义。
+
+PC重连后发送mcu_query及目标packageId。只有该包正在运行、已通过本次启动30秒健康确认且没有活动升级，MCU才直接返回0x0903；否则返回0x0902当前状态，不主动推送完成通知。
 
 ```json
-{"action":"query","packageId":"5A1B2C3D","status":"completed","state":"confirmed","firmwareVersion":"0.1.3","confirmed":true}
+{"action":"mcu_query","packageId":"5A1B2C3D","status":"completed","state":"confirmed","firmwareVersion":"0.1.3","confirmed":true}
 ```
 
-PC核对packageId和目标固件版本后显示成功。可重复查询，不需要额外ACK；firmwareVersion不是测试仪硬件版本testerVersion。若返回旧版/稳定版则显示“未运行目标版本”，仅凭断连或超时不能认定回滚。
+| 字段名 | 类型 | 含义 |
+|---|---|---|
+| action | string | 固定mcu_query |
+| packageId | string | 请求查询且已健康运行的目标包标识 |
+| status | string | 固定completed |
+| state | string | 固定confirmed |
+| firmwareVersion | string | 实际运行固件版本，须与目标文件一致；不是硬件版本testerVersion |
+| confirmed | boolean | 固定true，已通过本次启动健康确认 |
 
-PC操作规则：
+PC核对packageId和目标固件版本后显示成功。可重复查询，无需额外ACK；若返回旧版/稳定版则显示“未运行目标版本”，仅凭断连或超时不能认定回滚。
 
-1. 普通请求等待5秒，finish等待30秒；同一连接最多重发3次，业务字段不变，Seq照常递增。
-2. 未提交时断连/复位或30秒无下载活动，下载取消，重连从0开始；query、心跳和重复begin不延长下载超时。
-3. finish后断连，即使没收到受理响应，也先查询结果，禁止盲目重新下载。ready和commitUnknown后禁止新下载及取消。
-4. 每2秒重连/查询；安装期间B无网络服务。PC等待600秒仍无结果时显示“结果未确认”，不自动切电源或强制复位。
-5. 仅维护升级，普通路径拒绝同版本和降版；B、稳定版及板卡信息不由PC升级命令修改。CRC用于检测损坏，不作为身份认证。
+| 操作 | PC规则 |
+|---|---|
+| 等待与重发 | 普通请求等待5秒，mcu_finish等待30秒；同一连接最多重发3次，业务字段不变，Seq照常递增 |
+| 未提交下载中断 | 断连/复位或30秒无下载活动即取消，重连从0开始；mcu_query、心跳和重复mcu_begin不延长超时 |
+| mcu_finish后断连 | 即使未收到受理响应，也先查询结果，禁止盲目重新下载；ready和commitUnknown后禁止新下载及取消 |
+| 重连与查询 | 每2秒重连/查询，安装期间B无网络服务；等待600秒仍无结果显示“结果未确认”，不自动切电源或强制复位 |
+| 升级边界 | 仅维护升级，普通路径拒绝同版本和降版；不修改B、稳定版及板卡信息。CRC用于检测损坏，不作为身份认证 |
 
 <!-- 内部接入状态留在Markdown，生成对外Word时不包含此段。 -->
-2026-09-17：V2/B1单块上限更新为3000字节，完整帧仍≤4096；V2已通过真实TCP升级至0.1.6及健康确认，B1只完成构建/离线验证。未启用OTA的普通镜像回notSupported。详细合同见[OTA协议](pc_ota_protocol.md)，验收边界见[本次记录](ota_chunk_3000_validation_20260917.md)。线上文档本轮未修改。
+2026-09-24：本地文档采用新action并预留RK入口；新前缀不是旧网络验收结果，当前固件实现与验证见任务清单。
+
+历史记录2026-09-17：V2/B1单块上限更新为3000字节，完整帧仍≤4096；V2已通过真实TCP升级至0.1.6及健康确认，B1只完成构建/离线验证。未启用OTA的普通镜像回notSupported。详细合同见[OTA协议](pc_ota_protocol.md)，验收边界见[本次记录](ota_chunk_3000_validation_20260917.md)。线上文档本轮未修改。
 
 ## 5. 业务命令补充格式
 
