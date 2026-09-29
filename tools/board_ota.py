@@ -61,7 +61,8 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    """可由日常下载入口传参复用；None仍读取命令行，不另写一套擦写流程。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("backup", "read", "write", "record"))
     parser.add_argument("--directory", type=Path, required=True)
@@ -69,7 +70,7 @@ def main() -> None:
     parser.add_argument("--length", type=lambda s: int(s, 0), default=0x6000)
     parser.add_argument("--input", type=Path)
     parser.add_argument("--name", default="operation")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     directory = args.directory.resolve()
     if any(c.isspace() or c == '"' for c in str(directory)):
         raise ValueError("此版GDB dump/restore要求备份目录不含空白或引号")
