@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""V2 SWD备份/维护工具。只连接指定ST-LINK服务器，写操作要求本轮备份目录完整。
+"""SWD备份/维护工具，默认V2；首烧编排显式指定与板型匹配的AGENT_ELF。
 
 RAM助手源码在tests/ram_agent.c；这里不安装驱动、不修改选项字节、不作网络下载。
-通过标准GDB批处理调度，无需GDB内置Python。实际写入前仍须获得操作者授权。
+通过标准GDB批处理调度，无需GDB内置Python。只连接调用方指定的ST-Link服务器；
+写操作要求本轮备份目录完整，实际写入前仍须获得操作者授权。
 """
 from __future__ import annotations
 import argparse
@@ -13,6 +14,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 GNU = Path("C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin")
+AGENT_ELF = ROOT / "build/Debug/boot_ram_agent.elf"
 
 
 def run_script(directory: Path, name: str, commands: list[str], timeout: int = 300) -> str:
@@ -28,14 +30,20 @@ def run_script(directory: Path, name: str, commands: list[str], timeout: int = 3
     return output
 
 
-def begin_agent() -> list[str]:
-    """每次都复位后装入RAM助手；绝不执行Flash加载。"""
-    agent = (ROOT / "build/Debug/boot_ram_agent.elf").as_posix()
-    return ["set pagination off", "set confirm off", "set remotetimeout 20",
-            f'file "{agent}"', "target extended-remote localhost:61234", "monitor reset", "monitor halt",
+def load_agent() -> list[str]:
+    """在已连接、已暂停且仍为复位HSI环境中加载RAM助手；不擦写内部Flash。"""
+    agent = AGENT_ELF.as_posix()
+    return [f'file "{agent}"',
             "load", "set $pc = Reset_Handler", "set $sp = 0x20020000", "set $xpsr = 0x01000000",
             "hbreak agent_checkpoint", "continue",
             "if agent_mailbox[0] != 0x4147454E", "quit 2", "end"]
+
+
+def begin_agent() -> list[str]:
+    """每次都复位后装入RAM助手；绝不执行Flash加载。"""
+    loading = load_agent()
+    return ["set pagination off", "set confirm off", "set remotetimeout 20",
+            loading[0], "target extended-remote localhost:61234", "monitor reset", "monitor halt"] + loading[1:]
 
 
 def command(code: int, address: int, count: int, *, write: bool = False) -> list[str]:
@@ -99,7 +107,7 @@ def main(argv: list[str] | None = None) -> None:
         manifest = {"scope": "internal 2MiB and W25 affected first 0x410000 bytes",
                     "internal_sha256": sha(internal), "w25_sha256": sha(nor),
                     "fru_sha256": hashlib.sha256(data[0][0x2000:0x4000]).hexdigest(),
-                    "ram_agent_sha256": sha(ROOT / "build/Debug/boot_ram_agent.elf")}
+                    "ram_agent_sha256": sha(AGENT_ELF)}
         (directory / "backup.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         print("PASS：内部Flash及W25相关区域备份完成，W25两次读取逐字节一致。", flush=True)
     elif args.action == "read":

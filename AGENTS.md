@@ -17,6 +17,7 @@ App-V2 位于 `../test`（分支 `app-v2`），App-B1 位于 `../b1`（分支 `a
 - App的地址修正验证在 `../test/tests/verify_ota_relocation.py`；在App工程运行 `tools/dev.ps1 ota-probe`。
 - `tools/dev.ps1 ota-test`：在已安装QEMU中运行实际C安装核心，Flash用RAM模拟。
 - `tools/dev.ps1 ota-pack -AppBuild <A1实验构建目录>`：生成一个App的`test.ota`；包格式见`doc/ota_package_v1.md`。
+- 两App的`tools/first_flash.ps1`固定各自板型，调用本工程`tools/first_flash.py`生成可转交首烧包；包内`flash.ps1`只用于空板，备份后核对全空、回读通过才提交初始日志。无force，不替代日常OTA，新增首烧编排仍待实板验收；详见README。
 
 ## 状态与约束
 

@@ -11,17 +11,28 @@ import struct
 import zlib
 
 
+def initial_record(package: bytes, image: bytes) -> bytes:
+    """为已校验的A1包生成236字节RAM记录；必须交给C日志接口编码和提交。"""
+    if len(package) < 116 or not 8 <= len(image) <= 896 * 1024:
+        raise ValueError("初始包/镜像长度非法")
+    package_crc = struct.unpack_from("<I", package, 36)[0]
+    descriptor = struct.pack("<4I", 0x08020000, len(image), zlib.crc32(image), package_crc) + package[40:116]
+    return struct.pack("<13I", 0, 0, 0, 0xFFFFFFFF, 1, 0, 0, 0, 0, 0, 0, 0, 0) + descriptor + bytes(92)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app-build", type=Path, required=True)
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--journal", type=Path)
+    parser.add_argument("--app-name", choices=("test", "b1"), default="test")
     args = parser.parse_args()
     if not args.name or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for c in args.name):
         raise ValueError("name只允许小写字母数字横线下划线")
-    package = (args.app_build / "test.ota").read_bytes()
-    image = (args.app_build / "test.bin").read_bytes()
+    package = (args.app_build / f"{args.app_name}.ota").read_bytes()
+    image = (args.app_build / f"{args.app_name}.bin").read_bytes()
+    target = b"b1-h743" if args.app_name == "b1" else b"apollo-v2-h743"
     report = json.loads((args.app_build / "relocation_report.json").read_text(encoding="utf-8"))
     if not report["a2_exact_match"] or not report["reverse_exact_match"]:
         raise ValueError("缺少A1/A2逐字节核验")
@@ -31,7 +42,7 @@ def main():
         struct.unpack_from("<I", package, 28)[0] != zlib.crc32(package[40:116]) or
         struct.unpack_from("<I", package, 52)[0] != len(image) or
         struct.unpack_from("<I", package, 56)[0] != zlib.crc32(image) or
-        not package.endswith(image) or package[100:116] != b"apollo-v2-h743".ljust(16, b"\0")):
+        not package.endswith(image) or package[100:116] != target.ljust(16, b"\0")):
         raise ValueError("包/元数据/实际镜像不一致")
     package_crc = struct.unpack_from("<I", package, 36)[0]
     if args.journal:
@@ -60,8 +71,7 @@ def main():
         fields[1] = 1; fields[8] = 0; fields[9] = len(package); fields[10] = package_crc
         struct.pack_into("<13I", record, 0, *fields)
     else:
-        descriptor = struct.pack("<4I", 0x08020000, len(image), zlib.crc32(image), package_crc) + package[40:116]
-        record = struct.pack("<13I", 0, 0, 0, 0xFFFFFFFF, 1, 0, 0, 0, 0, 0, 0, 0, 0) + descriptor + bytes(92)
+        record = initial_record(package, image)
     assert len(record) == 236
     outputs = {"record.bin": record, "package-4k.bin": package + b"\xff" * (-len(package) % 4096)}
     for suffix in outputs:
