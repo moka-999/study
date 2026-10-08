@@ -2,6 +2,8 @@
 
 适用：`D:\pro\test` 的 App-V2、已部署完整OTA Bootloader的阿波罗V2开发板。不适用于空片首次烧录或B1实板。Bootloader工程须保留在同级 `D:\pro\bootloader`。
 
+空白板请改用`tools/first_flash.ps1 -Action build -Version <版本>`，需要当前V2电源/测量模拟配置时显式加`-PowerSimulation`。生成的整个目录可转交同事，使用包内`flash.ps1`烧写，不需源码或重编译；B1有同名独立入口。操作、空板限制和待实板验收边界见[统一首烧说明](../../bootloader/README.md#空白板首次部署v2--b1)，不要用本页的日常入口初始化空日志。
+
 > **2026-09-23实测提示**：SWD入口已完成内部Flash和W25双读备份，但本次连接/复位期间启动日志变为pending=1，因此请求生成器安全拒绝，未写升级包；不能把它标为“一键SWD安装已验收”。本轮改用现有TCP入口安装并健康确认成功。暂优先使用下文网络升级；不要删除pending检查或手改确认标志。SWD复位与健康确认衔接留待专门修复，证据见[RK联调记录](rk_protocol_migration_20260923.md)。
 
 ## 最常用：ST-Link下载，不需要网线

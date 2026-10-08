@@ -69,15 +69,15 @@ int uart_poll_rx(int id, uint8_t *buffer, uint16_t length)
 }
 int uart_send(int id, uint8_t *buffer, uint16_t length)
 {
-    CHECK(id == 0 && (length == 22U || length == 20U));
+    CHECK(id == 0 && (length == 22U || length == 16U));
     tlv_frame_t frame;
-    CHECK(tlv_unpack(buffer, length, &frame) == 1);
+    CHECK(tlv_unpack(buffer, length, &frame) == (length == 16U ? 0 : 1));
     CHECK((length == 22U && frame.units[0].type == TLV_TYPE_CMD) ||
-          (length == 20U && frame.units[0].type == TLV_TYPE_HEARTBEAT));
+          (length == 16U && frame.count == 0U));
     CHECK(tx_attempts < sizeof(tx_log) / sizeof(tx_log[0]));
     tx_log[tx_attempts].sequence = frame.sequence;
     tx_log[tx_attempts].tick = tick;
-    tx_log[tx_attempts++].type = frame.units[0].type;
+    tx_log[tx_attempts++].type = frame.count ? frame.units[0].type : TLV_TYPE_HEARTBEAT;
     if (tx_failure) return -1;
     ++sent;
     return 0;
@@ -113,6 +113,17 @@ static int cleared(const void *data, unsigned length)
     for (unsigned i = 0; i < length; ++i) if (p[i]) return 0;
     return 1;
 }
+/* 用户提供的无TLV心跳；两个CRC独立固定，末尾下一帧5A不属于本帧。 */
+static void test_empty_heartbeat(void)
+{
+    static const uint8_t golden[] = {0x5A,0,0,0x51,0xD3,0,0,0,0,0,0,0,5,0x80,0x08,0xA5};
+    uint8_t wire[32];
+    tlv_frame_t frame;
+    CHECK(tlv_pack_heartbeat(5U, wire, sizeof(wire)) == sizeof(golden));
+    CHECK(memcmp(wire, golden, sizeof(golden)) == 0);
+    CHECK(tlv_unpack(golden, sizeof(golden), &frame) == 0);
+    CHECK(frame.count == 0U && frame.payload_used == 0U && frame.sequence == 5U);
+}
 /* 独立逐位CRC构造畸形TLV，避免打包器的检查挡住故障注入。 */
 static unsigned seal(uint8_t *wire, unsigned length)
 {
@@ -129,7 +140,7 @@ static unsigned feed(tlv_sm_t *stream, const uint8_t *wire, unsigned length)
     for (unsigned i = 0; i < length; ++i) {
         if (tlv_sm_feed(stream, wire[i]) == 1) {
             tlv_frame_t frame;
-            CHECK(tlv_sm_get_frame(stream, &frame) > 0);
+            CHECK(tlv_sm_get_frame(stream, &frame) >= 0);
             ++frames;
         }
     }
@@ -147,6 +158,25 @@ static tlv_frame_t result_frame(uint64_t sequence, uint16_t command, uint64_t ad
     CHECK(tlv_pack(&frame, TLV_TYPE_RESULT_DIE, &die, 1U) == 0);
     CHECK(tlv_pack(&frame, TLV_TYPE_RESULT_TIME, elapsed, 8U) == 0);
     return frame;
+}
+/* 独立的进度/FAIL标量包；正常用例必须通过正式打包范围检查。 */
+static tlv_frame_t scalar_frame(uint64_t sequence, uint16_t type, uint8_t value)
+{
+    tlv_frame_t frame;
+    frame_init(&frame); frame.sequence = sequence;
+    CHECK(tlv_pack(&frame, type, &value, 1U) == 0);
+    return frame;
+}
+/* 为既有事务回归发送两包；专门的分包用例仍逐包调用accept_frame。 */
+static void accept_complete(const tlv_frame_t *details)
+{
+    accept_frame(details);
+    rk_report_t report;
+    if (rk_report_decode(details, &report) == 0 && (report.fields & RK_REPORT_DETAILS)) {
+        tlv_frame_t flag = scalar_frame(details->sequence, TLV_TYPE_RESULT_FAIL,
+                                        report.result.error_address != 0U);
+        accept_frame(&flag);
+    }
 }
 /* 编号和名称按 RK 原始定义逐项核对，不用生产表反向生成预期值。
  * 同一条命令的两种查询应返回同一描述项；IDD 等未支持编号不能误入队。
@@ -175,7 +205,7 @@ static void test_command_table(void)
     CHECK(rk_command_find_by_name("idd_0") == NULL);
 }
 
-/* 六个已知类型的宽度规则必须同时约束打包和接收；未知扩展仍按显式长度保留。
+/* 已知类型的宽度规则必须同时约束打包和接收；未知扩展仍按显式长度保留。
  * bad_length 都能放入测试缓冲，因此失败应由类型规则引起，而不是缓冲越界。
  */
 static void test_type_rules(void)
@@ -190,7 +220,9 @@ static void test_type_rules(void)
         {TLV_TYPE_RESULT_CMD,  2U, 1U},
         {TLV_TYPE_RESULT_ADDR, 8U, 7U},
         {TLV_TYPE_RESULT_DIE,  1U, 0U},
-        {TLV_TYPE_RESULT_TIME, 8U, 9U}
+        {TLV_TYPE_RESULT_TIME, 8U, 9U},
+        {TLV_TYPE_PROGRESS,    1U, 0U},
+        {TLV_TYPE_RESULT_FAIL, 1U, 2U}
     };
     uint8_t value[9] = {0U}, wire[TLV_FRAME_MAX];
     tlv_frame_t frame, unchanged, decoded;
@@ -217,13 +249,71 @@ static void test_type_rules(void)
     unsigned length = tlv_pack_frame(&frame, 7U, wire, sizeof(wire));
     CHECK(length > 0U && tlv_unpack(wire, length, &decoded) == 6);
     CHECK(decoded.units[4].type == 0x7001U && decoded.units[4].data_len == 3U);
-    rk_test_result_t result;
-    CHECK(rk_result_decode(&decoded, &result) == 0 && result.command_id == 17U);
+    rk_report_t result;
+    CHECK(rk_report_decode(&decoded, &result) == 0 && result.result.command_id == 17U);
+    CHECK(result.fields == RK_REPORT_DETAILS);
 
     /* 完整结果混入命令也不能交付；输出预填非零，检测是否泄漏上一次结果。 */
     CHECK(tlv_pack(&decoded, TLV_TYPE_CMD, value, 2U) == 0);
     memset(&result, 0xFF, sizeof(result));
-    CHECK(rk_result_decode(&decoded, &result) == -1 && cleared(&result, sizeof(result)));
+    CHECK(rk_report_decode(&decoded, &result) == -1 && cleared(&result, sizeof(result)));
+}
+
+/* 零TLV不等于放宽坏帧：1..3字节负载、坏CRC、截断和伪造标量仍整帧拒绝。 */
+static void test_report_boundaries(void)
+{
+    uint8_t wire[TLV_FRAME_MAX], golden[16];
+    tlv_frame_t frame;
+    rk_report_t report;
+    tlv_sm_t stream;
+    CHECK(tlv_pack_heartbeat(5U, golden, sizeof(golden)) == 16);
+    tlv_sm_init(&stream);
+    CHECK(feed(&stream, golden, sizeof(golden)) == 1);
+    CHECK(feed(&stream, golden, 1U) == 0);
+    CHECK(feed(&stream, golden + 1, sizeof(golden) - 1U) == 1);
+    for (unsigned i = 0; i < sizeof(golden); ++i) {
+        CHECK(tlv_unpack(golden, i, &frame) == -1);
+        memcpy(wire, golden, sizeof(golden)); wire[i] ^= 1U;
+        CHECK(tlv_unpack(wire, sizeof(golden), &frame) == -1);
+    }
+    for (unsigned i = 1; i <= 3U; ++i) {
+        memset(wire, 0, sizeof(wire)); unsigned length = seal(wire, i);
+        CHECK(tlv_unpack(wire, length, &frame) == -1);
+        tlv_sm_init(&stream);
+        CHECK(feed(&stream, wire, length) == 0);
+        CHECK(feed(&stream, golden, sizeof(golden)) == 1);
+    }
+    frame_init(&frame);
+    CHECK(rk_report_decode(&frame, &report) == 0 && report.fields == 0U);
+    frame.payload_used = 1U;
+    CHECK(tlv_pack_frame(&frame, 1U, wire, sizeof(wire)) == 0);
+    CHECK(rk_report_decode(&frame, &report) == -1 && cleared(&report, sizeof(report)));
+    static const struct { uint16_t type; uint8_t limit; uint8_t field; } cases[] = {
+        {TLV_TYPE_PROGRESS, 100U, RK_REPORT_PROGRESS},
+        {TLV_TYPE_RESULT_FAIL, 1U, RK_REPORT_FAIL}
+    };
+    for (unsigned i = 0U; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        for (unsigned value = 0U; value <= cases[i].limit; ++value) {
+            frame = scalar_frame(9U, cases[i].type, value);
+            CHECK(rk_report_decode(&frame, &report) == 0 && report.fields == cases[i].field);
+            CHECK((i == 0U ? report.progress_percent : report.result.failed) == value);
+        }
+        uint8_t bad = cases[i].limit + 1U;
+        frame_init(&frame);
+        CHECK(tlv_pack(&frame, cases[i].type, &bad, 1U) == -1 && frame.count == 0U);
+        memset(wire, 0, sizeof(wire));
+        wire[13] = cases[i].type >> 8; wire[14] = cases[i].type;
+        wire[16] = 1U; wire[17] = bad;
+        CHECK(tlv_unpack(wire, seal(wire, 5U), &frame) == -1);
+        frame = scalar_frame(9U, cases[i].type, 0U);
+        uint8_t zero = 0U;
+        CHECK(tlv_pack(&frame, cases[i].type, &zero, 1U) == 0);
+        CHECK(rk_report_decode(&frame, &report) == -1 && cleared(&report, sizeof(report)));
+    }
+    frame = result_frame(9U, 3U, 0U); --frame.count;
+    uint8_t failed = 1U;
+    CHECK(tlv_pack(&frame, TLV_TYPE_RESULT_FAIL, &failed, 1U) == 0);
+    CHECK(rk_report_decode(&frame, &report) == -1 && cleared(&report, sizeof(report)));
 }
 
 /* 查表下标损坏时必须先拒绝并复位，不能越界调用；下一帧仍可正常解析。 */
@@ -232,13 +322,13 @@ static void test_invalid_states(void)
     static const tlv_sm_state_t invalid_states[] = {TLV_SM_COUNT, (tlv_sm_state_t)-1};
     uint8_t wire[TLV_FRAME_MAX];
     unsigned length = tlv_pack_heartbeat(9U, wire, sizeof(wire));
-    CHECK(length == 20U);
+    CHECK(length == 16U);
     for (unsigned i = 0U; i < sizeof(invalid_states) / sizeof(invalid_states[0]); ++i) {
         tlv_sm_t stream;
         tlv_sm_init(&stream);
         stream.state = invalid_states[i];
         stream.pos = 3U;
-        stream.ready_len = 20U;
+        stream.ready_len = 16U;
         CHECK(tlv_sm_feed(&stream, 0U) == -1);
         CHECK(stream.state == TLV_SM_IDLE && stream.pos == 0U && stream.ready_len == 0U);
         CHECK(feed(&stream, wire, length) == 1U);
@@ -289,13 +379,14 @@ static void test_codec(void)
         tlv_unit_t saved = result.units[0]; result.units[0] = result.units[i]; result.units[i] = saved;
         CHECK(tlv_pack_frame(&result, 7, wire, sizeof(wire)) == 51);
         CHECK(tlv_unpack(wire, 51, &frame) == 4);
-        rk_test_result_t decoded;
-        CHECK(rk_result_decode(&frame, &decoded) == 0 && decoded.command_id == 17 && decoded.die == 2);
-        CHECK(decoded.error_address == UINT64_C(0x123456789ABCDEF0) && decoded.elapsed_ms == UINT64_C(0x0123456789ABCDEF));
-        --frame.count; CHECK(rk_result_decode(&frame, &decoded) == -1 && cleared(&decoded, sizeof(decoded)));
+        rk_report_t decoded;
+        CHECK(rk_report_decode(&frame, &decoded) == 0 && decoded.result.command_id == 17 && decoded.result.die == 2);
+        CHECK(decoded.fields == RK_REPORT_DETAILS);
+        CHECK(decoded.result.error_address == UINT64_C(0x123456789ABCDEF0) && decoded.result.elapsed_ms == UINT64_C(0x0123456789ABCDEF));
+        --frame.count; CHECK(rk_report_decode(&frame, &decoded) == -1 && cleared(&decoded, sizeof(decoded)));
         frame = result; frame.units[0] = frame.units[1];
         memset(&decoded, 0xFF, sizeof(decoded));
-        CHECK(rk_result_decode(&frame, &decoded) == -1 && cleared(&decoded, sizeof(decoded)));
+        CHECK(rk_report_decode(&frame, &decoded) == -1 && cleared(&decoded, sizeof(decoded)));
     }
     tlv_sm_t stream; tlv_sm_init(&stream);
     CHECK(tlv_sm_get_frame(&stream, &frame) == -1);
@@ -303,7 +394,7 @@ static void test_codec(void)
     CHECK(feed(&stream, golden, sizeof(golden)) == 1);
     CHECK(feed(&stream, (uint8_t[]){0x5A,0x99}, 2) == 0);
     CHECK(feed(&stream, golden, sizeof(golden)) == 1);
-    CHECK(feed(&stream, golden, 8) == 0); tick += 50;
+    CHECK(feed(&stream, golden, 8) == 0); tick += RK_BYTE_TIMEOUT_MS;
     CHECK(feed(&stream, golden, sizeof(golden)) == 1);
     memcpy(wire, golden, sizeof(golden)); wire[19] ^= 1;
     CHECK(feed(&stream, wire, sizeof(golden)) == 0);
@@ -311,7 +402,45 @@ static void test_codec(void)
     CHECK(feed(&stream, golden, sizeof(golden) - 1) == 0);
     CHECK(feed(&stream, golden, sizeof(golden)) == 1);
     tick = UINT32_MAX - 20; CHECK(feed(&stream, golden, 8) == 0);
-    tick = 31; CHECK(feed(&stream, golden, sizeof(golden)) == 1);
+    tick += RK_BYTE_TIMEOUT_MS; CHECK(feed(&stream, golden, sizeof(golden)) == 1);
+}
+
+/* 覆盖56字节MATS结果的全部切分点、主动检查/继续收字节和tick回绕。
+ * V2门限固定100ms；B1独立工程按其自身门限执行，不能因此假装已同步。
+ */
+static void test_byte_timeout(void)
+{
+    static const uint8_t golden[] = {
+        0x5A,0x00,0x28,0x51,0xCD,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x30,
+        0x50,0x01,0x00,0x02,0x11,0x00,0x10,0x17,0x00,0x01,0x00,
+        0x90,0x01,0x00,0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x30,0x01,0x00,0x01,0x00,0x90,0x02,0x00,0x08,
+        0x0D,0x16,0x00,0x00,0x00,0x00,0x00,0x00,0x8F,0x68,0xA5
+    };
+    const uint32_t limit = RK_BYTE_TIMEOUT_MS;
+#if !defined(B1_RK_UART)
+    CHECK(limit == 100U);
+#endif
+    const uint32_t delays[] = {0U, limit / 2U, limit - 1U, limit, limit + 1U};
+    for (unsigned wrap = 0U; wrap < 2U; ++wrap) {
+        for (unsigned poll = 0U; poll < 2U; ++poll) {
+            for (unsigned d = 0U; d < sizeof(delays) / sizeof(delays[0]); ++d) {
+                for (unsigned split = 1U; split < sizeof(golden); ++split) {
+                    tlv_sm_t stream;
+                    tlv_sm_init(&stream);
+                    tick = wrap ? UINT32_MAX - 20U : 0U;
+                    CHECK(feed(&stream, golden, split) == 0U);
+                    tick += delays[d];
+                    unsigned expired = delays[d] >= limit;
+                    if (poll) CHECK(tlv_sm_check_timeout(&stream, limit) == (int)expired);
+                    CHECK(feed(&stream, golden + split, sizeof(golden) - split) == !expired);
+                    /* 不足门限即正常拼帧；超时清理后也必须能接收下一完整帧。 */
+                    CHECK(feed(&stream, golden, sizeof(golden)) == 1U);
+                }
+            }
+        }
+    }
+    tick = 0U;
 }
 static void test_transaction(void)
 {
@@ -323,16 +452,16 @@ static void test_transaction(void)
     CHECK(rk_link_request(&request) == 0); process_request(); CHECK(sent == 1 && s_pending.waiting);
     tick += 600; process_request(); CHECK(sent == 1 && s_pending.waiting);
     tlv_frame_t result = result_frame(s_pending.sequence + 1U, 3, 0);
-    accept_frame(&result); CHECK(s_pending.waiting);
-    result = result_frame(s_pending.sequence, 4, 0); accept_frame(&result); CHECK(s_pending.waiting);
+    accept_complete(&result); CHECK(s_pending.waiting);
+    result = result_frame(s_pending.sequence, 4, 0); accept_complete(&result); CHECK(s_pending.waiting);
     result = result_frame(s_pending.sequence, 3, 0); --result.count;
-    accept_frame(&result); CHECK(s_pending.waiting);
+    accept_complete(&result); CHECK(s_pending.waiting);
     result = result_frame(s_pending.sequence, 3, 0);
-    responses.count = 8; accept_frame(&result); process_request();
+    responses.count = 8; accept_complete(&result); process_request();
     CHECK(s_pending.delivery && !s_pending.waiting && sent == 1);
     responses.count = 0; process_request(); CHECK(rk_link_receive(&response) == 1);
     CHECK(response.status == RK_RESPONSE_COMPLETE && response.cookie == 101 && !response.result.error_address);
-    accept_frame(&result); process_request(); CHECK(rk_link_receive(&response) == 0);
+    accept_complete(&result); process_request(); CHECK(rk_link_receive(&response) == 0);
     tx_failure = 1; CHECK(rk_link_request(&request) == 0); process_request(); process_request();
     CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_TX_FAILED && sent == 1);
     tx_failure = 0; request.timeout_ms = 1000;
@@ -340,11 +469,11 @@ static void test_transaction(void)
     tick += 1000; process_request(); process_request();
     CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_TIMEOUT);
     CHECK(rk_link_request(&request) == 0); tick += 10000; process_request(); CHECK(sent == 2);
-    result = result_frame(s_pending.sequence, 3, 1); accept_frame(&result); process_request();
+    result = result_frame(s_pending.sequence, 3, 1); accept_complete(&result); process_request();
     CHECK(sent == 3 && rk_link_receive(&response) == 1);
     CHECK(response.status == RK_RESPONSE_RECOVERED && response.cookie == 101U);
     CHECK(cleared(&response.result, sizeof(response.result)) && rk_link_receive(&response) == 0);
-    result = result_frame(s_pending.sequence, 3, 1); accept_frame(&result); process_request();
+    result = result_frame(s_pending.sequence, 3, 1); accept_complete(&result); process_request();
     CHECK(rk_link_receive(&response) == 1 && response.result.error_address == 1);
 #if defined(B1_RK_UART)
     CHECK(rk_link_request(&request) == 0); process_request();
@@ -366,7 +495,175 @@ static void reset_task_test(void)
     rx_mode = 0;
 }
 
-/* 真实算法可运行十几分钟；0必须无限等待，与串口字节间50ms判定互不影响。 */
+/* 详情和FAIL缺一不可；进度即使携带已发心跳Seq，也绝不能解除在途测试。 */
+static void test_split_result(void)
+{
+    for (unsigned order = 0; order < 2U; ++order) {
+        for (unsigned failed = 0; failed <= 1U; ++failed) {
+            reset_task_test();
+            rk_request_t request = {3U, 701U, 0U};
+            rk_response_t response;
+            CHECK(rk_link_request(&request) == 0); process_request();
+            uint64_t sequence = s_pending.sequence;
+            TickType_t heartbeat_tick = 0U; tick = 1000U; process_heartbeat(&heartbeat_tick);
+            uint64_t heartbeat_seq = tx_log[1].sequence;
+            tlv_frame_t progress = scalar_frame(heartbeat_seq, TLV_TYPE_PROGRESS, 100U);
+            accept_frame(&progress); process_request();
+            CHECK(s_pending.progress_valid && s_pending.progress_percent == 100U);
+            CHECK(s_pending.progress_sequence == heartbeat_seq && s_pending.waiting);
+            CHECK(rk_link_receive(&response) == 0);
+            tlv_frame_t stray = scalar_frame(heartbeat_seq + 1U, TLV_TYPE_RESULT_FAIL, failed);
+            accept_frame(&stray); CHECK(s_pending.result_fields == 0U);
+            stray = result_frame(sequence, 4U, 0U);
+            accept_frame(&stray); CHECK(s_pending.result_fields == 0U);
+            tlv_frame_t details = result_frame(sequence, 3U, 0U);
+            tlv_frame_t flag = scalar_frame(sequence, TLV_TYPE_RESULT_FAIL, failed);
+            const tlv_frame_t *first = order ? &flag : &details;
+            const tlv_frame_t *last = order ? &details : &flag;
+            accept_frame(first); accept_frame(first);
+            tick += 20U * 60U * 1000U; process_request();
+            CHECK(s_pending.waiting && !s_pending.result_conflict && sent == 2U);
+            CHECK(rk_link_receive(&response) == 0);
+            accept_frame(last); process_request();
+            CHECK(!s_pending.waiting && rk_link_receive(&response) == 1);
+            CHECK(response.status == RK_RESPONSE_COMPLETE && response.result.failed == failed);
+            CHECK(response.result.error_address == 0U && response.result.command_id == 3U);
+            CHECK(response.sequence == sequence && response.cookie == 701U);
+            accept_frame(first); accept_frame(last); process_request();
+            CHECK(rk_link_receive(&response) == 0);
+            CHECK(rk_link_request(&request) == 0); process_request();
+            CHECK(!s_pending.progress_valid && s_pending.result_fields == 0U);
+            accept_frame(first); accept_frame(last);
+            CHECK(s_pending.waiting && s_pending.result_fields == 0U);
+        }
+    }
+    /* 当前测试的重复详情/FAIL前后矛盾时，不选择可能错误的PASS，也不发送下一算法。 */
+    for (unsigned kind = 0U; kind < 2U; ++kind) {
+        reset_task_test();
+        rk_request_t request = {3U, 702U, 1000U};
+        rk_response_t response;
+        CHECK(rk_link_request(&request) == 0); process_request();
+        uint64_t seq = s_pending.sequence;
+        tlv_frame_t first = kind ? scalar_frame(seq, TLV_TYPE_RESULT_FAIL, 0U) : result_frame(seq, 3U, 0U);
+        tlv_frame_t changed = kind ? scalar_frame(seq, TLV_TYPE_RESULT_FAIL, 1U) : result_frame(seq, 3U, 1U);
+        accept_frame(&first); accept_frame(&changed);
+        CHECK(s_pending.result_conflict && s_pending.waiting);
+        tlv_frame_t other = kind ? result_frame(seq, 3U, 0U) : scalar_frame(seq, TLV_TYPE_RESULT_FAIL, 0U);
+        accept_frame(&other); process_request();
+        CHECK(s_pending.waiting && rk_link_receive(&response) == 0);
+        tick = 1000U; process_request(); process_request();
+        CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_TIMEOUT);
+        CHECK(rk_link_receive(&response) == 0 && s_pending.waiting);
+    }
+    reset_task_test();
+}
+
+/* RK统一携带最近收到的MCU流水号，两包可以不同，不能强求等于测试命令Seq。 */
+static void test_latest_received_sequence(void)
+{
+    for (unsigned order = 0U; order < 2U; ++order) {
+        reset_task_test();
+        rk_request_t request = {3U, 704U, 0U};
+        rk_response_t response;
+        CHECK(rk_link_request(&request) == 0); process_request();
+        uint64_t command_seq = s_pending.sequence;
+        TickType_t last = 0U;
+        tick = 1000U; process_heartbeat(&last);
+        uint64_t first_seq = tx_log[1].sequence;
+        tick = 2000U; process_heartbeat(&last);
+        uint64_t second_seq = tx_log[2].sequence;
+        CHECK(first_seq != command_seq && second_seq != first_seq);
+        tlv_frame_t stray = scalar_frame(command_seq - 1U, TLV_TYPE_RESULT_FAIL, 0U);
+        accept_frame(&stray); CHECK(s_pending.result_fields == 0U);
+        stray.sequence = second_seq + 1U;
+        accept_frame(&stray); CHECK(s_pending.result_fields == 0U);
+        /* 发送失败的心跳不能推进接收窗口，也不能被RK当成已收到的新Seq。 */
+        tx_failure = 1; tick = 3000U; process_heartbeat(&last); tx_failure = 0;
+        CHECK(s_pending.last_tx_sequence == second_seq);
+        stray.sequence = tx_log[3].sequence;
+        accept_frame(&stray); CHECK(s_pending.result_fields == 0U);
+        /* 接收时MCU已发送下一次心跳；较早心跳Seq依然是合法的在途上报。 */
+        tlv_frame_t progress = scalar_frame(first_seq, TLV_TYPE_PROGRESS, 72U);
+        accept_frame(&progress);
+        CHECK(s_pending.progress_valid && s_pending.progress_percent == 72U);
+        CHECK(s_pending.progress_sequence == first_seq && s_pending.waiting);
+        tlv_frame_t details = result_frame(order ? second_seq : first_seq, 3U, 0U);
+        tlv_frame_t flag = scalar_frame(order ? first_seq : second_seq, TLV_TYPE_RESULT_FAIL, 1U);
+        accept_frame(order ? &flag : &details); process_request();
+        CHECK(s_pending.waiting && rk_link_receive(&response) == 0);
+        accept_frame(order ? &details : &flag); process_request();
+        CHECK(!s_pending.waiting && rk_link_receive(&response) == 1);
+        CHECK(response.status == RK_RESPONSE_COMPLETE && response.result.failed == 1U);
+        CHECK(response.cookie == 704U && response.sequence == command_seq);
+        CHECK(rk_link_receive(&response) == 0);
+    }
+    /* 只注入事务窗口边界，验证uint64回绕；不修改正式发送序号分配器。 */
+    reset_task_test();
+    rk_request_t request = {3U, 705U, 0U};
+    rk_response_t response;
+    CHECK(rk_link_request(&request) == 0); process_request();
+    s_pending.sequence = UINT64_MAX - 1U;
+    s_pending.last_tx_sequence = 1U;
+    tlv_frame_t progress = scalar_frame(0U, TLV_TYPE_PROGRESS, 50U);
+    accept_frame(&progress); CHECK(s_pending.progress_valid && s_pending.progress_percent == 50U);
+    tlv_frame_t flag = scalar_frame(UINT64_MAX - 2U, TLV_TYPE_RESULT_FAIL, 1U);
+    accept_frame(&flag); CHECK(s_pending.result_fields == 0U);
+    flag.sequence = 2U; accept_frame(&flag); CHECK(s_pending.result_fields == 0U);
+    flag.sequence = 1U; accept_frame(&flag);
+    tlv_frame_t details = result_frame(0U, 3U, 0U);
+    accept_frame(&details); process_request();
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
+    CHECK(response.result.failed == 1U && response.sequence == UINT64_MAX - 1U);
+    reset_task_test();
+}
+
+/* 用实际字节流串联心跳/进度/两包结果，验证粘包和缺包，不绕过状态机。 */
+static void test_result_stream(void)
+{
+    reset_task_test();
+    rk_request_t request = {3U, 703U, 1000U};
+    rk_response_t response;
+    CHECK(rk_link_request(&request) == 0); process_request();
+    uint64_t sequence = s_pending.sequence;
+    tlv_frame_t frames[4];
+    frame_init(&frames[0]); frames[0].sequence = sequence;
+    frames[1] = scalar_frame(sequence, TLV_TYPE_PROGRESS, 72U);
+    frames[2] = result_frame(sequence, 3U, 0U);
+    frames[3] = scalar_frame(sequence, TLV_TYPE_RESULT_FAIL, 1U);
+    tlv_sm_t stream; tlv_sm_init(&stream);
+    uint8_t wire[TLV_FRAME_MAX];
+    for (unsigned n = 0U; n < 4U; ++n) {
+        unsigned length = tlv_pack_frame(&frames[n], frames[n].sequence, wire, sizeof(wire));
+        CHECK(length == (n == 0U ? 16U : n == 2U ? 51U : 21U));
+        for (unsigned i = 0U; i < length; ++i) {
+            if (tlv_sm_feed(&stream, wire[i]) == 1) {
+                tlv_frame_t parsed;
+                CHECK(tlv_sm_get_frame(&stream, &parsed) >= 0);
+                accept_frame(&parsed);
+            }
+        }
+        process_request();
+        if (n < 3U) CHECK(s_pending.waiting && rk_link_receive(&response) == 0);
+    }
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
+    CHECK(response.result.failed == 1U && response.result.error_address == 0U);
+    CHECK(s_pending.progress_percent == 72U && s_pending.progress_sequence == sequence);
+
+    /* 一个结束包先到、另一个跨过显式期限才到：仅TIMEOUT→RECOVERED，无0105成功。 */
+    reset_task_test();
+    CHECK(rk_link_request(&request) == 0); process_request();
+    frames[2] = result_frame(s_pending.sequence, 3U, 0U);
+    frames[3] = scalar_frame(s_pending.sequence, TLV_TYPE_RESULT_FAIL, 0U);
+    accept_frame(&frames[2]); tick = 1000U; process_request(); process_request();
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_TIMEOUT);
+    CHECK(s_pending.waiting);
+    accept_frame(&frames[3]); process_request();
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_RECOVERED);
+    CHECK(rk_link_receive(&response) == 0 && !s_pending.waiting);
+    reset_task_test();
+}
+
+/* 真实算法可运行十几分钟；0必须无限等待，与串口字节间超时判定互不影响。 */
 static void test_unlimited_result_wait(void)
 {
     reset_task_test();
@@ -379,10 +676,10 @@ static void test_unlimited_result_wait(void)
     tick = 20U * 60U * 1000U; process_request();
     CHECK(sent == 1U && s_pending.waiting && !s_pending.timed_out);
     tlv_frame_t result = result_frame(s_pending.sequence, 3U, UINT64_C(0x1234567890));
-    accept_frame(&result); process_request();
+    accept_complete(&result); process_request();
     CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
     CHECK(response.cookie == 501U && response.result.error_address == UINT64_C(0x1234567890));
-    accept_frame(&result); process_request(); CHECK(rk_link_receive(&response) == 0);
+    accept_complete(&result); process_request(); CHECK(rk_link_receive(&response) == 0);
 
     /* 无限等待跨tick回绕仍不误判超时，不重发；最终结果只交付一次。 */
     tick = UINT32_MAX - 5U;
@@ -390,7 +687,7 @@ static void test_unlimited_result_wait(void)
     tick = 10U; process_request();
     CHECK(sent == 2U && s_pending.waiting && !s_pending.timed_out);
     result = result_frame(s_pending.sequence, 3U, 0U);
-    accept_frame(&result); process_request();
+    accept_complete(&result); process_request();
     CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
     CHECK(rk_link_receive(&response) == 0);
 }
@@ -418,7 +715,7 @@ static void test_timeout_recovery_backpressure(void)
         CHECK(s_pending.response.status == RK_RESPONSE_TIMEOUT);
         tlv_frame_t result = result_frame(sequence, 3U, 0U);
         if (mode == 0U) {
-            accept_frame(&result); accept_frame(&result); process_request();
+            accept_complete(&result); accept_complete(&result); process_request();
         }
 #if defined(B1_RK_UART)
         else {
@@ -454,10 +751,10 @@ static void test_timeout_recovery_backpressure(void)
         CHECK(rk_link_receive(&response) == 0);
         if (mode == 0U) {
             CHECK(sent == 2U && s_pending.waiting && requests.count == 0U);
-            accept_frame(&result); process_request();
+            accept_complete(&result); process_request();
             CHECK(s_pending.waiting && rk_link_receive(&response) == 0);
             result = result_frame(s_pending.sequence, 3U, 0U);
-            accept_frame(&result); process_request();
+            accept_complete(&result); process_request();
             CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
             CHECK(response.cookie == 602U);
         }
@@ -480,21 +777,19 @@ static void test_timeout_recovery_backpressure(void)
     CHECK(rk_link_request(&request) == 0); process_request();
     tick = 1000U;
     tlv_frame_t result = result_frame(s_pending.sequence, 3U, 0U);
-    accept_frame(&result); process_request();
+    accept_complete(&result); process_request();
     CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_TIMEOUT);
     CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_RECOVERED);
-    accept_frame(&result); process_request(); CHECK(rk_link_receive(&response) == 0);
+    accept_complete(&result); process_request(); CHECK(rk_link_receive(&response) == 0);
 }
 
 /* 毫秒桩核对发送边界、失败不忙重试、错过周期不追赶和tick回绕。
- * V2固定验收2000ms；独立B1复用本测试时仍按其自身构建周期检查。
+ * V2与独立B1均固定验收1000ms，防止两工程的心跳周期不同步。
  */
 static void test_heartbeat(void)
 {
     const TickType_t interval = pdMS_TO_TICKS(RK_HEARTBEAT_INTERVAL_MS);
-#if !defined(B1_RK_UART)
-    CHECK(interval == 2000U);
-#endif
+    CHECK(interval == 1000U);
     reset_task_test();
     TickType_t last = 100U;
     tick = 100U + interval - 1U; process_heartbeat(&last); CHECK(tx_attempts == 0U && last == 100U);
@@ -521,11 +816,12 @@ static void test_heartbeat(void)
     CHECK(s_pending.waiting && tx_log[0].type == TLV_TYPE_CMD);
     rk_pending_t pending = s_pending;
     last = 0U; tick = interval; process_heartbeat(&last);
+    pending.last_tx_sequence = tx_log[1].sequence;
     CHECK(sent == 2U && memcmp(&pending, &s_pending, sizeof(pending)) == 0);
     CHECK(tx_log[1].type == TLV_TYPE_HEARTBEAT);
     CHECK(tx_log[1].sequence == tx_log[0].sequence + 1U);
-    tlv_frame_t result = result_frame(s_pending.sequence, 3U, 0U);
-    accept_frame(&result); process_request();
+    tlv_frame_t result = result_frame(tx_log[1].sequence, 3U, 0U);
+    accept_complete(&result); process_request();
     rk_response_t response;
     CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
     CHECK(rk_link_request(&request) == 0); process_request();
@@ -591,9 +887,11 @@ static void test_task_fairness(void)
 }
 void test_main(void)
 {
-    test_command_table(); test_type_rules(); test_invalid_states();
-    test_codec(); test_transaction(); test_unlimited_result_wait();
+    test_empty_heartbeat();
+    test_command_table(); test_type_rules(); test_report_boundaries(); test_invalid_states();
+    test_codec(); test_byte_timeout(); test_transaction(); test_unlimited_result_wait();
     test_timeout_recovery_backpressure();
+    test_split_result(); test_latest_received_sequence(); test_result_stream();
     test_heartbeat(); test_task_fairness();
-    message("PASS: RK protocol and transaction, heartbeat scheduling, actual C offline only\n"); finish(0);
+    message("PASS: RK protocol and transaction, empty heartbeat, progress, split result, actual C offline only\n"); finish(0);
 }

@@ -14,10 +14,10 @@ STM32H743 **阿波罗 V2** 板，作为 **TCP server + 双协议网关**：PC–
 PC ──TCP:8888──► MCU(STM32H743) ──逻辑 RK 串口──► RK3588
                                        └─ 阿波罗 V2: USART1 / B1: UART4 或 USART2（待真机定）
 PC ──独立温控接口──► B2 MCU ──► 全部加热及其他底板级控制
-B2 MCU（共享SPI主机）──SCK/MOSI/MISO + CS0..7──► B1 MCU ×8（各自SPI2从机，仅保活）
+B2 MCU（共享SPI主机）──SCK/MOSI/MISO + CS0..7──► B1 MCU ×8（各自SPI2从机，保活及待实现的IP通知）
 ```
 
-B2 MCU由其他同事开发并由PC直接管理温控；B1不控制、代理或转发温控。B2以一组SPI主机共享SCK/MOSI/MISO，并用8个独立CS选择8块B1，SPI只用于保活。B1暂按从机、Mode 0、8位MSB、硬件NSS低有效配置，B2初始时钟暂按1MHz；保活载荷、周期、超时判定留待B2双方评审冻结。
+B2 MCU由其他同事开发并由PC直接管理温控；B1不控制、代理或转发温控。B2以一组SPI主机共享SCK/MOSI/MISO，并用8个独立CS选择8块B1；SPI需求为保活及B2向B1通知网络配置，IP通知仅确认方向和地址规则，尚未定义报文或实现。B1暂按从机、Mode 0、8位MSB、硬件NSS低有效配置，B2初始时钟暂按1MHz；保活载荷、周期、超时及IP通知合同留待B2双方评审冻结。
 
 **软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (YT8512C, RMII) + PC–MCU JSON协议 + MCU–RK TLV协议。B1是同级独立工程 `../b1`，不在本V2源码树内混合构建。
 
@@ -49,9 +49,11 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 ```
 - CRC = Modbus CRC-16（多项式0x8005，右移实现0xA001，初值0xFFFF）。HCRC覆盖前3字节；FCRC仅覆盖Seq及TLV，不含Length。
 - TLV 单元：`[Type:2B BE][TLV_Len:2B BE][Value]`；Value内多字节整数为小端。
-- 命令容器`0x5000`的前两字节是小端CmdID，任务仅发送无参数命令1..20；17=MATS，21..36的IDD不宣称支持。心跳`0x0000`、空Value。
-- 最终结果同帧包含`0x5001/0x9001/0x3001/0x9002`，分别为命令u16、首错地址u64（0=PASS）、die u8、耗时u64毫秒；必须全部有效、每种恰好一次，按RK Seq＋命令匹配后原子交付。
-- 帧内 TLV 数量：**至少 1 个，最多 16 个**（`TLV_MAX_PER_FRAME`）
+- 命令容器`0x5000`的前两字节是小端CmdID，任务仅发送无参数命令1..20；17=MATS，21..36的IDD不宣称支持。普通心跳为Length=0、零TLV的16字节完整帧；接收仍兼容0x0000空Value。
+- RK所有上行帧统一填写RK最近收到的MCU Seq，不回显原测试命令Seq、不使用RK自身心跳计数；MCU下行命令/心跳仍共用递增u64流水号。
+- 测试中心跳携带`0x3016`、1字节无符号进度0..100；仅保存参考值，不作为完成/ready或自动恢复依据，不擅自增加PC JSON字段。
+- 最终详情同帧包含`0x5001/0x9001/0x3001/0x9002`，分别为命令u16、首错地址u64、die u8、耗时u64毫秒，各恰好一次。另收`0x1017`、1字节bool（0=PASS、1=FAIL）；两包Seq允许不同，按单在途及详情命令匹配收齐后一次交付，不能用地址0或进度100冒充PASS/完成。
+- 帧内TLV数量为0..16；Length仅允许0或4..1024，1..3仍非法。新合同及验证见[增量记录](doc/rk_protocol_update_20260930.md)。
 - 状态机 5 态：IDLE→HEADER→DATA→CRC→FOOTER；仅用于MCU–RK串口链路。
 
 > 旧PC–TLV `dispatch.c/.h`已删除。RK参考工程中的POSIX/UART演示代码不直接移植，复用本工程串口/FreeRTOS并补齐边界。V2正式0103支持用户确认的外部已启动模式：power/bootMode均null、reboot=false，仅执行功能算法，不接管电源/启动；默认不设算法等待超时。B1也已接入该模式，但额外要求真实电源状态ON；测量用实际采样，完整上电/冷重启/RK-ready流程仍拒绝执行，默认未配置时序门禁不变。`ENABLE_RK_GATEWAY_TEST`仅保留旧隔离模拟用途，真实RK接入不打开该开关。详见[真实RK接入](doc/rk_real_test_20260928.md)及[B1同步记录](../b1/docs/real_test_sync_20260929.md)。
@@ -65,9 +67,9 @@ V2可显式启用`ENABLE_V2_POWER_SIMULATION`：沿用上述正式任务及真�
 | 目录 | 内容 |
 |------|------|
 | `App/protocol/pc/` | PC–MCU独立字节流状态机、JSON/命令分发、固定头响应组帧和PC业务JSON辅助层 |
-| `App/protocol/rk/` | RK新线格式组帧/CRC/TLV状态机及四TLV结果解码 |
+| `App/protocol/rk/` | RK线格式组帧/CRC/TLV状态机，详情、进度和FAIL报告解码 |
 | `App/tasks/pc/` | PC侧TCP server任务；负责socket生命周期和传输编排，业务由PC命令表分发 |
-| `App/tasks/rk/` | 单个RK任务统一推进串口、请求/最终结果和每2秒心跳；不自动重发测试 |
+| `App/tasks/rk/` | 单个RK任务统一推进串口、请求/最终结果和每1秒心跳；不自动重发测试 |
 | `App/tasks/common/` | LED、采样监控等不隶属单一通信对象的正式任务 |
 | `App/tasks/test/` | Mock、自检和逻辑分析仪波形任务；不代表生产业务 |
 | `BSP/` | 板级驱动：AD7124 / Flash / IIC / LED / PCF8574 / WDT |
@@ -92,6 +94,8 @@ powershell -ExecutionPolicy Bypass -File tools/dev.ps1 build
 
 ### 烧录（SWD）— 下列仅适用于非OTA旧布局
 
+空白板首部署使用`tools/first_flash.ps1 -Action build -Version <版本>`生成固定交付包，再用包内`flash.ps1`选择板型/指定ST-Link烧写。B1有同名独立入口，共用`../bootloader/tools/first_flash.py`；备份、全空检查、B/A1/恢复包回读通过后才由C接口提交初始日志。不提供force或自动清空旧板；新入口仍待空板实测，详见[首烧说明](../bootloader/README.md#空白板首次部署v2--b1)。
+
 日常修改V2 App请用 `tools/dev.ps1 ota-build -Version <新版本>`，或 `ota-swd -Version <新版本> -Serial <ST-Link序列号> -ConfirmIdle YES`；网络入口为 `ota-net`。VS Code默认Ctrl+Shift+B已指向安全SWD入口；操作与验证边界见[日常下载说明](doc/ota_daily_download.md)。这些入口复用完整B安装，不能用于空片首部署或B1。
 
 > 已部署完整OTA的板卡禁止用下面的`build_debug/boot.elf`覆盖B，或绕过启动日志直接覆盖App。OTA使用同级`../bootloader`完整B及`ENABLE_OTA_BOOT=ON`的槽限App；构建、备份、安装与当前板卡状态见[OTA网络验证](doc/ota_network_validation_20260916.md)。
@@ -111,7 +115,7 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 ### 串口 / 网络
 - 串口：2026-09-23实测COM5 = CH340 → USART1（阿波罗阶段接PC模拟RK3588）；每次先枚举确认，不硬编码旧COM3。
 - 当前测试MCU IP：`192.168.1.201:8888`，继续使用本地配置。
-- 正式B1 IP由B2 MCU告知（2026-09-22确认），不以本地固定地址或FRU配置IP作为正式来源。通知链路/协议/时机及异常处理待双方确定；当前仅记录，保留测试配置和FRU布局，不据此新增SPI命令。详见[需求基线](doc/requirements_baseline.md)。
+- 正式B1 IP由B2 MCU告知，不以本地固定地址或FRU配置IP作为正式来源。已确认PC配置B2、B2经SPI通知各B1，PC随后直接连接B1；仅以产线Excel第一张`IP rule`为准：PC=`192.168.210.9`，B2末段=`10*T`，B1末段=`10*T+S`（T=1～21，S=1～8）。10号/18号整机B2分别为`.100`/`.180`，不沿用原表两处笔误。报文、时机、掩码/网关、首次发现、异常与持久化待定；当前只记录，不改变测试配置、FRU布局或新增SPI命令。详见[需求基线§1.1](doc/requirements_baseline.md)。
 
 ### 崩溃诊断（HardFault 排查）
 - 诊断地址随链接变化，读写前必须从**实际烧录的同一份ELF**用`arm-none-eabi-nm -S -n`查询`crash_log`（16×uint32）和`tcp_diag`（8×uint32）。禁止把历史地址的`-w32`命令直接套用到新镜像。`.crash_log`为NOLOAD，复位不清零。
@@ -154,7 +158,7 @@ python -B -X utf8 tests/rk_gateway_network_test.py --serial COM5 --report build/
 
 1. **MCU 是单客户端 TCP server**：`listen(listenfd, 1)` + 单 accept 循环，一次只服务 1 个连接。测试脚本开新连接前必须 `close_tcp()`。
 2. **RK背压**：`rkRequestQueue`与`rkResponseQueue`各8槽，但只允许一个已发出的测试在途。结果队列满时保留待交付副本，不取下一请求。`uart_send`整帧入队失败返回TX_FAILED，不自动回插或重发。
-3. **RK结果匹配**：四个结果TLV原子解码后，同时匹配RK Seq及命令号；不匹配/重复/畸形结果不回ACK，也不提前释放请求。
+3. **RK结果匹配**：RK上报Seq为它最近收到的MCU流水号；仅做本次测试命令至最近成功入UART队列Seq的窗口过滤，不要求等于命令Seq/MCU最新值或两包相等。四详情原子校验且命令匹配，按单在途汇总独立FAIL，缺一不释放请求。相同重复幂等，内容矛盾保持等待，无自动ACK/重发。旧结果若重新标上当前窗口Seq，同算法时协议无法区分，不能宣称实现执行实例级防重放。
 4. **超时**：timeout_ms=0表示不限制算法等待（用户确认十几分钟算法不设时限）；非零仍为显式最终结果时限。超时只报一次TIMEOUT，RK状态未知时暂停后续命令。匹配迟到结果/B1确定掉电通过内部RECOVERED解除未知，不再报成功；恢复通知不得覆盖尚未交付的TIMEOUT。无自动重试，心跳不是完成/DDR-ready。
 5. **正式业务门禁**：V2外部已启动模式仅下发功能算法，完整电源/Boot请求保留notReady/otaNotReady。未确认的训练电压范围、启动/安全下电不能被临时旁路带入生产。每算法一个整体结果，首错地址保留但不猜芯片，未编号/未测量如实留空。断线不撤销在途算法；新测试、电源修改和升级写操作在算法结束前返回busy。命令handler禁止阻塞等RK结果。
 6. **D-Cache 已关** → 无 cache 一致性顾虑，**勿再加 `SCB_InvalidateDCache_by_Addr`**（否则 UsageFault 升级 HardFault）。
@@ -162,7 +166,7 @@ python -B -X utf8 tests/rk_gateway_network_test.py --serial COM5 --report build/
 8. **FreeRTOS 堆(128KB)手动挪到 AXI SRAM**（`heap_4.c` 的 `.heap` section + linker），不是 CubeMX 默认位置。
 9. **SPI2按板型互斥**：Apollo V2临时给AD7124开发（主机Mode 3）；最终B1以SPI2从机连接B2主机，AD7124改SPI4。两个任务不得同时占用SPI2。
 10. **自定义接口归属**：总线实例统一由`board_interfaces.h`声明，UART内部钩子只在`uart_hw.h`；RK任务用`rk_link_next_sequence()`分配独立序号，禁止外部直接修改计数器。`uart_start_all()`在调度前初始化TX互斥锁；分配失败拒绝发送。注释/风格及剩余耦合约束见`doc/code_quality_review.md`。
-11. **RK解析错误必须上送调用方**：`tlv_sm_feed()==1`后仍须检查`tlv_sm_get_frame()`；失败清空输出、拒绝整帧。Len为4..1024，所有TLV合计1..16个，残缺TLV不得部分交付。未知TLV完整保留给业务层决定，已知结果标量长度须合法。`tlv_unpack`输入为从5A开始的完整帧及真实总字节数，不再接受旧Seq起点/负载长度接口。字节间超时50ms，连续完整帧无需外部reset。
+11. **RK解析错误必须上送调用方**：`tlv_sm_feed()==1`后仍须检查`tlv_sm_get_frame()`；负数才是失败，0表示合法零TLV心跳。Len为0或4..1024，最多16个TLV，残缺TLV不得部分交付。未知TLV完整保留给业务层决定，已知标量须检查长度/值域。`tlv_unpack`输入为从5A开始的完整帧及真实总字节数，不接受旧Seq起点/负载长度接口。本V2工程字节间超时100ms，连续完整帧无需外部reset；独立B1目前仍为50ms，尚未同步本次门限。
 12. **信息类响应的数据源**：固件版本、FRU和测试仪信息响应每次通过加载接口读取W25Q256持久化记录，禁止直接使用`firmware_version_current()`或编译期常量组帧。完整OTA由B同步运行槽版本，OTA查询每次加载并与启动记录交叉核对；普通镜像/FRU的首次初始化兼容路径另行保留，不能借OTA接入擅自删除。OTA接入范围与硬件验收状态见任务清单。
 
 ---

@@ -1,4 +1,4 @@
-/* RK串口任务：统一收发命令/心跳、四TLV结果原子交付，不自动重发测试命令。
+/* RK串口任务：收发零TLV心跳、缓存参考进度、汇总详情与FAIL后一次交付。
  * 结果超时后RK执行状态未知，暂停后续命令；仅匹配的迟到结果或B1断电解除。
  * UART/DMA由既有路由层负责；无PC JSON、供电时序或测试算法实现。
  */
@@ -14,8 +14,8 @@
 #endif
 #include <string.h>
 
-/* MCU向RK发送心跳的间隔：2000ms（2秒）；不是算法超时或RK-ready判据。 */
-#define RK_HEARTBEAT_INTERVAL_MS 2000U
+/* MCU向RK发送心跳的间隔：1000ms（1秒）；不是算法超时或RK-ready判据。 */
+#define RK_HEARTBEAT_INTERVAL_MS 1000U
 /* 每轮最多取8个RX块（含断流通知）；持续来数据也必须让出CPU并推进心跳/超时。
  * 未取走的块留在UART队列，半帧保留在状态机中，不因达到配额而清空。
  */
@@ -24,12 +24,19 @@
 typedef struct {
     rk_request_t request;
     rk_response_t response;
-    uint64_t sequence;
+    rk_test_result_t result; /* 已收到的详情与FAIL；result_fields标明哪些部分有效。 */
+    uint64_t sequence;        /* 本次下行测试命令Seq；仅作为接收窗口起点和内部诊断。 */
+    uint64_t last_tx_sequence; /* 本次等待期间最近成功入UART队列的MCU Seq。 */
+    uint64_t progress_sequence; /* RK进度携带的最近已收MCU Seq，仅作参考。 */
     TickType_t sent_tick;
     uint8_t waiting;       /* 正等待该Seq/命令的最终结果，含超时后的状态未知期。 */
     uint8_t timed_out;     /* 已判定TIMEOUT，可能仍待入队；不得再交付COMPLETE。 */
     uint8_t delivery;      /* 已完成但结果队列满时，保留副本直到交付。 */
     uint8_t recovered;     /* 迟到结果/断电已解除未知；须等TIMEOUT入队后再报恢复。 */
+    uint8_t result_fields; /* RK_REPORT_DETAILS/FAIL，必须收齐两部分才可完成。 */
+    uint8_t result_conflict; /* 当前测试的重复结果内容矛盾；保持等待，不猜哪份正确。 */
+    uint8_t progress_valid; /* 新请求清零；1表示本次等待中收到过合法进度心跳。 */
+    uint8_t progress_percent; /* 0..100，仅参考，不代表DDR-ready或测试结束。 */
 } rk_pending_t;
 static rk_pending_t s_pending;
 
@@ -67,13 +74,51 @@ static int result_wait_expired(void)
     uint64_t ticks = (uint64_t)s_pending.request.timeout_ms * configTICK_RATE_HZ / 1000U;
     return (TickType_t)(xTaskGetTickCount() - s_pending.sent_tick) >= (TickType_t)ticks;
 }
-/* 单帧四字段聚合成功后，还须同时匹配RK Seq和算法编号；心跳不会完成测试。 */
+/* RK所有上报携带它最近收到的MCU Seq，不能严格等于测试命令或MCU最新发送值。
+ * 只做发送窗口过滤：拒绝早于本次命令或超出已发送上界的Seq，允许传输中的滞后；
+ * uint64无符号差支持计数回绕；两包无需同Seq，按单在途及详情算法号汇总。
+ * 同算法的旧结果若被RK重新赋予当前窗口Seq，协议无法区分，不能据Seq宣称防重放。
+ * 进度只保留观察值，不生成PC新字段；结果内容冲突不放行后续测试。
+ */
 static void accept_frame(const tlv_frame_t *frame)
 {
-    rk_test_result_t result;
-    if (!s_pending.waiting || frame->sequence != s_pending.sequence ||
-        rk_result_decode(frame, &result) != 0 ||
-        result.command_id != s_pending.request.command_id) return;
+    rk_report_t report;
+    if (!s_pending.waiting || frame == NULL ||
+        (uint64_t)(frame->sequence - s_pending.sequence) >
+        (uint64_t)(s_pending.last_tx_sequence - s_pending.sequence) ||
+        rk_report_decode(frame, &report) != 0) return;
+    const uint8_t complete = RK_REPORT_DETAILS | RK_REPORT_FAIL;
+    if ((report.fields & RK_REPORT_PROGRESS) && !(report.fields & complete)) {
+        s_pending.progress_percent = report.progress_percent;
+        s_pending.progress_sequence = frame->sequence;
+        s_pending.progress_valid = 1U;
+        return;
+    }
+    if (s_pending.result_conflict || !(report.fields & complete)) return;
+    if (report.fields & RK_REPORT_DETAILS) {
+        if (report.result.command_id != s_pending.request.command_id) return;
+        if ((s_pending.result_fields & RK_REPORT_DETAILS) &&
+            (report.result.error_address != s_pending.result.error_address ||
+             report.result.die != s_pending.result.die ||
+             report.result.elapsed_ms != s_pending.result.elapsed_ms)) {
+            s_pending.result_conflict = 1U;
+            return;
+        }
+    }
+    if ((report.fields & RK_REPORT_FAIL) && (s_pending.result_fields & RK_REPORT_FAIL) &&
+        report.result.failed != s_pending.result.failed) {
+        s_pending.result_conflict = 1U;
+        return;
+    }
+    /* 全部检查完成后再更新缓存，坏帧/矛盾帧不提交其中某个有效字段。 */
+    if (report.fields & RK_REPORT_DETAILS) {
+        uint8_t failed = s_pending.result.failed;
+        s_pending.result = report.result;
+        s_pending.result.failed = failed;
+    }
+    if (report.fields & RK_REPORT_FAIL) s_pending.result.failed = report.result.failed;
+    s_pending.result_fields |= report.fields & complete;
+    if (s_pending.result_fields != complete) return;
     if (result_wait_expired()) {
         s_pending.timed_out = 1U;
         finish_request(RK_RESPONSE_TIMEOUT);
@@ -85,7 +130,7 @@ static void accept_frame(const tlv_frame_t *frame)
         return;
     }
     finish_request(RK_RESPONSE_COMPLETE);
-    s_pending.response.result = result;
+    s_pending.response.result = s_pending.result;
 }
 /* 每轮调用；只处理一个请求，UART整帧入队失败不会丢请求或无界重试。 */
 static void process_request(void)
@@ -120,6 +165,7 @@ static void process_request(void)
         return;
     }
     s_pending.sent_tick = xTaskGetTickCount();
+    s_pending.last_tx_sequence = s_pending.sequence;
     s_pending.waiting = 1U;
 }
 #if defined(B1_RK_UART)
@@ -155,9 +201,11 @@ static void process_heartbeat(TickType_t *last_tick)
     if ((TickType_t)(now - *last_tick) < pdMS_TO_TICKS(RK_HEARTBEAT_INTERVAL_MS)) return;
     *last_tick = now;
     uint8_t wire[TLV_HEARTBEAT_FRAME_SIZE];
-    int length = tlv_pack_heartbeat(rk_link_next_sequence(), wire, sizeof(wire));
-    if (length == TLV_HEARTBEAT_FRAME_SIZE) {
-        (void)uart_send(0, wire, (uint16_t)length);
+    uint64_t sequence = rk_link_next_sequence();
+    int length = tlv_pack_heartbeat(sequence, wire, sizeof(wire));
+    if (length == TLV_HEARTBEAT_FRAME_SIZE && uart_send(0, wire, (uint16_t)length) == 0 &&
+        s_pending.waiting) {
+        s_pending.last_tx_sequence = sequence;
     }
 }
 

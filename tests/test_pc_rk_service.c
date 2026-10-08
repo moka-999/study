@@ -216,6 +216,7 @@ static void inject(rk_response_status_t status, uint64_t address)
     queued_response.sequence = UINT64_C(0xAABBCCDDEEFF0011);
     queued_response.status = status;
     queued_response.result.error_address = address;
+    queued_response.result.failed = address != 0U;
     queued_response.result.elapsed_ms = UINT64_C(42000);
     queued_response.result.command_id = queued_request.command_id;
     queued_response.result.die = 9U;
@@ -575,6 +576,18 @@ void test_main(void)
     memset(site_label, 0, sizeof(site_label));
     start_expect(START_JSON, NULL);
     result_is(UINT64_MAX, "0xFFFFFFFFFFFFFFFF", "");
+
+    /* 服务层必须原样采用已汇总的FAIL位，不能再次用地址为0推导PASS。 */
+    start_expect(START_JSON, NULL);
+    inject(RK_RESPONSE_COMPLETE, 0U); queued_response.result.failed = 1U;
+    CHECK(pc_dispatch_next_response(19U, &response) == 1);
+    root = decode(&response, PC_COMMAND_TEST_RESULT_REPORT, 19U);
+    const cJSON *failed_chip = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(root, "testResults"), 0);
+    number_is(failed_chip, "testStatus", 2U);
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(
+        cJSON_GetObjectItemCaseSensitive(failed_chip, "resultDesc"), "firstErrorAddress")));
+    cJSON_Delete(root);
+    CHECK(!pc_test_service_busy());
 
     /* 断开PC仅解除结果归属；新连接不能接旧结果，也不能重复启动RK。 */
     start_expect(START_JSON, NULL);

@@ -28,7 +28,7 @@ typedef struct {
     uint32_t timeout_ms;       /* 结果等待毫秒数；0不限时，非0超时也不自动重发测试。 */
 } rk_request_t;
 typedef enum {
-    RK_RESPONSE_COMPLETE,  /* 收到完整且Seq+命令匹配的结果；PASS/FAIL再看首错地址。 */
+    RK_RESPONSE_COMPLETE,  /* 接收窗口/算法检查通过，详情与FAIL已收齐；读取result.failed。 */
     RK_RESPONSE_TIMEOUT,   /* 最终结果超时；RK可能仍在执行，后续请求暂停发送。 */
     RK_RESPONSE_TX_FAILED, /* 本端整帧未能进入UART发送队列；不自动重发。 */
     RK_RESPONSE_INVALID,   /* 已出队请求不合法，例如命令不支持或时限超范围。 */
@@ -42,7 +42,7 @@ typedef enum {
  */
 typedef struct {
     uint32_t cookie;             /* 原请求关联令牌，用于找到业务算法index。 */
-    uint64_t sequence;           /* 实际RK链路Seq；未开始发送的请求可为0。 */
+    uint64_t sequence;           /* 原下行命令Seq，仅内部诊断；不是RK最近上报值或PC Seq。 */
     rk_response_status_t status; /* 通信/执行交付状态；不是DDR算法PASS/FAIL。 */
     rk_test_result_t result;   /* 仅COMPLETE有效；其他状态不是DDR测试FAIL。 */
 } rk_response_t;

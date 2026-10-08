@@ -62,7 +62,7 @@ int rk_gateway_test_poll(uint32_t sequence, pc_dispatch_response_t *response)
             (unsigned long)(result.result.error_address >> 32), (unsigned long)(uint32_t)result.result.error_address,
             (unsigned long)(result.result.elapsed_ms >> 32), (unsigned long)(uint32_t)result.result.elapsed_ms);
         pc_chip_test_result_t chip = {"RK_SIM", result.result.die,
-                                     result.result.error_address == 0U ? 1 : 2, description};
+                                     result.result.failed ? 2 : 1, description};
         cJSON *root = pc_test_result_create(s_name, s_index, &chip, 1U);
         if (root == NULL) return -1;
         int ok = cJSON_PrintPreallocated(root, json, sizeof(json), 0);

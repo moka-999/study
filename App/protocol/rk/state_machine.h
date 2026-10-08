@@ -1,10 +1,12 @@
-/* RK逐字节状态机；时间基于FreeRTOS tick，间隔达到50ms丢弃半帧。 */
+/* RK逐字节状态机；时间基于FreeRTOS tick，间隔达到100ms丢弃半帧。 */
 #ifndef RK_STATE_MACHINE_H
 #define RK_STATE_MACHINE_H
 #include <stdint.h>
 #include "frame.h"
-/* 半帧相邻字节最大等待时间，单位ms；不用于算法执行超时或重发。 */
-#define RK_BYTE_TIMEOUT_MS 50U
+/* 相邻两次喂入解析器的字节间空闲上限，单位ms；超时检查达到上限时清理半帧。
+ * 完整帧立即处理，不额外等待；不用于算法执行超时、心跳周期或重发。
+ */
+#define RK_BYTE_TIMEOUT_MS 100U
 
 /* 状态值只在MCU内部使用，与s_state_handlers的指定下标一一对应。 */
 typedef enum {
@@ -32,7 +34,7 @@ void tlv_sm_reset(tlv_sm_t *sm);
  * 返回1后、喂下个字节前必须get_frame；内部TLV损坏仍可能使get_frame失败。
  */
 int tlv_sm_feed(tlv_sm_t *sm, uint8_t byte);
-/* 仅提取最近完整帧；成功1..16，未就绪/解析失败-1并清空frame。
+/* 仅提取最近完整帧；成功0..16（0为零TLV心跳），未就绪/解析失败-1并清空frame。
  * 输出拥有载荷副本，不依赖sm后续生命周期。
  */
 int tlv_sm_get_frame(tlv_sm_t *sm, tlv_frame_t *frame);

@@ -2,6 +2,8 @@
 
 对外阅读版见[MCU与RK协议Word](mcu_rk协议.docx)；本页保留 MCU 接口及实施边界的内部说明。
 
+2026-09-30新增零TLV心跳、进度及独立FAIL包，以本页和[本轮修改记录](rk_protocol_update_20260930.md)为准；既有Word尚未同步这次增量。
+
 基线：用户于2026-09-23提供并指定`D:/pro/tlv_proto`中的`proto.c/.h`、`proto_util.c/.h`、`crc_modbus.c`及`uart-rk3588-protocol.md`。MCU按该线格式实现，保留本工程串口/RTOS，不移植Linux演示收发程序。PC协议另见[PC TCP协议](pc_tcp_protocol_spec.md)。旧版仅在[历史归档](history/rk/protocol_spec_before_20260923.md)保留。
 
 ## 1. 帧与字节序
@@ -11,14 +13,14 @@
 | 字段 | 偏移 | 字节数 | 规则 |
 |---|---:|---:|---|
 | Header | 0 | 1 | 固定0x5A |
-| Length | 1 | 2 | 大端，TLV区总长度N，4..1024 |
+| Length | 1 | 2 | 大端，TLV区总长度N，0或4..1024；1..3非法 |
 | HCRC | 3 | 2 | 小端，覆盖Header＋Length共3字节 |
-| Seq | 5 | 8 | 大端，MCU独立递增分配，RK最终结果回显 |
-| TLV区 | 13 | N | 1..16个完整单元，未知单元也计数 |
+| Seq | 5 | 8 | 大端；MCU下行递增，RK所有上行填最近收到的MCU Seq |
+| TLV区 | 13 | N | 0..16个完整单元，N=0时不含任何TLV |
 | FCRC | 13+N | 2 | 小端，仅覆盖Seq＋全部TLV，共8+N字节 |
 | Footer | 15+N | 1 | 固定0xA5 |
 
-CRC使用Modbus CRC16，初值0xFFFF，右移多项式0xA001；不含Length或HCRC的帧CRC范围不能沿用旧实现。整帧20..1040字节。
+CRC使用Modbus CRC16，初值0xFFFF，右移多项式0xA001；不含Length或HCRC的帧CRC范围不能沿用旧实现。零TLV心跳为16字节；非空帧为20..1040字节。心跳FCRC仍覆盖8字节Seq，不能省略CRC或Seq。
 
 每个TLV为`Type:u16BE + ValueLength:u16BE + Value`。Value的多字节整数为**小端**；高4位表示标量类型，低12位表示tag。完整TLV长度之和（含Type/Length）必须等于N。
 
@@ -26,14 +28,24 @@ CRC使用Modbus CRC16，初值0xFFFF，右移多项式0xA001；不含Length或HC
 
 | Type | Value | 说明 |
 |---|---|---|
-| 0x0000 | 空 | 心跳，不代表RK已就绪或测试完成 |
+| 无TLV | 无 | 普通心跳，Length=0；接收仍兼容0x0000空Value |
 | 0x5000 | 命令号u16LE＋可选参数 | 任务当前仅发送1..20，无参数、每帧一个命令 |
 | 0x5001 | 命令号u16LE | 结果所属命令 |
-| 0x9001 | 首错地址u64LE | 0=PASS；非0为首个失败物理地址 |
+| 0x9001 | 首错地址u64LE | 0表示未提供首错地址，不再据地址判定PASS/FAIL |
 | 0x3001 | die u8 | RK原始颗粒编号，不能直接认作PC槽位 |
 | 0x9002 | 耗时u64LE | 毫秒 |
+| 0x3016 | uint8，1字节，0..100 | 测试进度，随心跳发送；不是ASCII字符串 |
+| 0x1017 | bool，1字节，0/1 | 0=PASS、1=FAIL；独立结果包 |
 
-RK文档规定测试结束后，同一51字节响应帧包含上述四种结果TLV并回显请求Seq。MCU允许四种TLV改变顺序，但每种必须恰好一个；全部验证后按Seq＋命令号交付一次。未知扩展TLV可保留并忽略，不能用缺失字段或默认值假报PASS。不再按旧41..63结果命令逐一分发，也不将0x5002当作本次结果容器。
+RK所有上行（普通心跳、进度、四详情和FAIL）均填写发送时RK最近收到的MCU Seq，不回显原测试命令，也不使用RK自身计数。MCU下行命令/心跳仍共用递增u64流水号。MCU只做本次命令至最近成功入UART队列Seq的接收窗口过滤；已发送但尚在传输中的心跳不应导致旧一些的合法上报被拒绝，不能强求等于MCU最新发送值。
+
+测试结束后，RK发送51字节四详情帧及21字节独立FAIL帧；两帧Seq允许不同。四详情允许改变顺序，各项必须同帧恰好一次，还须匹配在途算法编号；FAIL严格限定0/1。MCU按单在途测试缓存两部分，先后顺序不限，收齐才交付一次结果并解除busy。相同重复幂等；本次测试重复内容矛盾时保持等待，不猜PASS。未知扩展可忽略，但不能补齐缺失结果。
+
+该Seq不是测试实例标识：窗口能排除携带旧Seq的迟到包，无法区分被RK重新标为当前窗口Seq的同算法旧结果。初版不新增线上字段；若后续要可靠重发或并行测试，应增加独立测试实例ID。当前仍禁止自动重发算法。
+
+进度也使用RK最近收到的MCU Seq。在单个在途测试期间，只缓存通过接收窗口检查的进度及Seq；无测试时忽略，新测试清零。它没有测试请求身份，只作参考，不用于完成、超时恢复、ready或电源操作。进度100不结束测试；本轮不新增PC进度JSON字段。
+
+PC的0105字段不变：testStatus由FAIL位决定（0→1/PASS，1→2/FAIL）；首错地址为0仍输出null，但不强行改成PASS。其他详情、testTimeMs和测量统计沿用既有字段。
 
 命令号与参考名称：
 
@@ -58,16 +70,22 @@ RK文档规定测试结束后，同一51字节响应帧包含上述四种结果T
 5A 00 06 D1 D1 00 00 00 00 00 00 00 02 50 00 00 02 03 00 25 A1 A5
 ```
 
+用户提供的普通心跳：Seq5，总长16字节，双CRC已独立核验；后续5A属于下一帧候选前缀。
+
+```text
+5A 00 00 51 D3 00 00 00 00 00 00 00 05 80 08 A5
+```
+
 ## 3. MCU接口与生命周期
 
-- `frame.c`负责完整帧编码/解码；`tlv_unpack`接收从0x5A开始的完整帧及实际总长度，失败清空整个输出。
-- `state_machine.c`处理半包、粘包、错误恢复及50ms字节间超时；完整帧后自动开始接下一帧，业务无需在每帧后手动reset。
+- `frame.c`负责完整帧编码/解码；`tlv_unpack`接收从0x5A开始的完整帧及实际总长度，成功返回TLV数0..16（0不是失败），失败返回-1并清空输出。`rk_report_decode`原子解析单帧详情/进度/FAIL，单在途汇总由RK任务完成。
+- `state_machine.c`处理半包、粘包和错误恢复；V2字节间空闲达到100ms时清理半帧，完整帧立即处理并自动接下一帧，业务无需在每帧后手动reset。独立B1目前仍为50ms，尚未同步此次门限；影响及验证见[100ms门限记录](rk_rx_timeout_20261008.md)。
 - `rk_link_request`复制`command_id/cookie/timeout_ms`到请求队列，返回0为排队成功，-1为参数/状态错误，-2为队列满。cookie是MCU内部业务关联，不上RK线、不代替PC Seq。
 - `rk_link_receive`返回0为暂无结果、1为取得结果；结果状态区分COMPLETE、TIMEOUT、TX_FAILED、INVALID、POWER_OFF，以及仅用于解除超时未知状态的RECOVERED。
 - 请求/结果队列各8槽；只有一个测试在途。RK参考文档描述忙时丢新命令，所以MCU不采用旧4 pending并发，也不按500ms自动重发测试。
-- `timeout_ms=0`按本次用户要求表示无限等待；非零才启用算法时限，串口50ms帧间超时不变。结果超时不证明RK已停止，MCU发一次TIMEOUT并暂停后续发送；匹配的迟到结果/B1确定掉电通过RECOVERED解除未知，不再返回第二个成功。两事件须按序交付，不覆盖队列满时尚未交付的TIMEOUT。
+- `timeout_ms=0`表示无限等待；缺少详情或FAIL任一包会继续busy，不回退到旧地址判定、不自动补发测试。非零才启用算法时限，串口半帧超时独立判断。超时发一次TIMEOUT并暂停后续发送；迟到后收齐两部分，或B1确定掉电，才通过RECOVERED解除未知，不补报成功。矛盾重复结果不靠后续心跳解除；两事件须按序交付，不覆盖尚未交付的TIMEOUT。
 - 结果队列满时保留结果，待交付后才取下一请求；UART发送失败不会自动重发。心跳发送失败等待下个周期，不补发过期心跳。
-- 本V2的MCU→RK心跳由同一RK任务每2000ms（2秒）尝试发送，无独立线程；它不加入在途测试、不表示RK-ready，发送失败或错过周期不补发。每轮接收最多8块（包括断流通知），随后推进事务、心跳、OTA健康并让出CPU；未消费数据保留在UART队列，半帧保留在状态机。B1按独立工程配置，非ON时不发送心跳，刷新计时并仍上报RK任务进展。PC心跳仍由PC主动请求，MCU收到后应答，不受此间隔控制。
+- V2与B1的MCU→RK心跳均由同一RK任务每1000ms（1秒）尝试发送，无独立线程；它不加入在途测试、不表示RK-ready，发送失败或错过周期不补发。每轮接收最多8块（包括断流通知），随后推进事务、心跳、OTA健康并让出CPU；未消费数据保留在UART队列，半帧保留在状态机。B1非ON时不发送心跳，刷新计时并仍上报RK任务进展。PC心跳仍由PC主动请求，MCU收到后应答，不受此间隔控制。
 - PC Seq仍是每连接本端发送u32流水号，与RK Seq和cookie分离。
 
 ## 4. 实施边界
@@ -87,12 +105,12 @@ RK文档规定测试结束后，同一51字节响应帧包含上述四种结果T
 | `App/protocol/pc/pc_dispatch.c` | `s_command_table` | PC CommandID → 处理函数，例如0x0103进入`handle_start_test` |
 | `App/tasks/rk/rk_link.c` | `s_command_table` | RK算法编号1..20 ↔ 参考名称；统一请求合法性检查与临时联调名称映射 |
 | `App/protocol/rk/state_machine.c` | `s_state_handlers` | 当前接收状态 → 单字节处理函数，替代状态`switch` |
-| `App/protocol/rk/frame.c` | `s_tlv_rules` | TLV Type → Value长度规则、最终结果栏位；编码、解码及四字段聚合共用 |
+| `App/protocol/rk/frame.c` | `s_tlv_rules` | TLV Type → Value长度/范围、报告栏位；编码、解码共用 |
 
 三个容易混淆的编号：PC的`0x0103`是开始测试业务命令；RK的`0x5000`是命令容器Type；容器Value中的小端`03 00`才是算法编号3（`gtest-xor`）。命令表不是20个MCU算法执行函数，算法实际由RK执行。
 
-**正式V2外部已启动模式**：PC收帧 → PC命令表 → `handle_start_test` → 严格JSON校验 → `pc_test_service`查RK算法表 → `rk_link_request` → UART → 四TLV校验及Seq/命令匹配 → 正式0x0105结果对象。受理为0006 accepted；通信异常为0006 failed，不是芯片FAIL。带电压/启动要求的完整流程仍返回notReady/otaNotReady，参数错误返回invalidArgument。
+**正式V2外部已启动模式**：PC收帧 → PC命令表 → `handle_start_test` → 严格JSON校验 → `pc_test_service`查RK算法表 → `rk_link_request` → UART → 接收Seq窗口/详情命令检查＋单在途汇总FAIL → 正式0x0105结果对象。受理为0006 accepted；通信异常为0006 failed，不是芯片FAIL。带电压/启动要求的完整流程仍返回notReady/otaNotReady，参数错误返回invalidArgument。
 
-**仅V2隔离联调镜像**（`ENABLE_RK_GATEWAY_TEST=ON`，默认OFF）：PC命令表 → `rk_gateway_test.c`按名称查RK命令目录 → `rk_link_request`入队 → `rk_task`组帧并发UART → 接收状态表/字段规则表解码 → Seq与命令匹配 → `rk_link_receive`交付 → 测试适配器转换成PC `0x0105`。该路径的10秒时限和die映射仅用于模拟，未进入B1。
+**仅V2隔离联调镜像**（`ENABLE_RK_GATEWAY_TEST=ON`，默认OFF）：PC命令表 → `rk_gateway_test.c`按名称查RK命令目录 → `rk_link_request`入队 → `rk_task`组帧并发UART → 接收状态表/字段规则表解码 → Seq窗口/命令检查及两包收齐 → `rk_link_receive`交付 → 测试适配器转换成PC `0x0105`。该路径的10秒时限和die映射仅用于模拟，未进入B1。
 
 RK收发任务、心跳、单在途及真实算法结果交付已接入外部已启动模式；完整B1电源/RK-ready闭环仍未完成。操作、改动与本轮验证见[真实RK接入](rk_real_test_20260928.md)。

@@ -6,6 +6,14 @@
 
 | 归档文件 | 原文件 | SHA-256 |
 |---|---|---|
+| [pc_tcp协议_20260924_171548.docx](pc_tcp协议_20260924_171548.docx) | pc_tcp协议.docx，0105新增testTimeMs及明确OTA download返回条件前 | edb17231a178bdfff9723187987274a4b180669bfa39d343413362a449f1bfd8 |
+| [pc_tcp协议_20260924_170645.docx](pc_tcp协议_20260924_170645.docx) | pc_tcp协议.docx，0602采样及0901–0903升级说明改为字段简表前 | 1817f13022c474136f57e620f85cb84460cc639d40d2f598cd720ab484f33ea2 |
+| [pc_tcp协议_20260924_165259.docx](pc_tcp协议_20260924_165259.docx) | pc_tcp协议.docx，resultDesc改为按算法大类区分的对象并补充FUNC子字段前 | c93bde6b962a2c1baaa1370373d89a3487b50179228ec3819d427fef11a3e9df |
+| [pc_tcp协议_20260924_164337.docx](pc_tcp协议_20260924_164337.docx) | pc_tcp协议.docx，physicalAddr更正为芯片标识及0105改为简洁字段表前 | 9087175b09d306dfcb91b5bac49174e80d0e8af932e359308ff0750e43bdc6fb |
+| [pc_tcp协议_20260924_162123.docx](pc_tcp协议_20260924_162123.docx) | pc_tcp协议.docx，0105明确为所有算法共用的统一结果包前 | d00c0c1115ab2dd205018ee0ba79fa530c1fe56370995668f6179ed90aef2a01 |
+| [pc_tcp协议_20260924_135055.docx](pc_tcp协议_20260924_135055.docx) | pc_tcp协议.docx，0602统计字段和0105独立测量结果格式更新前 | c914da427bcfaa00200e59f4966cd13820f5dd5fa63596e7139d95817a71aa2e |
+| [pc_tcp协议_20260924_113446.docx](pc_tcp协议_20260924_113446.docx) | pc_tcp协议.docx，升级命令泛化、MCU动作加前缀及RK接口预留前 | c084bc249c7590533510d922cf7866f03c22e3c61a8019d5db760d8146672936 |
+| [pc_tcp协议_20260921_103451.docx](pc_tcp协议_20260921_103451.docx) | pc_tcp协议.docx，2026-09-24拆分0105三类示例及补充功能测试错误详情前 | 3ecaa05e33447f75fceaf3cdd634804f5293dc468a6c856d641a0d7eac266fc4 |
 | [pc_tcp协议_20260917_110604.docx](pc_tcp协议_20260917_110604.docx) | pc_tcp协议.docx，2026-09-21补充0103校验/拒绝应答与Boot缓存规则前 | 3965fe3e092698e057432568dbc2026a36689253c97379cffb2ece85dd12419a |
 | [pc_tcp协议_20260916_144518.docx](pc_tcp协议_20260916_144518.docx) | pc_tcp协议.docx，2026-09-17调整为3000字节分块前 | feabcb54070302956a10193aa0aecb50415b5f4045a1ac7963c7bc992b4ce7c8 |
 | [pc_tcp协议_20260831_132525.docx](pc_tcp协议_20260831_132525.docx) | pc_tcp_protocol_spec.docx | 549d335aedb0efca76e71e196ca61e01e6f6742a725b8035b4af1c9696860f2f |

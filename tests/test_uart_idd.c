@@ -132,7 +132,7 @@ static void test_frames(void)
     CHECK(tlv_pack_cmd(1U, data, sizeof(data) + 1U, 0U, buffer, sizeof(buffer)) == 0);
     CHECK(tlv_pack_cmd(1U, NULL, 0U, 0U, NULL, UINT16_MAX) == 0);
     CHECK(tlv_pack_heartbeat(0U, NULL, UINT16_MAX) == 0);
-    CHECK(tlv_pack_heartbeat(0U, buffer, 19U) == 0);
+    CHECK(tlv_pack_heartbeat(0U, buffer, 15U) == 0);
     CHECK(tlv_pack_cmd(1U, data, sizeof(data), 0U, buffer, TLV_FRAME_MAX - 1U) == 0);
     for (unsigned i = 0U; i < sizeof(buffer); ++i) CHECK(buffer[i] == 0xCC);
     CHECK(tlv_pack_cmd(1U, data, sizeof(data), UINT64_MAX, buffer, TLV_FRAME_MAX) == TLV_FRAME_MAX);
@@ -147,9 +147,9 @@ static void test_frames(void)
 
 static void test_uart(void)
 {
-    uint8_t heartbeat[20], buffer[UART_RX_BUF_SIZE];
-    static const uint8_t golden[20] = {0x5A,0,4,0x50,0x10,0,0,0,0,0,0,0,1,0,0,0,0,0x59,0xC2,0xA5};
-    CHECK(tlv_pack_heartbeat(1U, heartbeat, sizeof(heartbeat)) == 20);
+    uint8_t heartbeat[16], buffer[UART_RX_BUF_SIZE];
+    static const uint8_t golden[16] = {0x5A,0,0,0x51,0xD3,0,0,0,0,0,0,0,5,0x80,0x08,0xA5};
+    CHECK(tlv_pack_heartbeat(5U, heartbeat, sizeof(heartbeat)) == 16);
     CHECK(!memcmp(heartbeat, golden, sizeof(golden)));
     uart_rx_diagnostics_t diag;
     uart_register(-1, &ports[0]); uart_register(0, NULL);
@@ -162,21 +162,21 @@ static void test_uart(void)
     CHECK(uart_get_rx_diagnostics(1, &diag) && diag.restart_failures == 1U && diag.recovery_pending);
     receive(heartbeat, 10U, HAL_UART_RXEVENT_HT);
     CHECK(starts[0] == 1U && uart_poll_rx(0, buffer, sizeof(buffer)) == 0);
-    receive(heartbeat, 20U, HAL_UART_RXEVENT_IDLE);
+    receive(heartbeat, 16U, HAL_UART_RXEVENT_IDLE);
     CHECK(uart_poll_rx(0, buffer, 1U) == 0); /* 参数无效不得消费已有块。 */
-    CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 20 && !memcmp(buffer, golden, 20U));
+    CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 16 && !memcmp(buffer, golden, 16U));
     CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 0);
 
     tlv_sm_t sm; tlv_sm_init(&sm);
     receive(heartbeat, 10U, HAL_UART_RXEVENT_IDLE);
     CHECK(parse(&sm, buffer, uart_poll_rx(0, buffer, sizeof(buffer))) == 0);
-    for (unsigned i = 0U; i < 9U; ++i) receive(heartbeat, 20U, HAL_UART_RXEVENT_TC);
+    for (unsigned i = 0U; i < 9U; ++i) receive(heartbeat, 16U, HAL_UART_RXEVENT_TC);
     CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == UART_RX_GAP);
     tlv_sm_reset(&sm); /* 对应RK任务的断流消费规则。 */
     CHECK(uart_get_rx_diagnostics(0, &diag) && diag.queue_overflows == 1U && diag.dropped_blocks == 9U);
-    receive(heartbeat + 10U, 10U, HAL_UART_RXEVENT_IDLE);
+    receive(heartbeat + 10U, 6U, HAL_UART_RXEVENT_IDLE);
     CHECK(parse(&sm, buffer, uart_poll_rx(0, buffer, sizeof(buffer))) == 0);
-    receive(heartbeat, 20U, HAL_UART_RXEVENT_IDLE);
+    receive(heartbeat, 16U, HAL_UART_RXEVENT_IDLE);
     CHECK(parse(&sm, buffer, uart_poll_rx(0, buffer, sizeof(buffer))) == 1);
 
     /* DMA满块也须完整交付，不能截断末尾或当作半传输事件重复交付。 */
@@ -188,7 +188,7 @@ static void test_uart(void)
     CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 0);
 
     fail_start[0] = 1; tick = 50U;
-    receive(heartbeat, 20U, HAL_UART_RXEVENT_IDLE);
+    receive(heartbeat, 16U, HAL_UART_RXEVENT_IDLE);
     CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == UART_RX_GAP && aborts == 0U);
     tick = 100U; CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == UART_RX_GAP && aborts == 1U);
     tick = 199U; CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 0 && aborts == 1U);
@@ -198,10 +198,10 @@ static void test_uart(void)
     CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 0 && aborts == 3U);
     CHECK(uart_get_rx_diagnostics(0, &diag) && diag.restart_failures == 2U &&
           diag.recovery_failures == 1U && diag.recoveries == 1U && !diag.recovery_pending);
-    error_event(0x0CU); receive(heartbeat, 20U, HAL_UART_RXEVENT_IDLE);
+    error_event(0x0CU); receive(heartbeat, 16U, HAL_UART_RXEVENT_IDLE);
     tick = 400U; CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == UART_RX_GAP);
     CHECK(uart_get_rx_diagnostics(0, &diag) && diag.errors == 1U && diag.last_hal_error == 0x0CU);
-    receive(heartbeat, 20U, HAL_UART_RXEVENT_IDLE);
+    receive(heartbeat, 16U, HAL_UART_RXEVENT_IDLE);
     tlv_sm_reset(&sm); CHECK(parse(&sm, buffer, uart_poll_rx(0, buffer, sizeof(buffer))) == 1);
 
     receive(NULL, 0U, HAL_UART_RXEVENT_IDLE);

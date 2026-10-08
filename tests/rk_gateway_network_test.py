@@ -28,15 +28,19 @@ def rk_frame(sequence, units):
     return header + struct.pack('<H', crc16(header)) + body + struct.pack('<H', crc16(body)) + b'\xA5'
 
 
-def rk_result(sequence, command, address=0, die=1, elapsed=987, reverse=False):
+def rk_result(sequence, command, address=0, die=1, elapsed=987, reverse=False, failed=None):
     units = [(0x5001, struct.pack('<H', command)), (0x9001, struct.pack('<Q', address)),
              (0x3001, bytes([die])), (0x9002, struct.pack('<Q', elapsed))]
-    return rk_frame(sequence, list(reversed(units)) if reverse else units)
+    # sequence传最近收到的MCU Seq；详情与FAIL是两帧，缺任一帧不能完成。
+    flag = int(address != 0) if failed is None else failed
+    return (rk_frame(sequence, list(reversed(units)) if reverse else units)
+            + rk_frame(sequence, [(0x1017, bytes([flag]))]))
 
 
 class Rk:
     def __init__(self, port, events):
         self.port, self.events, self.buffer = port, events, bytearray()
+        self.latest_sequence = 0
 
     def command(self, timeout=3):
         deadline = time.monotonic() + timeout
@@ -47,7 +51,7 @@ class Rk:
                     del self.buffer[0]
                     continue
                 size = int.from_bytes(self.buffer[1:3], 'big')
-                if not 4 <= size <= 1024:
+                if size != 0 and not 4 <= size <= 1024:
                     del self.buffer[0]
                     continue
                 if len(self.buffer) < size + 16:
@@ -55,10 +59,11 @@ class Rk:
                 wire = bytes(self.buffer[:size + 16]); del self.buffer[:size + 16]
                 assert wire[-1] == 0xA5 and crc16(wire[5:-1]) == 0, wire.hex()
                 self.events.append({'rkRx': wire.hex()})
-                if wire[13:17] == b'\0\0\0\0':
+                self.latest_sequence = int.from_bytes(wire[5:13], 'big')
+                if size == 0 or wire[13:17] == b'\0\0\0\0':
                     continue
                 assert size == 6 and wire[13:17] == b'\x50\0\0\x02', wire.hex()
-                return int.from_bytes(wire[5:13], 'big'), int.from_bytes(wire[17:19], 'little')
+                return self.latest_sequence, int.from_bytes(wire[17:19], 'little')
         return None
 
     def send(self, wire, split=False):
@@ -140,15 +145,15 @@ def main():
                 rk.send(damaged)
                 send(2, {}); assert receive(1) == {}
                 passed('错Seq/缺字段/重复字段/坏CRC不冒充结果，PC心跳仍正常')
-                rk.send(b'\x5A\x99' + rk_result(seq, cmd), split=True)
+                rk.send(b'\x5A\x99' + rk_result(rk.latest_sequence, cmd), split=True)
                 check_result(101, 1, 0)
-                passed('伪帧头后恢复、串口逐字节结果，四TLV合并成0105')
-                rk.send(rk_result(seq, cmd)); send(2, {}); assert receive(1) == {}
+                passed('伪帧头后恢复、串口逐字节两包结果，详情与FAIL合并成0105')
+                rk.send(rk_result(rk.latest_sequence, cmd)); send(2, {}); assert receive(1) == {}
                 passed('重复最终结果不重复回包，PC与RK Seq互不替代')
                 start('mats', 102)
                 seq, cmd = rk.command(); assert cmd == 17
                 address = 0x100000008
-                rk.send(rk_frame(987, [(0, b'')]) + rk_result(seq, cmd, address, reverse=True))
+                rk.send(rk_frame(rk.latest_sequence, []) + rk_result(rk.latest_sequence, cmd, address, reverse=True))
                 check_result(102, 2, address)
                 passed('17=MATS、结果顺序变化、心跳粘包和64位失败地址')
                 start('marchx', 103)
@@ -159,12 +164,12 @@ def main():
                 body = receive(6)
                 assert body['status'] == 'failed' and body['algorithmIndex'] == 103
                 assert rk.command(0.3) is None
-                rk.send(rk_result(seq, cmd))
+                rk.send(rk_result(rk.latest_sequence, cmd))
                 send(2, {}); assert receive(1) == {}
                 passed('显式10秒结果超时，不重发；迟到完成只解除等待、不假报成功')
                 start('gtest-rand', 105)
                 seq, cmd = rk.command(); assert cmd == 2
-                rk.send(rk_result(seq, cmd)); check_result(105, 1, 0)
+                rk.send(rk_result(rk.latest_sequence, cmd)); check_result(105, 1, 0)
                 passed('超时后的匹配迟到结果使后续新请求正常执行')
                 send(0x0503, {}); assert receive(0x0504) == {'powerState': 'off'}
                 passed('全链路期间电源保持OFF，没有真实上电/调压副作用')

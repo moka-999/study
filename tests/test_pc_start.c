@@ -197,7 +197,7 @@ static void test_message_contract(void)
     const uint64_t addresses[] = {0U, UINT64_C(0x0000000123456780), UINT64_MAX};
     const char *const address_text[] = {NULL, "0x0000000123456780", "0xFFFFFFFFFFFFFFFF"};
     for (size_t i = 0U; i < 3U; i++) {
-        root = pc_functional_result_create("gtest-xor", UINT32_MAX, "B1-01", 0U, "", addresses[i], 42000U);
+        root = pc_functional_result_create("gtest-xor", UINT32_MAX, "B1-01", 0U, "", addresses[i], 42000U, i != 0U);
         CHECK(root != NULL && cJSON_GetArraySize(root) == 5);
         CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(root, "algorithmType")->valuestring, "functional") == 0);
         CHECK(cJSON_GetObjectItemCaseSensitive(root, "algorithmIndex")->valuedouble == 4294967295.0);
@@ -222,7 +222,7 @@ static void test_message_contract(void)
     const uint64_t times[] = {0U, 42000U, UINT64_C(4294967296), UINT64_C(9007199254740993), UINT64_MAX};
     const char *const time_text[] = {"0", "42000", "4294967296", "9007199254740993", "18446744073709551615"};
     for (size_t i = 0U; i < sizeof(times) / sizeof(times[0]); ++i) {
-        root = pc_functional_result_create("gtest-xor", 1U, "", 0U, "", 0U, times[i]);
+        root = pc_functional_result_create("gtest-xor", 1U, "", 0U, "", 0U, times[i], 0U);
         CHECK(root);
         char *json = cJSON_PrintUnformatted(root);
         CHECK(json);
@@ -236,9 +236,21 @@ static void test_message_contract(void)
         cJSON_free(json);
         cJSON_Delete(root);
     }
-    CHECK(pc_functional_result_create(NULL, 1U, "", 0U, "", 0U, 0U) == NULL);
-    CHECK(pc_functional_result_create("gtest-xor", 1U, NULL, 0U, "", 0U, 0U) == NULL);
-    CHECK(pc_functional_result_create("gtest-xor", 1U, "", 0U, NULL, 0U, 0U) == NULL);
+    CHECK(pc_functional_result_create(NULL, 1U, "", 0U, "", 0U, 0U, 0U) == NULL);
+    CHECK(pc_functional_result_create("gtest-xor", 1U, NULL, 0U, "", 0U, 0U, 0U) == NULL);
+    CHECK(pc_functional_result_create("gtest-xor", 1U, "", 0U, NULL, 0U, 0U, 0U) == NULL);
+    CHECK(pc_functional_result_create("gtest-xor", 1U, "", 0U, "", 0U, 0U, 2U) == NULL);
+    /* FAIL由显式标志判定，地址为0仍可失败；非零地址也不能覆盖显式PASS。 */
+    for (unsigned failed = 0U; failed <= 1U; ++failed) {
+        root = pc_functional_result_create("gtest-xor", 1U, "", 0U, "", failed ? 0U : 0x1234U, 0U, failed);
+        CHECK(root != NULL);
+        const cJSON *entry = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(root, "testResults"), 0);
+        CHECK(cJSON_GetObjectItemCaseSensitive(entry, "testStatus")->valueint == (failed ? 2 : 1));
+        const cJSON *address = cJSON_GetObjectItemCaseSensitive(
+            cJSON_GetObjectItemCaseSensitive(entry, "resultDesc"), "firstErrorAddress");
+        CHECK(failed ? cJSON_IsNull(address) : cJSON_IsString(address));
+        cJSON_Delete(root);
+    }
     message("PASS: external-ready JSON, optional timeout, NUL rejection and real FUNC result\n");
 }
 
