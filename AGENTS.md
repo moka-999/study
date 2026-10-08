@@ -3,9 +3,12 @@
 ## RK协议替换约束（2026-09-23）
 
 - 用户指定RK工程师的`D:/pro/tlv_proto`为基线；与V2共享`frame/state_machine/rk_link/rk_task`，保留B1的UART4/USART2、DMA、OFF门禁和OTA健康上报，不引入V2板级GPIO。
-- Type/Length/Seq大端、Value整数和CRC小端；HCRC覆盖前3字节，FCRC覆盖Seq＋TLV。命令0x5000，结果0x5001/0x9001/0x3001/0x9002同帧聚合，按Seq＋命令号配对。
+- Type/Length/Seq大端、Value整数和CRC小端；HCRC覆盖前3字节，FCRC覆盖Seq＋TLV。普通心跳Length=0、零TLV、16字节；接收兼容0x0000空Value。非空Length为4..1024，1..3非法。
+- RK所有上行均填写RK最近收到的MCU Seq，不回显原测试Seq，不使用RK自身心跳计数；两包Seq可不同。MCU只按本次命令至最新成功入UART队列Seq过滤，允许传输滞后，不要求精确等于最新值。单在途匹配详情算法后汇总；旧结果若被RK重新标上当前窗口Seq，同算法时无法区分。
+- 0x3016为1字节进度0..100，仅缓存参考、不判断完成/ready。四详情0x5001/0x9001/0x3001/0x9002同帧且各一次；另收0x1017的1字节bool（0=PASS、1=FAIL），收齐才上报一次0105；地址不判PASS，缺包保持busy，不自动重发。相同重复幂等，重复内容矛盾保持等待；见`docs/rk_protocol_update_20260930.md`。
 - `rkRequestQueue/rkResponseQueue`各8槽，只允许单个在途测试；无500ms自动重传。最终结果超时后暂停后续发送，直到匹配迟到结果或B1断电；队列满不丢完成结果。
 - 1..20为参考文档定义的无参数功能测试，17=MATS；IDD21..36不支持。0103允许操作者已确认RK测试程序就绪、MCU电源状态为ON的外部启动路径：power/bootMode均null、reboot=false。完整上电/训练/重启请求仍拒绝；不移植V2模拟旁路。详见`docs/real_test_sync_20260929.md`。
+- MCU→RK心跳周期为1000ms（1秒），由同一RK任务推进；B1非ON时不发送，发送失败或错过周期不补发。PC心跳仍为请求/应答，不受此周期控制。
 - B1结果灯不作RK通信指示，PC温控边界不变。代码/离线/构建与B1实板验收分开记录，见`docs/rk_protocol_migration_20260923.md`。
 
 ## 20260920-2134原理图适配边界
@@ -18,6 +21,8 @@
 - 适配及复跑记录见`docs/schematic_adaptation_20260921.md`；离线验证不能替代实板验收。
 
 ## OTA增量约束
+
+- 空白板首部署用`tools/first_flash.ps1 -Action build -Version <版本> -RkUart 4`（或2），输出固定B1包；共用独立Boot首烧工具，先备份/全空检查，B+A1与恢复包回读通过后才提交日志，无force、不覆盖FRU。B1禁止使用V2包/模拟配置，新首烧编排仍待实板验收；见`../bootloader/README.md`。
 
 - 普通构建保持OTA关闭；`ENABLE_OTA_BOOT=ON`必须同时启用槽限/修正表构建，A1/A2共同上限896KiB，向量使用`g_pfnVectors`符号随镜像修正。
 - 完整B在独立bootloader分支用`BOOT_BOARD=b1`生成，板型固定b1-h743；复位在RAM初始化前关PC6/PC7/PG11。禁止使用V2的B/包或普通最小跳转B覆盖已部署OTA的板卡。
@@ -109,7 +114,7 @@
   UINT32_MAX wraps to 0. Request/RK Seq never enters an MCU send header.
 - 测试仪查询0101/0102及空对象心跳已接入。0103必须携带算法大类/名称/index、
   power、reboot及bootMode。外部就绪模式严格使用null/false/null；通过RK命令表
-  查找1..20，不猜未知名称。正式TCP领取四TLV结果并发送0105，包含testTimeMs、
+  查找1..20，不猜未知名称。正式TCP领取详情与FAIL已收齐的结果并发送0105，包含testTimeMs、
   首错地址及实际采样的18项均值/峰值/最小值；无有效样本报null，不造假零值。
   每次受理重开统计，结果领取后冻结；0601只读查询不因算法在途返回busy。
   断线不撤销算法，新连接不领取旧0105。采样仍是后台约2秒加IO间隔，非JEDEC同步IDD窗口。

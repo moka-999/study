@@ -8,6 +8,8 @@ typedef enum {
     RK_RESULT_FIELD_ADDRESS,
     RK_RESULT_FIELD_DIE,
     RK_RESULT_FIELD_TIME,
+    RK_RESULT_FIELD_PROGRESS,
+    RK_RESULT_FIELD_FAIL,
     RK_RESULT_FIELD_COUNT
 } rk_result_field_t;
 
@@ -16,19 +18,22 @@ typedef struct {
     uint16_t min_value_length;     /* Value下限，字节；命令容器最少有2字节CmdID。 */
     uint16_t max_value_length;     /* Value上限，字节；标量上下限相同。 */
     rk_result_field_t result_field; /* 结果写入哪一栏；COUNT表示心跳或下行命令。 */
+    uint8_t max_u8;                /* 1字节标量的上限；0表示本规则不检查数值。 */
 } rk_tlv_rule_t;
 
 /* TLV字段规则表：编码、解码和最终结果聚合共用，避免宽度定义散落。
  * 此处只识别字段，不执行算法；真正算法由RK收到0x5000之后分发。
  */
 static const rk_tlv_rule_t s_tlv_rules[] = {
-    /* Type                  最小 最大             结果栏 */
-    {TLV_TYPE_HEARTBEAT,      0U,  0U,              RK_RESULT_FIELD_COUNT},
-    {TLV_TYPE_CMD,            2U,  TLV_VALUE_MAX,    RK_RESULT_FIELD_COUNT},
-    {TLV_TYPE_RESULT_CMD,     2U,  2U,              RK_RESULT_FIELD_COMMAND},
-    {TLV_TYPE_RESULT_ADDR,    8U,  8U,              RK_RESULT_FIELD_ADDRESS},
-    {TLV_TYPE_RESULT_DIE,     1U,  1U,              RK_RESULT_FIELD_DIE},
-    {TLV_TYPE_RESULT_TIME,    8U,  8U,              RK_RESULT_FIELD_TIME},
+    /* Type                  最小 最大             结果栏                  单字节上限 */
+    {TLV_TYPE_HEARTBEAT,      0U,  0U,              RK_RESULT_FIELD_COUNT,    0U},
+    {TLV_TYPE_CMD,            2U,  TLV_VALUE_MAX,    RK_RESULT_FIELD_COUNT,    0U},
+    {TLV_TYPE_RESULT_CMD,     2U,  2U,              RK_RESULT_FIELD_COMMAND,  0U},
+    {TLV_TYPE_RESULT_ADDR,    8U,  8U,              RK_RESULT_FIELD_ADDRESS,  0U},
+    {TLV_TYPE_RESULT_DIE,     1U,  1U,              RK_RESULT_FIELD_DIE,    255U},
+    {TLV_TYPE_RESULT_TIME,    8U,  8U,              RK_RESULT_FIELD_TIME,     0U},
+    {TLV_TYPE_PROGRESS,      1U,  1U,              RK_RESULT_FIELD_PROGRESS,100U},
+    {TLV_TYPE_RESULT_FAIL,   1U,  1U,              RK_RESULT_FIELD_FAIL,     1U},
 };
 
 /* 返回只读规则；NULL代表未知扩展类型，由上层决定是否消费。 */
@@ -42,12 +47,14 @@ static const rk_tlv_rule_t *find_tlv_rule(uint16_t type)
     return NULL;
 }
 
-/* 已知类型查表检查宽度；未知类型仍须经过整帧边界与容量检查。 */
-static int value_length_valid(uint16_t type, uint16_t length)
+/* 已知类型查表检查宽度和标量范围；未知类型仍须通过边界及容量检查。 */
+static int value_valid(uint16_t type, const uint8_t *value, uint16_t length)
 {
+    if (length != 0U && value == NULL) return 0;
     const rk_tlv_rule_t *rule = find_tlv_rule(type);
     return rule == NULL ||
-           (length >= rule->min_value_length && length <= rule->max_value_length);
+           (length >= rule->min_value_length && length <= rule->max_value_length &&
+            (rule->max_u8 == 0U || (length == 1U && value[0] <= rule->max_u8)));
 }
 
 /* 写入2字节大端值；调用者已校验输出容量，用于Length和TLV头。 */
@@ -67,29 +74,30 @@ void frame_init(tlv_frame_t *frame)
 {
     if (frame != NULL) memset(frame, 0, sizeof(*frame));
 }
-/* 返回线上TLV总长度，非法帧返回0；32位累加避免长度回绕。 */
-static uint16_t payload_length(const tlv_frame_t *frame)
+/* 返回线上TLV总长度，0是合法空心跳，-1才是非法帧；32位累加避免回绕。 */
+static int payload_length(const tlv_frame_t *frame)
 {
-    if (frame == NULL || frame->count == 0U || frame->count > TLV_MAX_PER_FRAME ||
-        frame->payload_used > TLV_PAYLOAD_MAX) return 0U;
+    if (frame == NULL || frame->count > TLV_MAX_PER_FRAME ||
+        frame->payload_used > TLV_PAYLOAD_MAX ||
+        (frame->count == 0U && frame->payload_used != 0U)) return -1;
     uint32_t length = 0U;
     for (uint8_t i = 0U; i < frame->count; ++i) {
         const tlv_unit_t *unit = &frame->units[i];
         if (unit->data_off > frame->payload_used ||
             unit->data_len > frame->payload_used - unit->data_off ||
-            !value_length_valid(unit->type, unit->data_len)) return 0U;
+            !value_valid(unit->type, tlv_unit_get_data(frame, unit), unit->data_len)) return -1;
         length += 4U + unit->data_len;
-        if (length > TLV_PAYLOAD_MAX) return 0U;
+        if (length > TLV_PAYLOAD_MAX) return -1;
     }
-    return (uint16_t)length;
+    return (int)length;
 }
 int tlv_pack(tlv_frame_t *frame, uint16_t type, const uint8_t *value, uint16_t value_len)
 {
     if (frame == NULL || frame->count >= TLV_MAX_PER_FRAME ||
         frame->payload_used > TLV_PAYLOAD_MAX ||
-        (value == NULL && value_len != 0U) || !value_length_valid(type, value_len)) return -1;
-    uint16_t used = frame->count == 0U ? 0U : payload_length(frame);
-    if ((frame->count != 0U && used == 0U) ||
+        !value_valid(type, value, value_len)) return -1;
+    int used = payload_length(frame);
+    if (used < 0 ||
         (uint32_t)used + 4U + value_len > TLV_PAYLOAD_MAX ||
         value_len > TLV_PAYLOAD_MAX - frame->payload_used) return -1;
     tlv_unit_t *unit = &frame->units[frame->count];
@@ -103,8 +111,8 @@ int tlv_pack(tlv_frame_t *frame, uint16_t type, const uint8_t *value, uint16_t v
 }
 int tlv_pack_frame(const tlv_frame_t *in, uint64_t seq, uint8_t *out, uint16_t out_max)
 {
-    uint16_t length = payload_length(in);
-    if (out == NULL || length == 0U || out_max < length + 16U) return 0;
+    int length = payload_length(in);
+    if (out == NULL || length < 0 || out_max < (unsigned)length + 16U) return 0;
     out[0] = TLV_SYNC_HEADER;
     write_be16(out + 1, length);
     uint16_t crc = crc16_modbus(out, 3U);
@@ -145,16 +153,15 @@ int tlv_pack_heartbeat(uint64_t seq, uint8_t *out, uint16_t out_max)
 {
     tlv_frame_t frame;
     frame_init(&frame);
-    (void)tlv_pack(&frame, TLV_TYPE_HEARTBEAT, NULL, 0U);
     return tlv_pack_frame(&frame, seq, out, out_max);
 }
 int tlv_unpack(const uint8_t *wire, uint16_t wire_len, tlv_frame_t *out)
 {
     if (out == NULL) return -1;
     frame_init(out);
-    if (wire == NULL || wire_len < TLV_PAYLOAD_MIN + 16U || wire_len > TLV_FRAME_MAX) return -1;
+    if (wire == NULL || wire_len < TLV_FRAME_MIN || wire_len > TLV_FRAME_MAX) return -1;
     uint16_t length = tlv_get_length(wire + 1);
-    if (length < TLV_PAYLOAD_MIN || length > TLV_PAYLOAD_MAX || wire_len != length + 16U ||
+    if ((length != 0U && length < TLV_PAYLOAD_MIN) || length > TLV_PAYLOAD_MAX || wire_len != length + 16U ||
         wire[0] != TLV_SYNC_HEADER || wire[wire_len - 1U] != TLV_SYNC_FOOTER ||
         crc16_modbus(wire, 5U) != 0U || crc16_modbus(wire + 5, length + 10U) != 0U) return -1;
     for (uint8_t i = 0U; i < 8U; ++i) out->sequence = (out->sequence << 8) | wire[5U + i];
@@ -172,12 +179,12 @@ invalid_frame:
     frame_init(out);
     return -1;
 }
-int rk_result_decode(const tlv_frame_t *frame, rk_test_result_t *result)
+int rk_report_decode(const tlv_frame_t *frame, rk_report_t *report)
 {
-    if (result == NULL) return -1;
-    memset(result, 0, sizeof(*result));
-    if (payload_length(frame) == 0U) return -1;
-    /* 先在临时数组汇总，四个字段全部合法后才写result，失败保持全零输出。 */
+    if (report == NULL) return -1;
+    memset(report, 0, sizeof(*report));
+    if (payload_length(frame) < 0) return -1;
+    /* 先汇总并校验整帧，失败保持全零；残缺详情不得借FAIL/进度掩盖。 */
     uint64_t values[RK_RESULT_FIELD_COUNT] = {0U};
     uint8_t seen = 0U;
     for (uint8_t i = 0U; i < frame->count; ++i) {
@@ -192,11 +199,22 @@ int rk_result_decode(const tlv_frame_t *frame, rk_test_result_t *result)
         seen |= field_bit;
         values[rule->result_field] = read_le(tlv_unit_get_data(frame, unit), unit->data_len);
     }
-    /* 四栏分别占bit0..3，全部到齐为0b1111；不使用地址默认0来冒充PASS。 */
-    if (seen != (1U << RK_RESULT_FIELD_COUNT) - 1U) return -1;
-    result->command_id = (uint16_t)values[RK_RESULT_FIELD_COMMAND];
-    result->error_address = values[RK_RESULT_FIELD_ADDRESS];
-    result->die = (uint8_t)values[RK_RESULT_FIELD_DIE];
-    result->elapsed_ms = values[RK_RESULT_FIELD_TIME];
+    const uint8_t details_mask = (1U << RK_RESULT_FIELD_PROGRESS) - 1U;
+    if ((seen & details_mask) != 0U && (seen & details_mask) != details_mask) return -1;
+    if ((seen & details_mask) == details_mask) {
+        report->fields |= RK_REPORT_DETAILS;
+        report->result.command_id = (uint16_t)values[RK_RESULT_FIELD_COMMAND];
+        report->result.error_address = values[RK_RESULT_FIELD_ADDRESS];
+        report->result.die = (uint8_t)values[RK_RESULT_FIELD_DIE];
+        report->result.elapsed_ms = values[RK_RESULT_FIELD_TIME];
+    }
+    if (seen & (1U << RK_RESULT_FIELD_PROGRESS)) {
+        report->fields |= RK_REPORT_PROGRESS;
+        report->progress_percent = (uint8_t)values[RK_RESULT_FIELD_PROGRESS];
+    }
+    if (seen & (1U << RK_RESULT_FIELD_FAIL)) {
+        report->fields |= RK_REPORT_FAIL;
+        report->result.failed = (uint8_t)values[RK_RESULT_FIELD_FAIL];
+    }
     return 0;
 }

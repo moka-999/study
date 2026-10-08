@@ -32,7 +32,7 @@ void tlv_sm_reset(tlv_sm_t *sm);
  * 返回1后、喂下个字节前必须get_frame；内部TLV损坏仍可能使get_frame失败。
  */
 int tlv_sm_feed(tlv_sm_t *sm, uint8_t byte);
-/* 仅提取最近完整帧；成功1..16，未就绪/解析失败-1并清空frame。
+/* 仅提取最近完整帧；成功0..16（0为零TLV心跳），未就绪/解析失败-1并清空frame。
  * 输出拥有载荷副本，不依赖sm后续生命周期。
  */
 int tlv_sm_get_frame(tlv_sm_t *sm, tlv_frame_t *frame);

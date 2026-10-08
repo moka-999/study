@@ -157,7 +157,8 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
              * 没有B2编号时mirrorIndex=0；默认未采样为null。
              */
             cJSON *body = pc_functional_result_create(s_test.name, s_test.index,
-                s_test.site_id, 0U, "", result.result.error_address, result.result.elapsed_ms);
+                s_test.site_id, 0U, "", result.result.error_address, result.result.elapsed_ms,
+                result.result.failed);
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
             if (!body || !v2_power_sim_add_measurement(body)) {
                 cJSON_Delete(body);

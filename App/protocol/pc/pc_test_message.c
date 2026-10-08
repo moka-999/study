@@ -201,9 +201,10 @@ cJSON *pc_functional_result_create(const char *algorithm_name,
                                     uint32_t mirror_index,
                                     const char *physical_addr,
                                     uint64_t error_address,
-                                    uint64_t elapsed_ms)
+                                    uint64_t elapsed_ms,
+                                    uint8_t failed)
 {
-    if (!algorithm_name || !site_id || !physical_addr) return NULL;
+    if (!algorithm_name || !site_id || !physical_addr || failed > 1U) return NULL;
     /* uint64最多20位十进制数；只由整数生成Raw数字，避免double丢低位，禁止外部文本进入。 */
     char elapsed_text[21];
     char *elapsed_digits = elapsed_text + sizeof(elapsed_text) - 1U;
@@ -230,7 +231,7 @@ cJSON *pc_functional_result_create(const char *algorithm_name,
     /* entry已交给root管理；后续任一分配失败均删除root，避免半包和内存泄漏。 */
     if (!cJSON_AddStringToObject(entry, "siteId", site_id) ||
         !cJSON_AddNumberToObject(entry, "mirrorIndex", mirror_index) ||
-        !cJSON_AddNumberToObject(entry, "testStatus", error_address == 0U ? 1 : 2)) {
+        !cJSON_AddNumberToObject(entry, "testStatus", failed ? 2 : 1)) {
         cJSON_Delete(root);
         return NULL;
     }

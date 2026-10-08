@@ -63,7 +63,7 @@ static int handle_header(tlv_sm_t *sm, uint8_t byte)
     if (sm->pos < sm->expect) return 0;
     uint16_t length = tlv_get_length(sm->buf + 1);
     if (crc16_modbus(sm->buf, 5U) != 0U ||
-        length < TLV_PAYLOAD_MIN || length > TLV_PAYLOAD_MAX) {
+        (length != 0U && length < TLV_PAYLOAD_MIN) || length > TLV_PAYLOAD_MAX) {
         resync_header(sm);
         return 0;
     }

@@ -92,8 +92,9 @@ cJSON *pc_test_result_create(const char *algorithm_name,
  * @param[in] site_id 非NULL板卡标志字符串，内容由业务层加载。
  * @param[in] mirror_index B2测试机编号；0可表示尚未分配。
  * @param[in] physical_addr 非NULL颗粒标志；尚未确定映射时传空字符串。
- * @param[in] error_address RK首错地址；0输出PASS(1)及null，否则FAIL(2)及16位十六进制字符串。
+ * @param[in] error_address RK首错地址；0输出null，非0输出16位十六进制字符串，不决定PASS/FAIL。
  * @param[in] elapsed_ms RK上报的本次算法整体耗时，单位ms；0也是有效值，不用MCU等待时间替代。
+ * @param[in] failed 已收到的RK 0x1017值：0输出PASS(1)、1输出FAIL(2)，其他值拒绝。
  * @return 新cJSON对象，由调用方cJSON_Delete；参数或分配失败返回NULL。
  * @note resultDesc为对象，errorType和measurementData为null，不能用伪造的0代替未知值。
  *       顶层testTimeMs按uint64十进制JSON整数无损输出，不经过double换算。
@@ -104,7 +105,8 @@ cJSON *pc_functional_result_create(const char *algorithm_name,
                                     uint32_t mirror_index,
                                     const char *physical_addr,
                                     uint64_t error_address,
-                                    uint64_t elapsed_ms);
+                                    uint64_t elapsed_ms,
+                                    uint8_t failed);
 
 /* 仅借用统计快照，不依赖采样任务或器件；组包不会推进窗口或增加样本。
  * statistics用于0602，measurementData用于0105唯一结果项，字段沿用既有合同。
