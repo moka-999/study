@@ -1,8 +1,8 @@
 /*
  * STM32 UART适配：任务将载荷复制到TX环，HAL TxISR逐字节发送。
  *
- * B1到RK的两个候选物理口为UART4和USART2；USART1仅作本地控制台，
- * 不在本模块注册或挂接。业务只使用Core选择的一路，RX由DMA+IDLE交给路由层。
+ * UART4专用RK协议，USART2只接收RK日志，USART1输出可选日志并接收本地命令。
+ * 三路RX由DMA+IDLE交给路由层；日志不占用协议TX环或协议RX队列。
  * 同一串口的发送任务共用一把互斥锁；排队成功不等于线上已经发完。
  */
 #include "uart_hw.h"
@@ -22,16 +22,16 @@ typedef struct {
 } uart_tx_ring_t;
 
 static uart_tx_ring_t s_uart4_tx;
-static uart_tx_ring_t s_uart2_tx;
+static uart_tx_ring_t s_uart1_tx;
 
 void uart_tx_mutex_init(void)
 {
-    /* 调度前调用；重复初始化不泄漏mutex，也不清除已排队数据。 */
+    /* 开启接收前调用；重复初始化不泄漏mutex，也不清除已排队数据。 */
     if (s_uart4_tx.mutex == NULL) {
         s_uart4_tx.mutex = xSemaphoreCreateMutex();
     }
-    if (s_uart2_tx.mutex == NULL) {
-        s_uart2_tx.mutex = xSemaphoreCreateMutex();
+    if (s_uart1_tx.mutex == NULL) {
+        s_uart1_tx.mutex = xSemaphoreCreateMutex();
     }
 }
 
@@ -40,8 +40,8 @@ static uart_tx_ring_t *find_tx_ring(const UART_HandleTypeDef *uart)
     if (uart == &huart4) {
         return &s_uart4_tx;
     }
-    if (uart == &huart2) {
-        return &s_uart2_tx;
+    if (uart == &huart1) {
+        return &s_uart1_tx;
     }
     return NULL;
 }
@@ -68,7 +68,7 @@ static void uart_tx_drain(UART_HandleTypeDef *uart)
 void uart_tx_isr_attach(void)
 {
     huart4.TxISR = uart_tx_drain;
-    huart2.TxISR = uart_tx_drain;
+    huart1.TxISR = uart_tx_drain;
 }
 
 static int uart_queue_send(uart_if_t *port, uint8_t *buffer, uint16_t length)
@@ -80,9 +80,11 @@ static int uart_queue_send(uart_if_t *port, uint8_t *buffer, uint16_t length)
     UART_HandleTypeDef *uart = port->handle;
     uart_tx_ring_t *ring = find_tx_ring(uart);
     if (ring == NULL || ring->mutex == NULL) {
-        return IF_ERR; /* 分配失败时拒绝发送，绝不无锁写共享TX环。 */
+        return IF_ERR; /* USART2只收无TX环；其余端口锁分配失败也拒绝发送。 */
     }
-    if (xSemaphoreTake(ring->mutex, pdMS_TO_TICKS(UART_TX_LOCK_TIMEOUT_MS)) != pdTRUE) {
+    /* 控制台在短临界区内串行选择来源，禁止取锁等待；协议口维持原有约束。 */
+    TickType_t wait = uart == &huart1 ? 0U : pdMS_TO_TICKS(UART_TX_LOCK_TIMEOUT_MS);
+    if (xSemaphoreTake(ring->mutex, wait) != pdTRUE) {
         return IF_ERR;
     }
 
@@ -148,6 +150,11 @@ uart_if_t uart4_if = {
 };
 uart_if_t uart2_if = {
     .handle = &huart2,
+    .send = uart_queue_send,
+    .start_rx = uart_start_receive,
+};
+uart_if_t uart1_if = {
+    .handle = &huart1,
     .send = uart_queue_send,
     .start_rx = uart_start_receive,
 };

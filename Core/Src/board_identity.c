@@ -1,6 +1,6 @@
 #include "board_identity.h"
 
-#include "stm32h7xx_hal.h"
+#include "main.h"
 
 void board_mac_from_uid(const uint32_t uid[3], uint8_t mac[6])
 {
@@ -14,7 +14,7 @@ void board_mac_from_uid(const uint32_t uid[3], uint8_t mac[6])
         }
     }
 
-    mac[0] = 0x02; /* locally administered, unicast */
+    mac[0] = 0x02; /* 本地管理的单播MAC，不使用广播或组播地址。 */
     for (uint8_t i = 1; i < 6; i++)
         mac[i] = (uint8_t)(hash >> ((i - 1) * 8));
 }
@@ -32,4 +32,13 @@ const uint8_t *board_mac_address(void)
 board_phy_model_t board_phy_model(void)
 {
     return BOARD_PHY_YT8512H;
+}
+
+uint8_t board_slot_code(void)
+{
+    /* 三脚同属GPIOB，一次取样，避免三次读取拼出跨时刻电平。 */
+    const uint32_t levels = B1_SLOT_ID0_PORT->IDR;
+    return (uint8_t)(((levels & B1_SLOT_ID0_PIN) != 0U ? 1U : 0U) |
+                     ((levels & B1_SLOT_ID1_PIN) != 0U ? 2U : 0U) |
+                     ((levels & B1_SLOT_ID2_PIN) != 0U ? 4U : 0U));
 }

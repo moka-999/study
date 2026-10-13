@@ -1,6 +1,8 @@
 ﻿param(
     [ValidateSet('build', 'rebuild', 'check')]
-    [string]$Task = 'build'
+    [string]$Task = 'build',
+    [ValidateSet('MCU', 'RK')]
+    [string]$LogSource
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +58,11 @@ if ($Task -eq 'check') {
         & $python -B -X utf8 (Join-Path $repo "tests\$script")
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
+    $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe' 'CMAKE_C_COMPILER'
+    & $python -B -X utf8 (Join-Path $repo 'tests\verify_board_identity.py') --compiler $compiler
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & $python -B -X utf8 (Join-Path $repo 'tests\verify_power_sequence.py') --compiler $compiler
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     exit 0
 }
 
@@ -71,6 +78,11 @@ $cmakeArgs = @(
 )
 if (-not (Test-Path -LiteralPath $cache)) {
     $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake"
+}
+if ($LogSource) {
+    # 仅改变本次构建缓存中的上电默认值；运行时log命令仍然可用。
+    $logSourceName = $LogSource.ToUpperInvariant()
+    $cmakeArgs += "-DB1_LOG_DEFAULT_SOURCE=$logSourceName"
 }
 & $cmake @cmakeArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

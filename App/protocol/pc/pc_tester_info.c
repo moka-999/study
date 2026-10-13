@@ -7,8 +7,12 @@
 #include <string.h>
 
 #define TESTER_PRODUCT_NAME        "LPDDR4/X_200B"
+#define TESTER_NAME                "JMCT-4000"
 #define TESTER_HARDWARE_REVISION   "D00"
 #define TESTER_BOARD_NAME          "RK3588_test"
+
+_Static_assert(sizeof(TESTER_NAME) <= sizeof(((fru_info_t *)0)->tester_name),
+               "测试仪名称必须包含终止符并放入FRU字段");
 
 /* 只补空白字段；旧B1的产品、硬件版本等身份不能被默认常量改写。 */
 static int fill_missing_text(char *destination, size_t capacity, const char *source)
@@ -33,7 +37,7 @@ static int fill_missing_fields(fru_info_t *fru)
     changed |= result;
 
     result = fill_missing_text(fru->tester_name, sizeof(fru->tester_name),
-                               fru->product_name);
+                               TESTER_NAME);
     if (result < 0) return -1;
     changed |= result;
 
@@ -59,8 +63,15 @@ static int load_locked(fru_info_t *fru)
     if (!fru) return -1;
 
     load_result = fru_info_load(&flash_if, fru, &generation);
-    /* 最新有效记录为v2时直接读取，不用编译期常量覆盖它。 */
-    if (load_result == FLASH_STORE_OK) return 0;
+    if (load_result == FLASH_STORE_OK) {
+        /* 仅迁移旧默认名称；其它身份字段和已定制名称原样保留。 */
+        if (strcmp(fru->tester_name, "LPDDR4/X_200B") != 0) return 0;
+        memset(fru->tester_name, 0, sizeof(fru->tester_name));
+        memcpy(fru->tester_name, TESTER_NAME, sizeof(TESTER_NAME));
+        if (fru_info_save(&flash_if, fru, &generation) != FLASH_STORE_OK) return -1;
+        /* 只更新较旧副本；成功响应必须来自持久化后的回读。 */
+        return fru_info_load(&flash_if, fru, &generation) == FLASH_STORE_OK ? 0 : -1;
+    }
     if (load_result != FLASH_STORE_ERR_NOT_FOUND &&
         load_result != FLASH_STORE_ERR_CORRUPT &&
         load_result != FLASH_STORE_ERR_LEGACY) {

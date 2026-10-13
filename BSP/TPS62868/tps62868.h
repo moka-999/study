@@ -82,29 +82,104 @@ typedef struct {
  * addr为未左移7位地址；电压单位mV。寄存器写成功不保证负载电压已稳定，
  * 更不表示该电压对DDR安全；上电/故障策略仍属于pwr_ctrl/ddr_power。
  */
-/* ── 3.1 地址扫描 (返回找到的设备数) ── */
+/**
+ * @brief 扫描0x40..0x4F中的I2C应答地址，最多保存max个。
+ * @param[in] bus 非NULL且具有is_ready回调的同步I2C接口。
+ * @param[out] addrs 至少max字节；max为0时允许NULL。
+ * @param[in] max 输出容量，不额外扫描已无法存储的地址。
+ * @return 保存的地址数；0也可能是参数无效，不区分扫描失败与无设备。
+ * @note 仅探测ACK，不验证应答器件是否为TPS62868。
+ */
 int  tps62868_scan(i2c_if_t *bus, uint8_t *addrs, uint8_t max);
 
-/* ── 寄存器读/写 ── */
+/**
+ * @brief 同步读取一个TPS寄存器字节。
+ * @param[in] d 非NULL、read_reg回调及7位地址有效的设备。
+ * @param[in] reg 寄存器地址，调用方保证可读。
+ * @param[out] val 非NULL输出，只有IF_OK时有效。
+ * @return 参数错误为IF_ERR；否则透传总线结果。
+ * @note 读取STATUS有读后清除副作用，不是无副作用探测。
+ */
 int  tps62868_read_reg (tps62868_t *d, uint8_t reg, uint8_t *val);
+
+/**
+ * @brief 同步写入一个TPS寄存器字节。
+ * @param[in] d 非NULL、write_reg回调及7位地址有效的设备。
+ * @param[in] reg 寄存器地址，调用方保证可写。
+ * @param[in] val 原始寄存器值。
+ * @return 参数错误为IF_ERR；否则透传总线结果。
+ * @note 原始写不更新ctl_cache；直接写CONTROL后调用方须维护缓存一致性。
+ */
 int  tps62868_write_reg(tps62868_t *d, uint8_t reg, uint8_t val);
 
-/* ── 3.2 VOUT 设置 (mV→code, 按 factor 换算, 检查边界) ── */
-int  tps62868_set_vout1(tps62868_t *d, uint16_t mv);   /* VID=低 生效 */
-int  tps62868_set_vout2(tps62868_t *d, uint16_t mv);   /* VID=高 生效 */
+/**
+ * @brief 将目标电压精确编码后写VOUT1，VID为低时生效。
+ * @param[in] d 非NULL句柄，factor_x10须按BOM提供5/10/20。
+ * @param[in] mv 目标毫伏，须能按器件倍率和5mV基础步进精确表示。
+ * @return IF_OK写成功；IF_ERR参数/编码范围错误，或透传底层总线错误。
+ * @note 不量化截断目标；寄存器可写不代表DDR安全或输出已经稳定。
+ */
+int  tps62868_set_vout1(tps62868_t *d, uint16_t mv);
 
-/* ── 软件使能/禁用 (CONTROL bit5, 寄存器值保留) ── */
+/**
+ * @brief 将目标电压精确编码后写VOUT2，VID为高时生效。
+ * @param[in] d 非NULL句柄，factor_x10须按BOM提供5/10/20。
+ * @param[in] mv 目标毫伏，须能按器件倍率和5mV基础步进精确表示。
+ * @return IF_OK写成功；IF_ERR参数/编码范围错误，或透传底层总线错误。
+ * @note 不量化截断目标；寄存器可写不代表DDR安全或输出已经稳定。
+ */
+int  tps62868_set_vout2(tps62868_t *d, uint16_t mv);
+
+/**
+ * @brief 用CONTROL软件镜像置位软件使能位。
+ * @param[in,out] d 非NULL设备句柄，调用方串行保护ctl_cache。
+ * @return IF_OK写入并更新缓存；IF_ERR参数/总线失败。
+ * @note ctl_cache为0时先加载默认0x6F，此初始化即使后续写失败也会保留。
+ *       不驱动PG11，也不证明物理电源已完成动作。
+ */
 int  tps62868_enable (tps62868_t *d);
+
+/**
+ * @brief 用CONTROL软件镜像清除软件使能位。
+ * @param[in,out] d 非NULL设备句柄，调用方串行保护ctl_cache。
+ * @return IF_OK写入并更新缓存；IF_ERR参数/总线失败。
+ * @note ctl_cache为0时先加载默认0x6F，此初始化即使后续写失败也会保留。
+ *       不驱动PG11，也不证明物理电源已完成动作。
+ */
 int  tps62868_disable(tps62868_t *d);
 
-/* ── 输出放电 (CONTROL bit3, 默认使能) / 斜坡速率 (bit1:0) ── */
+/**
+ * @brief 修改CONTROL的输出放电使能位。
+ * @param[in,out] d 非NULL句柄，缓存更新规则同tps62868_enable。
+ * @param[in] on 0关闭，非0开启输出放电。
+ * @return IF_OK写入成功；IF_ERR参数或总线失败。
+ * @note 只配置功能，不主动关闭输出，调用方须串行保护CONTROL镜像。
+ */
 int  tps62868_set_discharge(tps62868_t *d, uint8_t on);
+
+/**
+ * @brief 修改CONTROL的电压斜坡速率。
+ * @param[in,out] d 非NULL句柄，缓存更新规则同tps62868_enable。
+ * @param[in] ramp 0/1/2/3对应20/10/5/1mV每微秒。
+ * @return IF_OK写入成功；IF_ERR参数或总线失败。
+ */
 int  tps62868_set_ramp     (tps62868_t *d, uint8_t ramp);
 
-/* ── 3.3 STATUS 读 (热预警/HICCUP/UVLO, 读后自动清零) ── */
+/**
+ * @brief 读取并由器件清除STATUS事件标志。
+ * @param[in] d 有效设备句柄。
+ * @param[out] flags 非NULL，热预警/HICCUP/UVLO等原始位；仅IF_OK有效。
+ * @return 透传read_reg结果，IF_OK成功。
+ * @note 清零的状态不能替代电源健康判定，多调用者必须协调读取。
+ */
 int  tps62868_read_status (tps62868_t *d, uint8_t *flags);
 
-/* ── 复位所有寄存器 (CONTROL bit7) ── */
+/**
+ * @brief 写CONTROL复位位并在写成功后恢复软件镜像默认值。
+ * @param[in,out] d 非NULL有效设备。
+ * @return 透传寄存器写结果，IF_OK时ctl_cache恢复0x6F。
+ * @note 会复位器件配置；不重新应用DDR目标，不等待实测电压稳定。
+ */
 int  tps62868_reset_regs  (tps62868_t *d);
 
 #endif

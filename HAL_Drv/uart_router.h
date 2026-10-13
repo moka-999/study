@@ -1,6 +1,6 @@
 /*
  * UART字节路由接口：不承载TCP转发，不解释RK/PC协议。
- * V2逻辑槽0绑定USART1作RK对测，B1的物理UART选择另行确认。
+ * B1槽0固定UART4协议，槽1为USART2日志输入，槽2为USART1本地控制台。
  */
 #ifndef UART_ROUTER_H
 #define UART_ROUTER_H
@@ -16,6 +16,13 @@
 /* 已丢失字节连续性；消费者必须先重置半帧状态，再继续poll，不能按字节数使用。 */
 #define UART_RX_GAP (-1)
 
+enum {
+    UART_PORT_RK_PROTOCOL = 0,
+    UART_PORT_RK_DEBUG = 1,
+    UART_PORT_CONSOLE = 2,
+    UART_PORT_COUNT = 3
+};
+
 typedef struct {
     uint32_t queue_overflows;  /* ISR投队列失败次数。 */
     uint32_t dropped_blocks;   /* 已知丢弃块数，含断流后清队列；不是物理丢失字节数。 */
@@ -30,7 +37,7 @@ typedef struct {
 
 /**
  * @brief 调度前为逻辑UART槽注册接口并创建接收队列。
- * @param[in] id 槽编号0或1。
+ * @param[in] id UART_PORT_*槽编号，0=协议、1=RK日志、2=本地控制台。
  * @param[in] interface 借用接口，须含start_rx/send并覆盖槽位使用期。
  * @note 无效参数、重复注册或分配失败直接返回；无状态码，失败槽不可用。
  *       每槽只注册一次；注册不启动物理接收。
@@ -38,7 +45,7 @@ typedef struct {
 void uart_register(int id, uart_if_t *interface);
 
 /**
- * @brief 调度前创建TX互斥锁、挂接HAL TxISR并启动已注册槽接收。
+ * @brief 调度后创建TX互斥锁、挂接HAL TxISR并启动已注册槽接收。
  * @note 调用方须先初始化外设；失败槽记录恢复请求，须由唯一接收任务周期poll。
  *       返回不表示所有DMA已成功启动；通过诊断接口查询。TX锁失败拒绝发送。
  */
@@ -46,7 +53,7 @@ void uart_start_all(void);
 
 /**
  * @brief 在任务上下文驱动RX恢复，并无队列等待地取走一个接收块。
- * @param[in] id 已注册槽编号0或1。
+ * @param[in] id 已注册的UART_PORT_*槽编号。
  * @param[out] buffer 非NULL调用方缓冲，至少UART_RX_BUF_SIZE字节。
  * @param[in] capacity 缓冲实际字节容量；小于要求时不出队。
  * @return >0实际字节数；0无数据/参数无效；UART_RX_GAP表示断流且已丢弃旧队列。
@@ -62,11 +69,11 @@ int uart_get_rx_diagnostics(int id, uart_rx_diagnostics_t *out);
 
 /**
  * @brief 在任务上下文将载荷交给已注册UART发送接口。
- * @param[in] id 已注册槽编号0或1。
+ * @param[in] id UART_PORT_RK_PROTOCOL或UART_PORT_CONSOLE；RK日志输入拒绝发送。
  * @param[in] buffer 非NULL，至少可读length字节，当前STM32实现复制入TX环。
  * @param[in] length 非0字节数，当前TX环最大可接纳2047字节。
  * @return IF_OK已复制入TX环；IF_ERR参数/槽无效、锁失败或环空间不足。
- * @note 当前STM32实现取锁最多100ms；失败不入队部分载荷。IF_OK不代表线上
+ * @note UART4取锁最多100ms；USART1取锁0等待。失败不入队部分载荷。IF_OK不代表线上
  *       发完或RK收到；调用方须决定失败重试/丢弃策略，禁止ISR调用。
  */
 int uart_send(int id, uint8_t *buffer, uint16_t length);

@@ -4,6 +4,9 @@
 #include "app_freertos.h"
 #include "result_led.h"
 #include "pwr_ctrl.h"
+#include "board_power_config.h"
+#include "pc_power_service.h"
+#include "rk_link.h"
 #include "cmsis_os2.h"
 #include <string.h>
 
@@ -16,6 +19,7 @@ UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart4;
 DMA_HandleTypeDef hdma_uart4_rx;
 DMA_HandleTypeDef hdma_usart2_rx;
+DMA_HandleTypeDef hdma_usart1_rx;
 QSPI_HandleTypeDef hqspi;
 
 uint8_t g_b1_mac[6];
@@ -28,10 +32,9 @@ static void MX_UART_Init(void);
 static void MX_QSPI_Init(void);
 
 /*
- * 2026-08-27 BRD确认LED1/2、LED3/4、LED5/6依次驱动三颗琥珀+蓝双色灯：
- * 奇数通道接琥珀色并定义为FAIL，偶数通道接蓝色并定义为PASS。
- * PCB网络不能证明三颗灯对应LPDDR0、LPDDR1、eMCP的机械标签顺序，
- * 因此对象顺序仍沿用暂定值，待B1真板目视确认后只调整本表的三行顺序。
+ * LED1/2、LED3/4、LED5/6分别组成三颗双色灯，奇数通道FAIL、偶数通道PASS。
+ * 实际灯色及LPDDR0、LPDDR1、eMCP的机械位置均待真板确认；必要时只调整本表，
+ * 不把颜色名称写进业务状态，也不借用独立的PG6正常上电指示灯。
  */
 static const result_led_board_map_t s_result_led_map = {
     .pairs = {
@@ -55,15 +58,21 @@ static void require_ok(HAL_StatusTypeDef status)
     if (status != HAL_OK) Error_Handler();
 }
 
+/* RK原有任务接收CRC有效的普通心跳；本绑定不新建任务或增加线协议命令。 */
+static const pc_power_rk_adapter_t s_power_rk = {
+    .begin = rk_link_ready_begin,
+    .poll = rk_link_ready_poll,
+};
+
 int main(void)
 {
-    static const uint8_t banner[] = "B1 gateway software ready; power remains OFF\r\n";
-
     HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
-    /* 只建立安全OFF基线；时序未冻结前不允许上电。 */
-    pwr_ctrl_init(NULL);
+    /* 装载首板联调时序/业务初值但保持OFF；收到正式PC命令后才操作电源。 */
+    pwr_ctrl_init(&b1_power_default_timing);
+    if (pc_power_service_configure(&b1_power_default_business, &s_power_rk) != 0)
+        Error_Handler();
     MX_I2C_Init();
     MX_SPI_Init();
     MX_UART_Init();
@@ -77,9 +86,8 @@ int main(void)
     HAL_Delay(10);
     HAL_GPIO_WritePin(B1_ETH_NRST_PORT, B1_ETH_NRST_PIN, GPIO_PIN_SET);
     HAL_Delay(100);
-    require_ok(HAL_UART_Transmit(&huart1, (uint8_t *)banner, sizeof(banner) - 1, 100));
 
-    /* 网络/RK/监测任务在RTOS中运行；这里不配置上电时序、不写Boot电压。 */
+    /* 网络/RK/监测任务在RTOS中运行；这里只装载初值和适配器，不开电或写Boot电压。 */
     osKernelInitialize();
     MX_FREERTOS_Init();
     osKernelStart();
@@ -172,7 +180,13 @@ static void MX_GPIO_Init(void)
     gpio.Pin = B1_SPI4_NCS_PIN;
     HAL_GPIO_Init(B1_SPI4_NCS_PORT, &gpio);
 
-    /* PH4/PH5 are the schematic's logical I2C4 bus, but not an I2C4 AF pair. */
+    /* 槽位码由B1上拉和B2接地电阻决定；禁止输出高电平与0Ω接地对顶。 */
+    gpio.Mode = GPIO_MODE_INPUT;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Pin = B1_SLOT_ID0_PIN | B1_SLOT_ID1_PIN | B1_SLOT_ID2_PIN;
+    HAL_GPIO_Init(B1_SLOT_ID0_PORT, &gpio);
+
+    /* PH4/PH5是原理图的逻辑I2C4，但不是硬件I2C4复用引脚对。 */
     gpio.Mode = GPIO_MODE_OUTPUT_OD;
     gpio.Pull = GPIO_NOPULL;
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
@@ -279,7 +293,8 @@ static void uart_init(UART_HandleTypeDef *uart, USART_TypeDef *instance)
     uart->Init.WordLength = UART_WORDLENGTH_8B;
     uart->Init.StopBits = UART_STOPBITS_1;
     uart->Init.Parity = UART_PARITY_NONE;
-    uart->Init.Mode = UART_MODE_TX_RX;
+    /* RK调试口只收日志，绝不把本地切换命令或PC输入写入RK控制台。 */
+    uart->Init.Mode = instance == USART2 ? UART_MODE_RX : UART_MODE_TX_RX;
     uart->Init.HwFlowCtl = UART_HWCONTROL_NONE;
     uart->Init.OverSampling = UART_OVERSAMPLING_16;
     uart->Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
@@ -288,9 +303,9 @@ static void uart_init(UART_HandleTypeDef *uart, USART_TypeDef *instance)
 }
 
 /*
- * 两路候选RK串口各配NORMAL RX DMA；运行时只注册选定的一路。
+ * UART4协议、USART2日志输入、USART1本地控制台各配独立NORMAL RX DMA。
  * RX DMA在调度器启动后的默认任务中才开启，避免FromISR早于内核运行。
- * TX复用软件环+TXE中断，不占用DMA Stream；USART1仍仅作本地控制台。
+ * UART4/USART1的TX复用软件环+TXE中断，不占用DMA Stream。
  */
 static void uart_rx_dma_init(UART_HandleTypeDef *uart, DMA_HandleTypeDef *dma,
                               DMA_Stream_TypeDef *stream, uint32_t request)
@@ -320,16 +335,21 @@ static void MX_UART_Init(void)
     __HAL_RCC_DMA1_CLK_ENABLE();
     uart_rx_dma_init(&huart4, &hdma_uart4_rx, DMA1_Stream0, DMA_REQUEST_UART4_RX);
     uart_rx_dma_init(&huart2, &hdma_usart2_rx, DMA1_Stream1, DMA_REQUEST_USART2_RX);
+    uart_rx_dma_init(&huart1, &hdma_usart1_rx, DMA1_Stream2, DMA_REQUEST_USART1_RX);
 
     /* 回调使用FreeRTOS FromISR接口，优先级不得高于可调用内核的5级边界。 */
     HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 5, 0);
     HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 5, 0);
+    HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 5, 0);
     HAL_NVIC_SetPriority(UART4_IRQn, 5, 0);
     HAL_NVIC_SetPriority(USART2_IRQn, 5, 0);
+    HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
     HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
+    HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
     HAL_NVIC_EnableIRQ(UART4_IRQn);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
+    HAL_NVIC_EnableIRQ(USART1_IRQn);
 }
 
 static void MX_QSPI_Init(void)

@@ -14,7 +14,7 @@
 #include <stdint.h>
 #include "ddr_power.h"
 
-/* PC6 与 PC7 的先后关系必须由最终硬件评审结果显式选择。 */
+/* PC6与PC7的先后由板级配置显式选择，联调初值仍须真板验收。 */
 typedef enum {
     PWR_CTRL_RAIL_ORDER_4V0_FIRST = 0,
     PWR_CTRL_RAIL_ORDER_3V3_FIRST,
@@ -67,7 +67,7 @@ pwr_ctrl_result_t pwr_ctrl_request_off(uint32_t now_ms);
  * @return OK受理；ERR_PARAM目标非法；ERR_NOT_CONFIGURED时序未配置；
  *         ERR_BUSY非OFF（含ON）；ERR_FAULT故障。拒绝请求不修改目标/电源。
  * @note 必须先审核目标安全范围、完成正常掉电/放电及Boot选择；本层只检查
- *       TPS编码，不编排自动冷重启，不等待RK训练就绪，也不代表新PC字段已接入。
+ *       TPS编码，不编排自动冷重启或等待RK训练就绪；这些由上层业务负责。
  *       任务使用monitor_request_training_power_on串行调用；天然窗口待真板验收。
  */
 pwr_ctrl_result_t pwr_ctrl_request_training_on(

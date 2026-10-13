@@ -22,7 +22,7 @@
 /*
  * 第一组测试业务命令：0x0103由PC下发算法，0x0105由MCU上报测试结果。
  * 外部已启动模式已接入功能测试；受理用0x0006，最终结论用0x0105。
- * siteId来自FRU；B2与芯片未分配时分别用0和空串，不把RK die当B2编号。
+ * siteId来自FRU；mirrorIndex原样取RK 0x3001，0为第一颗、1为第二颗；physicalAddr保留为空。
  */
 #define PC_COMMAND_START_TEST          0x0103U
 #define PC_COMMAND_TEST_RESULT_REPORT  0x0105U

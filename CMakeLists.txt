@@ -10,16 +10,27 @@ option(ENABLE_OTA_RELOCATION_PROBE "Build slot-limited App with relocation recor
 option(ENABLE_OTA_BOOT "Require B journal and healthy-start confirmation" OFF)
 set(OTA_APP_BASE "0x08020000" CACHE STRING "OTA App slot address")
 
-# B1只使用真实驱动；不允许构建参数误开V2的电源模拟或隔离网关。
-if(ENABLE_V2_POWER_SIMULATION OR ENABLE_RK_GATEWAY_TEST)
-    message(FATAL_ERROR "B1 does not support V2 power simulation or gateway test")
+# B1只使用真实驱动和真实算法结果；拒绝V2的模拟电源、隔离网关及MATS假FAIL。
+if(ENABLE_V2_POWER_SIMULATION OR ENABLE_RK_GATEWAY_TEST OR ENABLE_V2_MATS_FAIL_TEST)
+    message(FATAL_ERROR "B1 does not support V2 power simulation, gateway test or MATS fake failure")
 endif()
 
-# RK物理口仍待真板确认；只选择一路，避免向两个候选控制台同时发送协议。
-set(B1_RK_UART 4 CACHE STRING "B1 RK UART candidate: 4=UART4, 2=USART2")
-set_property(CACHE B1_RK_UART PROPERTY STRINGS 4 2)
-if(NOT B1_RK_UART STREQUAL "4" AND NOT B1_RK_UART STREQUAL "2")
-    message(FATAL_ERROR "B1_RK_UART must be 4 or 2")
+# UART4固定运行RK协议；保留变量名供共用代码识别B1，拒绝旧USART2配置。
+set(B1_RK_UART 4 CACHE STRING "B1 protocol UART: fixed UART4")
+set_property(CACHE B1_RK_UART PROPERTY STRINGS 4)
+if(NOT B1_RK_UART STREQUAL "4")
+    message(FATAL_ERROR "B1_RK_UART must be 4; USART2 is reserved for RK debug logs")
+endif()
+
+# 仅决定每次上电的默认日志来源；串口命令可临时切换，不写Flash。
+set(B1_LOG_DEFAULT_SOURCE MCU CACHE STRING "USART1 default log source: MCU or RK")
+set_property(CACHE B1_LOG_DEFAULT_SOURCE PROPERTY STRINGS MCU RK)
+if(B1_LOG_DEFAULT_SOURCE STREQUAL "MCU")
+    set(B1_LOG_DEFAULT_VALUE 0)
+elseif(B1_LOG_DEFAULT_SOURCE STREQUAL "RK")
+    set(B1_LOG_DEFAULT_VALUE 1)
+else()
+    message(FATAL_ERROR "B1_LOG_DEFAULT_SOURCE must be MCU or RK")
 endif()
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -75,6 +86,7 @@ add_executable(b1
     Core/Src/main.c
     Core/Src/board_identity.c
     Core/Src/result_led.c
+    Core/Src/log_console.c
     Core/Src/freertos.c
     Core/Src/ethernet_board.c
     Core/Src/stm32h7xx_hal_timebase_tim.c
@@ -98,6 +110,7 @@ add_executable(b1
     App/protocol/pc/pc_tester_info.c
     App/protocol/pc/pc_test_message.c
     App/protocol/pc/pc_test_service.c
+    App/protocol/pc/pc_power_service.c
     App/protocol/rk/crc.c
     App/protocol/rk/frame.c
     App/protocol/rk/state_machine.c
@@ -169,6 +182,7 @@ target_compile_definitions(b1 PRIVATE
     # 与V2真实网络验收保持一致，限制畸形JSON的递归内存占用。
     CJSON_NESTING_LIMIT=16
     B1_RK_UART=${B1_RK_UART}
+    B1_LOG_DEFAULT_SOURCE=${B1_LOG_DEFAULT_VALUE}
 )
 
 # 版本宏只作用于持久化布局实现，避免字符串定义散落到业务代码。

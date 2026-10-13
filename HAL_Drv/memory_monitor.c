@@ -52,7 +52,7 @@ int memory_monitor_sample(memory_monitor_t *monitor,
          * B1三路采样输入都经过100R串联电阻和10k对地电阻。AD7124读到的是
          * 10k电阻上的电压，源端电压应乘(100+10000)/10000=1.01。
          * 这里在现有整数mV接口上做1.01倍四舍五入；raw转mV此前仍有小于
-         * 1mV的量化误差，不影响20mV档位判断。真实电阻误差和ADC增益仍须
+         * 1mV的量化误差，小于TPS的5/10mV档位。真实电阻误差和ADC增益仍须
          * 在B1首板上标定，届时再决定是否把分压系数前移到raw换算阶段。
          */
         for (uint8_t rail = 0U; rail < MEMORY_MONITOR_RAIL_COUNT; rail++) {

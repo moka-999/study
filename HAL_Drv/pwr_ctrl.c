@@ -9,7 +9,7 @@
  *
  * 安全原则：
  * 1. 初始化和任何DDR配置失败都关闭PC6/PC7，并把PG11防御性拉低。
- * 2. 未提供经过评审的时序配置时，上电请求直接拒绝。
+ * 2. 未提供时序配置时上电请求直接拒绝；装载联调初值不代表时序已验收。
  * 3. 上电过程中收到关机请求时立即全部关闭；只有稳定 ON 状态才执行
  *    “第二系统电源 -> 第一系统电源”的受控反向下电。
  * 4. 用 now_ms 差值判断延时，天然兼容 32 位毫秒计数器回绕。
@@ -189,7 +189,7 @@ pwr_ctrl_result_t pwr_ctrl_apply_ddr_steps(const int16_t steps[DDR_RAIL_COUNT])
     if (s_state != PWR_CTRL_STATE_ON) return PWR_CTRL_ERR_BUSY;
 
     /*
-     * 先用纯计算接口拒绝空指针、越界或非20mV档位。参数错误不能被误判为
+     * 先用纯计算接口拒绝空指针或超出各轨原生档位范围的请求。参数错误不能被误判为
      * TPS/I2C故障，更不能因此触发整机故障关断。
      */
     if (ddr_power_build_step_targets(ddr_power_get_memory_type(), steps,

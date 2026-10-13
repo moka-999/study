@@ -5,8 +5,7 @@
  * 原理图中PG0-PG5经1k电阻驱动2N7002栅极，MOS管导通后把LED阴极拉低，
  * 因此GPIO高电平表示点亮。闪烁采用500ms全局相位，三颗灯同时进入测试
  * 状态时会保持同步；本文件不使用HAL_Delay，不阻塞后续网关任务。
- * 2026-09-01确认双色组合不限于红/绿：当前板把琥珀通道定义为FAIL，把蓝色
- * 通道定义为PASS。业务层只使用FAIL/PASS通道名，避免以后更换灯料号时误解。
+ * 业务层只使用FAIL/PASS通道名，实际颜色由真板确认，避免更换灯料号时误解。
  */
 
 #include "result_led.h"
@@ -49,7 +48,7 @@ static result_led_levels_t result_led_render(result_led_state_t state,
         break;
 
     case RESULT_LED_TEST_HOT:
-        /* 当前板使用琥珀色FAIL通道承担高温闪烁警示。 */
+        /* FAIL通道单独闪烁，区分高温警示和常温双色闪烁。 */
         levels.fail_on = blink_on ? 1U : 0U;
         break;
 

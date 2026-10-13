@@ -10,8 +10,9 @@
 #include "task.h"
 #include <string.h>
 
-#define UART_SLOT_COUNT       2
+#define UART_SLOT_COUNT       UART_PORT_COUNT
 #define UART_RX_QUEUE_LENGTH  8U
+#define UART_LOG_QUEUE_LENGTH 2U /* 日志允许丢弃，控制台不占用协议的8块队列。 */
 #define UART_RX_RETRY_MS       100U
 
 typedef struct {
@@ -119,7 +120,8 @@ void uart_register(int id, uart_if_t *interface)
         interface->send == NULL || s_slots[id].rx_queue != NULL)
         return;
 
-    QueueHandle_t queue = xQueueCreate(UART_RX_QUEUE_LENGTH, sizeof(uart_rx_message_t));
+    UBaseType_t depth = id == UART_PORT_RK_PROTOCOL ? UART_RX_QUEUE_LENGTH : UART_LOG_QUEUE_LENGTH;
+    QueueHandle_t queue = xQueueCreate(depth, sizeof(uart_rx_message_t));
     if (queue == NULL) return; /* 分配失败保持未注册；无空队列解引用。 */
     s_slots[id].interface = interface;
     s_slots[id].rx_queue = queue;

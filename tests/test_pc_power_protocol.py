@@ -143,9 +143,9 @@ def main() -> None:
     require(all(token in dispatch for token in (
         "handle_power_on", "handle_power_off", "handle_reset_rk",
         "handle_set_boot_mode", "handle_query_boot_mode",
-        '"bootMode"', '"targetMv"', '"notReady"', '"notConfigured"',
+        '"bootMode"', '"targetMv"', '"notConfigured"',
         "handle_set_ddr_config", "monitor_apply_ddr_config",
-        '"memoryType", "vdd1Steps", "vdd2Steps", "vddqSteps"',
+        "pc_power_parse(root,",
         "handle_query_power_monitor", "monitor_get_latest",
         '"sampleAgeMs"', '"samplePowerState"', '"validMask"',
         '"voltageMv"', '"currentMa"', '"powerMw"',
@@ -190,12 +190,17 @@ def main() -> None:
                  "monitor_request_training_power_on"):
         body = monitor_task.split(f"pwr_ctrl_result_t {name}(", 1)[1].split("\n}", 1)[0]
         require("memory_io_take_for_power(&now_ms)" in body, "电源请求须补偿锁等待")
-    require("monitor_request_training_power_on" not in dispatch,
-            "RK执行和训练安全范围未接通，0103不得触发训练上电")
+    sequence = (ROOT / "App/protocol/pc/pc_power_service.c").read_text(encoding="utf-8")
+    require("monitor_request_training_power_on" not in dispatch and
+            all(token in sequence for token in ("monitor_request_training_power_on",
+                "PC_POWER_REQUEST_OFF", "PC_POWER_WAIT_RK_READY", '"notReady"',
+                "valid_mv", "s_rk.begin", "s_rk.poll")) and
+            "s_config.min_mv" not in sequence and "s_config.max_mv" not in sequence,
+            "训练上电须经独立编排/TPS网格校验/心跳就绪；DDR安全范围由PC确认")
     start_parser = (ROOT / "App/protocol/pc/pc_test_message.c").read_text(encoding="utf-8")
     require(all(f'"{field}"' in start_parser for field in (
         "algorithmType", "algorithmName", "algorithmIndex", "power", "reboot", "bootMode",
-        "memoryType", "vdd1Steps", "vdd2Steps", "vddqSteps")),
+        "memoryType", "vdd1", "vdd2", "vddq")),
         "0103完整启动请求字段未全部接入")
     require("ddr_power_build_step_targets" in start_parser and "isfinite" in start_parser and
             "pc_test_start_read_index" in dispatch and "build_command_failure_with_index" in dispatch,
@@ -206,7 +211,10 @@ def main() -> None:
             all(token in start_service for token in (
                 "!start->external_ready", "pwr_ctrl_get_state() != PWR_CTRL_STATE_ON",
                 '"notReady"', '"otaNotReady"', "monitor_idd_start", "rk_link_request")),
-            "0103须委托业务服务，仅健康且ON的外部就绪路径可启动采样并下发RK")
+            "0103须委托业务服务，保留健康/外部ON门禁，统计及RK下发不能进入JSON解析器")
+    require("PC_POWER_PREPARE_TEST" in start_service and "s_test.preparing" in start_service and
+            "pc_power_service_take" in start_service and "pc_power_service_poll();" in dispatch,
+            "完整0103必须经正式电源编排完成后再投递算法")
     require("result_led_get_all" in led_source and
             led_source.count("taskENTER_CRITICAL()") >= 4 and
             "s_states[target] == state" in led_source,
@@ -234,22 +242,23 @@ def main() -> None:
             "0x0006 completed成功应答格式错误")
 
     ddr_config = json.loads(
-        '{"memoryType":"LPDDR4X","vdd1Steps":0,'
-        '"vdd2Steps":0,"vddqSteps":0}'
+        '{"memoryType":"LPDDR4X","vdd1":"1800",'
+        '"vdd2":"1100","vddq":"600"}'
     )
     require(set(ddr_config) == {
-        "memoryType", "vdd1Steps", "vdd2Steps", "vddqSteps"
+        "memoryType", "vdd1", "vdd2", "vddq"
     }, "0x0509必须固定为四字段")
     step_ranges = {
-        "LPDDR4": ((-50, 77), (-35, 28), (-35, 28)),
-        "LPDDR4X": ((-50, 77), (-35, 28), (-10, 53)),
+        "LPDDR4": ((-100, 155), (-140, 115), (-140, 115)),
+        "LPDDR4X": ((-100, 155), (-140, 115), (-40, 215)),
     }
     for memory_type, ranges in step_ranges.items():
         nominals = (1800, 1100, 1100 if memory_type == "LPDDR4" else 600)
-        for nominal, (first_step, last_step) in zip(nominals, ranges):
-            require(nominal + first_step * 20 in (800, 400) and
-                    nominal + last_step * 20 in (3340, 1660),
-                    f"{memory_type} 20mV档位边界错误")
+        for nominal, (first_step, last_step), step_mv in zip(nominals, ranges, (10, 5, 5)):
+            require(nominal + first_step * step_mv in (800, 400) and
+                    nominal + last_step * step_mv in (3350, 1675) and
+                    last_step - first_step + 1 == 256,
+                    f"{memory_type} 原生档位边界错误")
 
     monitor_body = {
         "sampleAgeMs": 37,

@@ -4,7 +4,7 @@
 #include "hal_if.h"
 
 /*
- * 在调度器启动前创建TX互斥锁。重复调用不重复分配；若分配失败，
+ * 在启动接收前创建TX互斥锁。重复调用不重复分配；若分配失败，
  * 该串口send返回IF_ERR，不能降级为不受保护的多任务写入。
  */
 void uart_tx_mutex_init(void);

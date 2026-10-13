@@ -4,25 +4,28 @@
 
 - 用户指定RK工程师的`D:/pro/tlv_proto`为基线；与V2共享`frame/state_machine/rk_link/rk_task`，保留B1的UART4/USART2、DMA、OFF门禁和OTA健康上报，不引入V2板级GPIO。
 - Type/Length/Seq大端、Value整数和CRC小端；HCRC覆盖前3字节，FCRC覆盖Seq＋TLV。普通心跳Length=0、零TLV、16字节；接收兼容0x0000空Value。非空Length为4..1024，1..3非法。
-- RK所有上行均填写RK最近收到的MCU Seq，不回显原测试Seq，不使用RK自身心跳计数；两包Seq可不同。MCU只按本次命令至最新成功入UART队列Seq过滤，允许传输滞后，不要求精确等于最新值。单在途匹配详情算法后汇总；旧结果若被RK重新标上当前窗口Seq，同算法时无法区分。
-- 0x3016为1字节进度0..100，仅缓存参考、不判断完成/ready。四详情0x5001/0x9001/0x3001/0x9002同帧且各一次；另收0x1017的1字节bool（0=PASS、1=FAIL），收齐才上报一次0105；地址不判PASS，缺包保持busy，不自动重发。相同重复幂等，重复内容矛盾保持等待；见`docs/rk_protocol_update_20260930.md`。
+- RK上行填最近收到的MCU Seq；MCU只按本次命令至最新成功入UART队列Seq过滤，允许滞后/重复，完整结果还须匹配单在途算法。旧结果被重标当前窗口Seq且同算法时无法区分。
+- 进度严格为5001算法＋3016进度，0..100仅参考。最终为单个3/5/7 TLV包：5001/1017/9002各一次，0～2组相邻9001+3001失败明细，die仅0/1且唯一，1017与数量一致，零地址保留。整包、Seq和算法通过才一次交付；旧四详情/独立FAIL不再汇总，错误包保持busy，无重发。见`../test/doc/rk_dual_die_result_20261010.md`。
 - `rkRequestQueue/rkResponseQueue`各8槽，只允许单个在途测试；无500ms自动重传。最终结果超时后暂停后续发送，直到匹配迟到结果或B1断电；队列满不丢完成结果。
-- 1..20为参考文档定义的无参数功能测试，17=MATS；IDD21..36不支持。0103允许操作者已确认RK测试程序就绪、MCU电源状态为ON的外部启动路径：power/bootMode均null、reboot=false。完整上电/训练/重启请求仍拒绝；不移植V2模拟旁路。详见`docs/real_test_sync_20260929.md`。
+- 1..20为参考文档定义的无参数功能测试，17=MATS；IDD21..36不支持。0103允许操作者已确认RK测试程序就绪、MCU电源状态为ON的外部启动路径：power/bootMode均null、reboot=false。完整启动另接正式电源编排，缺配置/RK确认仍拒绝；不移植V2模拟旁路。外部路径见`docs/real_test_sync_20260929.md`，完整编排见`../test/doc/power_sequence_20261012.md`。
 - MCU→RK心跳周期为1000ms（1秒），由同一RK任务推进；B1非ON时不发送，发送失败或错过周期不补发。PC心跳仍为请求/应答，不受此周期控制。
+- PC 0105顶层siteId标识B1，measurementData是共享统计；testResults固定两项mirrorIndex=0/1，失败明细按die匹配，未列者PASS。testStatus为0=FAIL/1=PASS；PASS地址null，FAIL保留16位十六进制（含零），真实errorType为空。physicalAddr保留空串，B1始终真实、禁止MATS假FAIL。
+- RK字节间超时与V2统一为100ms；仅丢弃超时半帧，不改变算法等待或Seq窗口。B1构建拒绝ENABLE_V2_MATS_FAIL_TEST、电源模拟及旧网关联调开关。
+- 通用同步及离线复跑入口见`../test/doc/v2_b1_sync_20261010.md`；板型差异不靠整目录覆盖消除。
 - B1结果灯不作RK通信指示，PC温控边界不变。代码/离线/构建与B1实板验收分开记录，见`docs/rk_protocol_migration_20260923.md`。
 
 ## 20260920-2134原理图适配边界
 
 - PAC1934三路R7268/R7269/R7270均为20mΩ，生产采样必须显式使用板级20000µΩ，不能采用通用驱动的10mΩ兼容值。0602复用现有采样结果，不在JSON层再次乘除系数。
-- TPS料号、地址、20mV步进不变；U4025为56.2kΩ，U4026为86.6kΩ。TPS输出选装和实物阻值仍需验收，寄存器写成功不证明DDR实际已由TPS供电。
-- 用户接受共同4V上电后能及时完成调压的开发预设，暂不新增RK初始化前等待机制；这不批准具体毫秒延时或跳过初始化后的RK-ready。保留默认OFF和未配置时序门禁。
-- 0103保留完整参数校验及带合法index的失败应答；仅外部就绪且ON路径可交给真实RK。安全训练范围、成功配置比较、自动冷重启及自动RK-ready仍未实现，不得把本路径宣称为完整上电测试闭环。
+- TPS料号、地址不变；U4025为56.2kΩ，U4026为86.6kΩ。steps采用原生步进：VDD1每档10mV、VDD2/VDDQ每档5mV，相对标称值且各256档。TPS输出选装和实物阻值仍需验收，寄存器写成功不证明DDR实际已由TPS供电。
+- 用户接受共同4V上电后能及时完成调压的开发预设，暂不新增RK初始化前等待机制；B1已按要求装载可调轨间初值，仍须实板验收，不跳过初始化后的RK-ready，保持默认OFF及业务配置门禁。
+- 0103完整启动已接成功配置比较、真实训练上电/Boot驱动与冷重启。初版按用户确认以本轮CRC有效普通心跳表示RK初始化完成，直接下电不等RK关机应答；PC确认DDR安全范围，MCU保留格式/TPS范围/原生步进校验，不夹紧或取整。进度/结果/文字/旧心跳不能放行；启动参数不是硬件验收，RK须保证发心跳时可执行算法。见`../test/doc/b1_power_business_20261013.md`。
 - Boot实际写失败后缓存失效，0507返回notConfigured；参数/忙/状态拒绝不改旧缓存。查询仍不是DAC模拟电压回读。H13首次上电/掉电输入容限待硬件/RK确认，不自动写EEPROM或改成全时0V。
 - 适配及复跑记录见`docs/schematic_adaptation_20260921.md`；离线验证不能替代实板验收。
 
 ## OTA增量约束
 
-- 空白板首部署用`tools/first_flash.ps1 -Action build -Version <版本> -RkUart 4`（或2），输出固定B1包；共用独立Boot首烧工具，先备份/全空检查，B+A1与恢复包回读通过后才提交日志，无force、不覆盖FRU。B1禁止使用V2包/模拟配置，新首烧编排仍待实板验收；见`../bootloader/README.md`。
+- 空白板首部署用`tools/first_flash.ps1 -Action build -Version <版本> -RkUart 4`，UART4已固定为协议口，不再允许2，输出固定B1包；共用独立Boot首烧工具，先备份/全空检查，B+A1与恢复包回读通过后才提交日志，无force、不覆盖FRU。B1禁止使用V2包/模拟配置，新首烧编排仍待实板验收；见`../bootloader/README.md`。
 
 - 普通构建保持OTA关闭；`ENABLE_OTA_BOOT=ON`必须同时启用槽限/修正表构建，A1/A2共同上限896KiB，向量使用`g_pfnVectors`符号随镜像修正。
 - 完整B在独立bootloader分支用`BOOT_BOARD=b1`生成，板型固定b1-h743；复位在RAM初始化前关PC6/PC7/PG11。禁止使用V2的B/包或普通最小跳转B覆盖已部署OTA的板卡。
@@ -54,7 +57,7 @@
   the B2 firmware owns heating and all other backplane-level control.
 - PH4/PH5 are the schematic's logical I2C4 bus and must remain open-drain GPIOs
   for software I2C; do not configure the invalid `GPIO_AF4_I2C4` mapping.
-- Final RK links are UART4 and USART2. USART1 is local console only.
+- UART4固定连接RK UART0_M0运行协议；USART2只接收RK UART2_M0_DEBUG日志；USART1输出可选MCU/RK日志并接收本地log命令，不能把输入转发给RK。
 - `b1.ioc` is the CubeMX hardware baseline. PA13/PA14 are explicitly reserved for
   SWD and PH4/PH5 start high/released; preserve both settings. After regeneration,
   restore the app linker origin `0x08020000`/length `1920K` and vector offset
@@ -75,12 +78,13 @@
 - The V2-accepted MCP4725 driver is bound to B1 hardware I2C2 at address 0x60.
   It uses Fast Write only and must not write EEPROM. Do not set a Boot voltage
   automatically before B1 output-voltage and RK boot-mode validation.
-- The V2-accepted TPS62868/PAC1934/DDR power baseline is ported without startup
-  device access. VDD1/VDD2/VDDQ use I2C1/I2C2/PH4-PH5 software I2C respectively;
-  `pwr_ctrl_init(NULL)` reinforces PC6/PC7/PG11 low and leaves
-  power-on prohibited until real-board timing is frozen. Runtime voltage offsets are
-  independent signed 20mV steps across the TPS-register writable range; these
-  extreme values are not DDR-safe and must never be swept automatically.
+- TPS62868/PAC1934/DDR通用驱动已迁入；VDD1/VDD2/VDDQ分别使用I2C1、I2C2和PH4/PH5软件I2C。
+  `pwr_ctrl_init(&b1_power_default_timing)`拉低PC6/PC7/PG11并保持OFF，不在初始化时访问TPS。
+  联调初值集中在`Core/Inc/board_power_config.h`：PC7先开→10ms→PC6开→5ms后写TPS；
+  正常下电先关PC6，10ms后关PC7；故障/启动取消立即全关。初值不是批准时序，
+  实际C离线验证及首板反灌/训练窗口验收见`../test/doc/b1_power_defaults_20261013.md`。
+  独立有符号原生档位：VDD1为10mV，VDD2/VDDQ为5mV，覆盖TPS全部寄存器码。
+  极端值并非DDR安全电压，禁止自动遍历；内部原生档位不是PC线上字段，PC统一使用字符串mV。
 - Training `power` means the voltages used before and during DDR initialization,
   not a post-training offset. `monitor_request_training_power_on()` copies an
   explicit three-rail target under the existing mutex and accepts it only in OFF;
@@ -91,8 +95,8 @@
   Development assumes the RK806 automatic startup window is sufficient, as
   accepted on 2026-09-14; this is not measured timing approval. Keep default OFF,
   preserve the B1-specific PC6/PC7 sequence and optional PG11, and do not copy V2
-  waveform delays. 新PC字段已完成严格解析；安全训练限值、配置变化后的冷重启
-  编排及RK就绪确认仍待接入，不能把字段解析当成成功训练。
+  waveform delays. 新PC字段及完整编排已接入；板级时序与业务等待已有联调初值，
+  main绑定本轮普通心跳就绪，安全训练范围由PC确认，不把离线通过当成成功训练。
 - W25Q256 now uses the 76-byte firmware payload and 224-byte FRU v2. The MCU-side
   device in the 2026-08-27 BRD is U2 on 3V3_MCU/QSPI-BK1; U4007 is RK-side FSPI
   and must not be used as MCU Flash evidence. Keep read
@@ -116,21 +120,23 @@
   power、reboot及bootMode。外部就绪模式严格使用null/false/null；通过RK命令表
   查找1..20，不猜未知名称。正式TCP领取详情与FAIL已收齐的结果并发送0105，包含testTimeMs、
   首错地址及实际采样的18项均值/峰值/最小值；无有效样本报null，不造假零值。
-  每次受理重开统计，结果领取后冻结；0601只读查询不因算法在途返回busy。
+  真正投递算法前重开统计，不计冷启动等待；结果领取后冻结，0601只读查询不因算法在途返回busy。
   断线不撤销算法，新连接不领取旧0105。采样仍是后台约2秒加IO间隔，非JEDEC同步IDD窗口。
 - PC heartbeat is frozen as client request 0x0002 with `{}` and server response
   0x0001 with `{}` using the MCU connection-local send Seq.
 - The local business now includes 0x0501/0x0502 power requests, 0x0503/0x0504
   state, 0x0505 reset gate, 0x0506/0x0507/0x0508 Boot configuration/query,
-  0x0509 memory-type/20mV steps, 0x0601/0x0602 cached monitoring, and
+  0x0509 memory-type/voltage, 0x0601/0x0602 cached monitoring, and
   0x0701/0x0702/0x0703 indicators. 0x0509 is
-  exactly `memoryType+vdd1Steps+vdd2Steps+vddqSteps`: OFF accepts only all-zero
-  steps to select type. ON applies validated steps only to the selected type;
-  PC must issue nonzero adjustment after RK DDR initialization.
-  Sampling, Boot I2C, voltage writes and pwr_ctrl progression share one coarse
-  FreeRTOS mutex. 0x0501 returns notConfigured until approved timing is supplied;
-  0x0502/0x0505 return notReady while RK safe-shutdown confirmation is missing.
-  MCU-side DDR-ready enforcement remains pending handshake integration.
+  固定四字段`memoryType+vdd1+vdd2+vddq`：三路电压是绝对mV十进制字符串，
+  必须满足标称值加原生步进乘整数及TPS范围，不自动取整；旧steps字段不再接受。
+  0103.power复用同一解析器。OFF只接受所选类型的标称电压；ON只允许当前类型。
+  PC须在RK完成DDR初始化后下发偏离标称的电压；内部仍使用10/5/5mV有符号档位。
+  采样、Boot I2C、调压和pwr_ctrl推进共用监测层事务锁。0501/0502/0505及完整0103
+  已由pc_power_service分阶段推进，原任务不变；main同时装载轨间和业务初值。
+  0502直接关电；0505/完整0103上电后等待本轮有效普通心跳，超时报告timeout，
+  不自动关电或重试。RK心跳发送时点、电气时序及直接掉电存储风险待验收。B1阶段日志走log_console，
+  不往RK协议口打印，也不增加PC字段。
 - 0x0006 is the generic command execution result, not an error-only response.
   It uses decimal `requestCommandId` and `status=accepted|completed|failed`;
   `errorCode` exists only for failed results and may be
@@ -140,36 +146,23 @@
   JSON词法检查拒绝原始NUL、未转义控制字符及`\u0000`，防止C字符串截断。
 - B1 and V2 both keep D-Cache disabled. ETH DMA memory belongs in D2 SRAM and
   the FreeRTOS heap belongs in AXI SRAM; never add SCB cache maintenance calls.
-- Result LED business states are ported to PG0-PG5. The 2026-08-27 BRD uses three
-  L-C295JFLBCT amber/blue parts; the user accepted any bicolor combination on
-  2026-09-01. Odd channels LED1/3/5 are amber FAIL/warning, even channels
-  LED2/4/6 are blue PASS, both channels blink for normal testing, and amber blinks
-  for hot testing. LPDDR0/LPDDR1/eMCP physical order still needs visual confirmation.
-  PC uses target `lpddr0|lpddr1|emcp` and state
-  `off|pass|fail|testNormal|testHot`; set/query/process share a short RTOS critical
-  section. Keep PG6 off until its single-color meaning is frozen.
+- PG0-PG5仅用于三颗双色结果灯：奇数LED1/3/5为FAIL通道，偶数LED2/4/6为PASS通道；常温测试双通道闪烁，高温测试仅FAIL通道闪烁，亮灭各500ms。图纸料号L-C295JFLBCT的手册为琥珀/蓝，实际灯色及LPDDR0/LPDDR1/eMCP物理顺序等真板确认，不按图面红绿旁注改业务。
+  PC仍用`lpddr0|lpddr1|emcp`和`off|pass|fail|testNormal|testHot`，不新增字段。
+- PG6/LED7已确认为MCU正常上电指示：GPIO初始化先低，默认任务完成串口及LwIP初始化后置高常亮，不跟随结果灯、网络连接或RK/DDR电源状态闪烁；不代表整板电压、RK就绪或OTA健康验收。详见`docs/board_status_slot_20261010.md`。
 - Do not copy V2 pin mappings, PCF8574 PHY reset, fixed MAC or test scripts.
-- `B1_RK_UART=4` is a software default, not a hardware decision; CMake value 2
-  selects USART2. Register only one candidate as logical slot0, never USART1.
-- The 2026-08-27 BRD confirms UART4 PA11/PA12 through U4008 to RK UART0_M0 and
-  USART2 PD5/PD6 through U4013 to RK UART2_M0_DEBUG. Both electrical paths exist;
-  this still does not decide which RK port is free for the production gateway.
-- UART RX uses NORMAL DMA1 Stream0/UART4_RX and Stream1/USART2_RX with IRQ
-  priority 5. HT is disabled/ignored; IDLE/TC blocks feed the RK parser. Register
-  the queue before scheduling, but call uart_start_all() after scheduling starts.
+- `B1_RK_UART=4`已固定，CMake拒绝2；逻辑slot0=UART4协议、slot1=USART2日志、slot2=USART1控制台，后两路绝不进入RK解析器。USART2仅RX，不挂TX发送环。
+- UART4 PA11/PA12经U4008到RK UART0_M0，USART2 PD5/PD6经U4013到RK UART2_M0_DEBUG，USART1 PA9/PA10为本地日志出口。三路当前115200/8N1，RK调试实际波特率和线路仍待真板验收。
+- RX为NORMAL DMA1 Stream0/UART4、Stream1/USART2、Stream2/USART1，IRQ优先级5；HT忽略，IDLE/TC交给各自唯一消费者。队列在调度前注册，uart_start_all()在调度后启动。
+- 日志复用默认任务，不新增任务；编译`B1_LOG_DEFAULT_SOURCE=MCU|RK`指定上电默认，运行时USART1文本`log mcu`/`log rk`加换行选择，重启恢复默认且不写Flash。仅一来源输出，MCU printf经log_console统一过滤，禁止直接写huart1。USART1取TX锁为0等待，拥塞允许丢日志，不能阻塞协议或业务；说明见`docs/uart_log_console_20261010.md`。
 - Keep `.uart_dma` in AXI SRAM after the RTOS heap. Reserve the fixed 30KiB LwIP
   allocator plus metadata in `.lwip_heap` at 0x30005000 (32KiB reserved), so ETH
   pools cannot silently overlap it. Never put UART DMA in DTCM.
-- Preserve the default-OFF gates: RK commands/heartbeats and sensor sampling do
-  not start before pwr_ctrl reaches ON. This does not implement safe-shutdown
-  handshakes or flushing already queued UART TX bytes; those remain pending.
+- 保持默认OFF门禁：pwr_ctrl到ON后才允许RK命令/心跳和采样。初版直接关电，
+  不再把安全关机握手列为执行前提；已入UART队列的字节撤销仍未实现。
 - B1 result LEDs are not TCP/RK debug indicators; never borrow PG0-PG6 for V2
   connection/heartbeat toggles. Exclude the old TLV GPIO reboot dispatcher.
 - See docs/integration_20260831.md for migrated scope and remaining acceptance.
-- The 2026-08-21 hardware review screenshot remains unconfirmed by request:
-  PB3/PB4/PB5 presence detection is not an approved slot-ID interface. Do not
-  configure these GPIOs, derive IP from them, or change the ETH1/PHY versus RMII
-  switching path until the revised schematic and eight-slot level table are agreed.
+- PB3/PB4/PB5按20260920-2134版原理图及已确认贴装表配置为GPIO输入、GPIO_NOPULL；B1各有4.7kΩ上拉，B2贴0Ω接地为0、不贴为1，不允许MCU输出高。`board_slot_code()`一次读取GPIOB，返回PB5:PB4:PB3的原始0..7码，PB3最低位，111也有效；独立的SLOT_ONLINE#才是B2在位检测。仅启动日志和内部读取使用，不据此改PC siteId、FRU、IP或SPI协议。实际八槽贴装及接插件对应仍需真板验收。
   正式B1 IP已于2026-09-22确认为由B2 MCU告知，不以本地固定地址或FRU配置IP作为正式来源。
   当前测试继续使用本地配置192.168.1.201；本次仅记录，保留网络代码和FRU布局。
   B2侧分配方式、通知链路（是否SPI）/协议/时机、异常处理及是否持久化仍待双方确定，不擅自新增SPI命令。

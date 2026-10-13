@@ -1,5 +1,6 @@
 #include "pc_test_service.h"
 #include "pc_tester_info.h"
+#include "pc_power_service.h"
 #include "rk_link.h"
 #include "ota_app.h"
 #if defined(B1_RK_UART)
@@ -18,6 +19,8 @@ static struct {
     char site_id[16];           /* 本次受理时从W25 FRU读取的站点标签。 */
     uint8_t active;             /* 包含已经超时但RK仍可能执行的状态。 */
     uint8_t owner_connected;    /* 只有发起测试的原TCP连接可接收结果。 */
+    uint8_t preparing;          /* 电源/Boot/READY尚未完成，此时绝不向RK下发算法。 */
+    rk_request_t pending;       /* 只保存值，不借用已释放的JSON字符串。 */
 } s_test;
 
 /* body由调用者释放；成功只代表组帧完成，不代表PC已经收到。 */
@@ -33,24 +36,47 @@ static int pack(uint16_t command, uint32_t sequence, const cJSON *body,
         ? PC_DISPATCH_RESPONSE_READY : PC_DISPATCH_ERROR;
 }
 
-/* error=NULL是已受理；非NULL是业务/传输失败，绝不等价于内存算法FAIL。 */
-static int status_response(uint32_t sequence, uint32_t index, const char *error,
-                           pc_dispatch_response_t *response)
+/* status区分受理、启动完成和业务失败；error非NULL绝不等价于内存算法FAIL。 */
+static int command_status_response(uint32_t sequence, uint32_t index,
+    const char *status, const char *error, pc_dispatch_response_t *response)
 {
     cJSON *body = cJSON_CreateObject();
     int result = PC_DISPATCH_ERROR;
     if (body && cJSON_AddNumberToObject(body, "requestCommandId", PC_COMMAND_START_TEST) &&
         cJSON_AddNumberToObject(body, "algorithmIndex", index) &&
-        cJSON_AddStringToObject(body, "status", error ? "failed" : "accepted") &&
+        cJSON_AddStringToObject(body, "status", status) &&
         (!error || cJSON_AddStringToObject(body, "errorCode", error)))
         result = pack(PC_COMMAND_COMMAND_RESP, sequence, body, response);
     cJSON_Delete(body);
     return result;
 }
 
+static int status_response(uint32_t sequence, uint32_t index, const char *error,
+                           pc_dispatch_response_t *response)
+{
+    return command_status_response(sequence, index, error ? "failed" : "accepted", error, response);
+}
+
 int pc_test_service_busy(void)
 {
     return s_test.active != 0U;
+}
+
+/* 在真正投递算法之前才开启采样统计；队列失败时收回窗口，不自动重发。 */
+static const char *queue_test(const rk_request_t *request)
+{
+#if defined(B1_RK_UART)
+    int measuring = monitor_idd_start(INT32_MAX, 1U);
+    if (measuring != IF_OK) return measuring == IF_TIMEOUT ? "busy" : "notReady";
+#endif
+    int queued = rk_link_request(request);
+    if (queued != 0) {
+#if defined(B1_RK_UART)
+        monitor_idd_cancel();
+#endif
+        return queued == -2 ? "busy" : "notReady";
+    }
+    return NULL;
 }
 
 pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
@@ -59,21 +85,14 @@ pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
     if (!start || !response) return PC_DISPATCH_ERROR;
     if (!ota_app_is_confirmed())
         return status_response(sequence, start->algorithm_index, "otaNotReady", response);
-    if (s_test.active)
+    if (s_test.active || pc_power_service_busy())
         return status_response(sequence, start->algorithm_index, "busy", response);
 
-    /* 默认只执行“保持外部现状”。V2显式电源模拟可接收完整配置，
-     * 但不向真实器件执行；B1上电、训练及ready合同不因模拟被放行。
-     */
-#if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
-    if (!start->external_ready)
-        return status_response(sequence, start->algorithm_index, "notReady", response);
-#endif
 #if defined(B1_RK_UART)
     /* 用户确认RK测试程序已就绪，但仍要求MCU真实电源状态为ON。
      * 不改Boot/电压，也不把心跳或ON状态当作自动DDR-ready确认。
      */
-    if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON)
+    if (start->external_ready && pwr_ctrl_get_state() != PWR_CTRL_STATE_ON)
         return status_response(sequence, start->algorithm_index, "notReady", response);
 #endif
     if (strcmp(start->algorithm_type, "functional") != 0)
@@ -95,24 +114,23 @@ pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
     /* 先保证受理应答能组出，再投递命令；内存分配失败不能偷偷启动RK。 */
     int result = status_response(sequence, start->algorithm_index, NULL, response);
     if (result != PC_DISPATCH_RESPONSE_READY) return result;
-#if defined(B1_RK_UART)
-    /* 先启动实际采样窗口，失败时不能下发RK；仅后台新采样会计入统计。
-     * ponytail: 复用有界毫秒窗口，上限约24.8天，覆盖小时级测试；更长需扩展时基。
-     */
-    int measuring = monitor_idd_start(INT32_MAX, 1U);
-    if (measuring != IF_OK)
-        return status_response(sequence, start->algorithm_index,
-                               measuring == IF_TIMEOUT ? "busy" : "notReady", response);
-#endif
     rk_request_t request = {algorithm->command_id, s_test.cookie + 1U, start->timeout_ms};
-    int queued = rk_link_request(&request);
-    if (queued != 0) {
-#if defined(B1_RK_UART)
-        monitor_idd_cancel(); /* 未下发成功，不保留运行中的孤立窗口。 */
+    const char *error = NULL;
+    uint8_t preparing = 0U;
+#if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
+    if (!start->external_ready) {
+        pc_power_target_t target = {0};
+        target.memory_type = strcmp(start->memory_type, "LPDDR4") == 0
+                           ? DDR_MEMORY_LPDDR4 : DDR_MEMORY_LPDDR4X;
+        memcpy(target.mv, start->target_mv, sizeof(target.mv));
+        if (pc_boot_mode_parse(start->boot_mode, &target.boot_mode) != 0)
+            return status_response(sequence, start->algorithm_index, "invalidArgument", response);
+        error = pc_power_service_start(PC_POWER_PREPARE_TEST, &target, start->reboot);
+        preparing = error == NULL;
+    } else
 #endif
-        return status_response(sequence, start->algorithm_index,
-                               queued == -2 ? "busy" : "notReady", response);
-    }
+        error = queue_test(&request);
+    if (error) return status_response(sequence, start->algorithm_index, error, response);
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     /* 仍投递真实RK命令。队列拒绝时不改变虚拟电源、不清空上一轮统计。 */
     v2_power_sim_test_begin(start);
@@ -124,12 +142,37 @@ pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
     s_test.site_id[sizeof(s_test.site_id) - 1U] = '\0';
     s_test.active = 1U;
     s_test.owner_connected = 1U;
+    s_test.preparing = preparing;
+    s_test.pending = request;
     return PC_DISPATCH_RESPONSE_READY;
 }
 
 int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
 {
     if (s_test.owner_connected && response == NULL) return 0;
+    if (s_test.preparing) {
+        const char *error = NULL;
+        if (!pc_power_service_take(PC_POWER_PREPARE_TEST, &error)) return 0;
+        s_test.preparing = 0U;
+        /* 断线不中断已开始的电源收尾，但不替失联PC偷偷启动尚未下发的算法。 */
+        if (!s_test.owner_connected) { s_test.active = 0U; return 0; }
+        /* 完整启动路径沿用协议约定的completed：只说明准备完成并交接算法。
+         * 先组包再下发，避免内存不足、无法生成应答时仍然启动测试。
+         */
+        if (!error && command_status_response(sequence, s_test.index, "completed", NULL,
+                                              response) != PC_DISPATCH_RESPONSE_READY) {
+            s_test.active = 0U;
+            s_test.owner_connected = 0U;
+            return PC_DISPATCH_ERROR;
+        }
+        if (!error) error = queue_test(&s_test.pending);
+        if (error) {
+            s_test.active = 0U;
+            s_test.owner_connected = 0U;
+            return status_response(sequence, s_test.index, error, response);
+        }
+        return PC_DISPATCH_RESPONSE_READY;
+    }
     rk_response_t result;
     while (rk_link_receive(&result)) {
         if (!s_test.active || result.cookie != s_test.cookie) continue;
@@ -153,12 +196,17 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
         }
         if (!deliver) continue;
         if (result.status == RK_RESPONSE_COMPLETE) {
-            /* 一个算法只上报一个整体结果。没有地址到芯片的映射表时不猜die；
-             * 没有B2编号时mirrorIndex=0；默认未采样为null。
-             */
+            /* 完整结果已经由RK任务校验：未列出的颗粒才可判PASS；先按编号归位。 */
+            pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT] = {{0U, "", 0U}, {0U, "", 0U}};
+            _Static_assert(PC_FUNCTIONAL_DIE_COUNT == RK_RESULT_DIE_COUNT, "DDR颗粒数量必须一致");
+            for (uint8_t i = 0U; i < result.result.failure_count; ++i) {
+                const rk_failure_detail_t *failure = &result.result.failures[i];
+                dies[failure->die].failed = 1U;
+                dies[failure->die].error_address = failure->error_address;
+            }
+            /* 一包包含同一B1的两颗结果，共用siteId、耗时和三轨测量均只出现一次。 */
             cJSON *body = pc_functional_result_create(s_test.name, s_test.index,
-                s_test.site_id, 0U, "", result.result.error_address, result.result.elapsed_ms,
-                result.result.failed);
+                s_test.site_id, result.result.elapsed_ms, dies);
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
             if (!body || !v2_power_sim_add_measurement(body)) {
                 cJSON_Delete(body);

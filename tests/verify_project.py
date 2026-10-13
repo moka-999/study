@@ -29,6 +29,7 @@ EXPECTED = {
     "PWR_4V0_EN": "PC6", "PWR_3V3_EN": "PC7", "PWR_DDR_EN": "PG11",
     "LED1": "PG0", "LED2": "PG1", "LED3": "PG2", "LED4": "PG3",
     "LED5": "PG4", "LED6": "PG5", "LED7": "PG6",
+    "SLOT_ID0": "PB3", "SLOT_ID1": "PB4", "SLOT_ID2": "PB5",
 }
 
 
@@ -109,8 +110,30 @@ def main() -> int:
             "three B1 bicolor LED pairs are not mapped")
     require("B1_LED7_PIN" not in source.split("s_result_led_map", 1)[1].split("};", 1)[0],
             "PG6 single-color status LED must not enter the result LED map")
+    default_task = rtos_source.split("static void StartDefaultTask", 1)[1].split("#if", 1)[0]
+    ready_led = "HAL_GPIO_WritePin(B1_LED7_PORT, B1_LED7_PIN, GPIO_PIN_SET);"
+    require(default_task.index("MX_LWIP_Init();") < default_task.index(ready_led) <
+            default_task.index("for (;;)") and "board_slot_code()" in default_task,
+            "PG6应在默认任务初始化完成后常亮，并读取槽位码；不新增灯任务")
+    require("B1_LED7_PIN, GPIO_PIN_RESET" in source and
+            "B1_LED7_PIN" not in default_task.split("for (;;)", 1)[1],
+            "PG6必须先灭后亮，不能在任务循环中闪烁或随测试结果变化")
+    slot_init = source.split("gpio.Mode = GPIO_MODE_INPUT;", 1)[1].split(
+        "HAL_GPIO_Init(B1_SLOT_ID0_PORT, &gpio);", 1)[0]
+    require("gpio.Pull = GPIO_NOPULL;" in slot_init and
+            "gpio.Pin = B1_SLOT_ID0_PIN | B1_SLOT_ID1_PIN | B1_SLOT_ID2_PIN;" in slot_init,
+            "PB3～PB5必须为输入、无内部上下拉；由B1外部上拉及B2电阻编码")
 
     ioc = (ROOT / "b1.ioc").read_text(encoding="utf-8")
+    for bit, pin in enumerate(("PB3\\ (JTDO/TRACESWO)", "PB4\\ (NJTRST)", "PB5")):
+        require(all(f"{pin}.{setting}" in ioc for setting in (
+            "Signal=GPIO_Input", "GPIO_PuPd=GPIO_NOPULL", f"GPIO_Label=SLOT_ID{bit}")),
+            f"CubeMX必须保留槽位输入{pin}及其位序")
+    require("PG6.GPIO_OutputLevel=GPIO_PIN_RESET" in ioc and
+            "PG6.Signal=GPIO_Output" in ioc, "CubeMX必须保留PG6启动时灭灯")
+    ioc_pins = re.findall(r"^Mcu.Pin\d+=(.+)$", ioc, flags=re.MULTILINE)
+    require(len(ioc_pins) == int(re.search(r"Mcu.PinsNb=(\d+)", ioc).group(1)) ==
+            len(set(ioc_pins)), "CubeMX引脚总数和唯一性必须一致")
     require("SPI4.CLKPolarity=SPI_POLARITY_HIGH" in ioc and
             "SPI4.CLKPhase=SPI_PHASE_2EDGE" in ioc and
             "SPI4.BaudRatePrescaler=SPI_BAUDRATEPRESCALER_256" in ioc,
@@ -255,17 +278,21 @@ def main() -> int:
     require("&i2c1_if" in ddr_source and "&i2c2_if" in ddr_source and
             "&i2c4_if" in ddr_source,
             "VDD1/VDD2/VDDQ未分别绑定I2C1/I2C2/逻辑I2C4")
-    require("DDR_VOLTAGE_STEP_MV      20" in ddr_header and
+    require("DDR_VDD1_STEP_MV         10" in ddr_header and
+            "DDR_VDDX_STEP_MV         5" in ddr_header and
             "DDR_VDD1_WRITABLE_MIN_MV 800" in ddr_header and
             "DDR_VDD1_WRITABLE_MAX_MV 3350" in ddr_header and
             "DDR_VDDX_WRITABLE_MIN_MV 400" in ddr_header and
             "DDR_VDDX_WRITABLE_MAX_MV 1675" in ddr_header and
-            "steps[rail] * DDR_VOLTAGE_STEP_MV" in ddr_source,
-            "DDR三路20mV全可写范围接口缺失")
+            "steps[rail] * _step_mv[rail]" in ddr_source,
+            "DDR三路原生步进全可写范围接口缺失")
     require("B1_PWR_4V0_EN_PORT" in power_source and
             "B1_PWR_3V3_EN_PORT" in power_source and
             "B1_PWR_DDR_EN_PORT" in power_source and
-            "pwr_ctrl_init(NULL);" in source,
+            '#include "board_power_config.h"' in source and
+            "pwr_ctrl_init(&b1_power_default_timing);" in source and
+            "pc_power_service_configure(&b1_power_default_business, &s_power_rk)" in source and
+            ".begin = rk_link_ready_begin" in source and ".poll = rk_link_ready_poll" in source,
             "B1电源状态机未绑定PC6/PC7/PG11安全OFF基线")
     require("POWER_ENABLE_DDR" not in power_source and
             "second_to_tps_config_delay_ms" in power_header and
@@ -296,18 +323,20 @@ def main() -> int:
             "pulse < 9U" in i2c_source,
             "PH4/PH5软件I2C的交易、超时或总线恢复不完整")
 
-    # 穷举确认以标称值为零点的全部20mV档位均能被TPS精确编码。
+    # 穷举确认以标称值为零点的原生档位覆盖每轨全部256个TPS码。
     for nominal, minimum, maximum, factor in (
         (1800, 800, 3350, 2), (1100, 400, 1675, 1),
         (1100, 400, 1675, 1), (600, 400, 1675, 1)):
-        first = (minimum - nominal + 19) // 20
-        last = (maximum - nominal) // 20
+        step_mv = factor * 5
+        first = (minimum - nominal) // step_mv
+        last = (maximum - nominal) // step_mv
+        require(last - first + 1 == 256, "每轨应有256个原生档位")
         for step in range(first, last + 1):
-            target = nominal + step * 20
+            target = nominal + step * step_mv
             base = target // factor
             require(target % factor == 0 and 400 <= base <= 1675 and
                     (base - 400) % 5 == 0,
-                    f"20mV step cannot be encoded: nominal={nominal}, step={step}")
+                    f"原生档位不能精确编码: nominal={nominal}, step={step}")
 
     linker = (ROOT / "STM32H743xx_FLASH.ld").read_text(encoding="utf-8")
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
@@ -453,9 +482,10 @@ def main() -> int:
                 "monitor_idd_start", "monitor_idd_finish", "pc_test_add_measurement")) and
             "pc_test_add_statistics" in pc_dispatch,
             "B1真实算法必须受ON门控，统计及异步结果都须接入正式TCP")
-    require("if(ENABLE_V2_POWER_SIMULATION OR ENABLE_RK_GATEWAY_TEST)" in cmake and
-            "FATAL_ERROR" in cmake,
-            "B1构建必须拒绝V2电源模拟和旧RK网关联调开关")
+    require("if(ENABLE_V2_POWER_SIMULATION OR ENABLE_RK_GATEWAY_TEST OR ENABLE_V2_MATS_FAIL_TEST)" in cmake and
+            "FATAL_ERROR" in cmake and "ENABLE_V2_MATS_FAIL_TEST" not in pc_service and
+            '"SAF"' not in pc_service,
+            "B1必须拒绝V2模拟开关，且正式结果服务不包含MATS假FAIL/SAF注入")
     require(all(name in rtos_source and name in task_header for name in (
         "StartTcpServerTask", "StartRkTask", "StartMonitorTask")),
             "B1正式任务未统一声明或未在RTOS初始化中接入")
@@ -506,25 +536,32 @@ def main() -> int:
     uart_router = (ROOT / "HAL_Drv/uart_router.c").read_text(encoding="utf-8")
     uart_hw = (ROOT / "HAL_Drv/uart_hw.c").read_text(encoding="utf-8")
     interfaces = (ROOT / "HAL_Drv/board_interfaces.h").read_text(encoding="utf-8")
-    require("B1_RK_UART" in rtos_source and
-            all(re.search(rf"uart_register\(\s*0U?\s*,\s*&{port}\s*\)", rtos_source)
-                for port in ("uart4_if", "uart2_if")) and
-            not re.search(r"uart_register\(\s*1U?\s*,|\buart1_if\b", rtos_source) and
+    require(all(f"uart_register(UART_PORT_{slot}, &{port})" in rtos_source
+                for slot, port in (("RK_PROTOCOL", "uart4_if"), ("RK_DEBUG", "uart2_if"),
+                                   ("CONSOLE", "uart1_if"))) and
+            'if(NOT B1_RK_UART STREQUAL "4")' in cmake and
+            "B1_LOG_DEFAULT_SOURCE" in cmake and "log_console_process();" in rtos_source and
             "uart_start_all()" in rtos_source,
-            "B1仅选择UART4/USART2中的一路注册slot0，USART1不得进入RK路由")
+            "B1须固定UART4协议、USART2日志输入及USART1控制台，不再允许切换协议口")
     require("extern uart_if_t uart4_if;" in interfaces and
-            "extern uart_if_t uart2_if;" in interfaces and "uart1_if" not in interfaces and
+            "extern uart_if_t uart2_if;" in interfaces and "extern uart_if_t uart1_if;" in interfaces and
             "uart_tx_mutex_init();" in uart_router and "uart_tx_isr_attach();" in uart_router,
             "B1 UART实例必须归属板级接口，并在启动接收前建立TX锁和中断钩子")
     require('section(".uart_dma")' in uart_router and
             re.search(r"\.uart_dma\s*\(NOLOAD\)\s*:\s*\{[^}]*\}\s*>\s*RAM\b", linker) and
             ".lwip_heap" in linker and "0x30005000" in linker,
             "UART DMA必须放AXI RAM，且显式预留D2中的固定LwIP堆防重叠")
-    require("DMA_REQUEST_UART4_RX" in source and "DMA_REQUEST_USART2_RX" in source and
+    require(all(f"DMA_REQUEST_{port}_RX" in source for port in ("UART4", "USART2", "USART1")) and
+            "DMA1_Stream2_IRQHandler" in interrupts and "USART1_IRQHandler" in interrupts and
             "DMA_NORMAL" in source and "HAL_UARTEx_ReceiveToIdle_DMA" in uart_hw and
             "DMA_IT_HT" in uart_hw and "HAL_UART_RXEVENT_HT" in uart_router and
             "HAL_DMA_IRQHandler" in interrupts and "HAL_UART_IRQHandler" in interrupts,
             "B1 UART RX必须使用NORMAL DMA+IDLE，并忽略HT重复前缀")
+    console = (ROOT / "Core/Src/log_console.c").read_text(encoding="utf-8")
+    require("uart == &huart1 ? 0U" in uart_hw and "instance == USART2 ? UART_MODE_RX" in source and
+            "UART_PORT_RK_PROTOCOL" not in console and '"log mcu"' in console and '"log rk"' in console and
+            "HAL_UART_Transmit(" not in source + console and "Core/Src/log_console.c" in cmake,
+            "日志须非阻塞且隔离协议，RK调试口只能接收，启动日志也必须经过来源选择")
     require(not re.search(r"\bSCB_(?:Enable|Clean|Invalidate)DCache\w*\s*\(",
                           source + uart_hw + uart_router + formal_tasks),
             "B1保持D-Cache关闭，新增UART/任务不能加入cache维护调用")
@@ -585,7 +622,7 @@ def main() -> int:
     print("FreeRTOS 128KiB heap, LwIP IPv4, YT8512H reset and UID MAC contract PASS")
     print("AD7124-4 driver, SPI4-only binding and conservative mode-3 clock PASS")
     print("MCP4725 Boot map, Fast Write and I2C2-only binding contract PASS")
-    print("TPS/PAC/AD monitor, pwr_ctrl and all 20mV DDR steps contract PASS")
+    print("TPS/PAC/AD monitor, pwr_ctrl and all native DDR steps contract PASS")
     print("PC header, strict cJSON, algorithm/test-result JSON and allocator contract PASS")
     print("PC state/command tables, RK error propagation and formal task migration PASS")
     print("Power-gated SPI4 monitor/RK traffic, single RK UART and AXI DMA contract PASS")

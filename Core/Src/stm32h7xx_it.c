@@ -16,8 +16,10 @@ void TIM1_UP_IRQHandler(void) { HAL_TIM_IRQHandler(&htim1); }
 /* ETH DMA 中断只交给 HAL，完成回调再唤醒 LwIP 收发线程。 */
 void ETH_IRQHandler(void) { HAL_ETH_IRQHandler(&heth); }
 
-/* 两路候选RK UART的接收DMA/IDLE与TXE统一交给HAL钩子处理。 */
+/* 协议、RK日志与本地控制台的独立DMA/IDLE/TXE统一交给HAL钩子。 */
 void DMA1_Stream0_IRQHandler(void) { HAL_DMA_IRQHandler(&hdma_uart4_rx); }
 void DMA1_Stream1_IRQHandler(void) { HAL_DMA_IRQHandler(&hdma_usart2_rx); }
+void DMA1_Stream2_IRQHandler(void) { HAL_DMA_IRQHandler(&hdma_usart1_rx); }
 void UART4_IRQHandler(void) { HAL_UART_IRQHandler(&huart4); }
 void USART2_IRQHandler(void) { HAL_UART_IRQHandler(&huart2); }
+void USART1_IRQHandler(void) { HAL_UART_IRQHandler(&huart1); }

@@ -15,6 +15,9 @@
 #include "lwipopts.h"
 #include "ota_app.h"
 #include "flash_bsp.h"
+#include "log_console.h"
+#include "board_identity.h"
+#include <stdio.h>
 
 /* 链接脚本为固定LwIP堆预留32KiB，其中需包含分配器元数据和对齐空间。 */
 _Static_assert(MEM_SIZE <= 30U * 1024U, "Update B1 .lwip_heap reservation before growing MEM_SIZE");
@@ -39,12 +42,18 @@ static void StartDefaultTask(void *argument)
     (void)argument;
     /* 队列已在调度前注册；在调度后开启DMA，FromISR才有可用的内核上下文。 */
     uart_start_all();
+    log_console_start();
     MX_LWIP_Init();
+
+    /* 只表示MCU已完成启动初始化，不表示RK/DDR上电、网络连通或测试PASS。 */
+    HAL_GPIO_WritePin(B1_LED7_PORT, B1_LED7_PIN, GPIO_PIN_SET);
+    printf("B1 slot code: %u (PB5..PB3)\r\n", (unsigned int)board_slot_code());
 
     for (;;) {
         /* 500ms 结果灯状态机必须非阻塞推进，后续网关任务才能并行运行。 */
         result_led_process(HAL_GetTick());
         monitor_power_process(HAL_GetTick());
+        log_console_process();
         ota_app_progress(OTA_TASK_DEFAULT);
         osDelay(1U);
     }
@@ -75,15 +84,14 @@ void MX_FREERTOS_Init(void)
     if (!rkRequestQueue || !rkResponseQueue || !monitor_task_prepare())
         Error_Handler();
 
-    /* UART4为软件暂选值，实机确认后用CMake B1_RK_UART=2切换USART2。
-     * 同一次构建只向slot0注册一路，不把本地USART1或第二候选口当网关。 */
-#if B1_RK_UART == 4
-    uart_register(0, &uart4_if);
-#elif B1_RK_UART == 2
-    uart_register(0, &uart2_if);
-#else
-#error "B1_RK_UART must be 4 (UART4) or 2 (USART2)"
-#endif
+    /* 三路独立接收队列；只有slot0进入RK协议，另外两路只交给本地日志模块。 */
+    uart_register(UART_PORT_RK_PROTOCOL, &uart4_if);
+    uart_register(UART_PORT_RK_DEBUG, &uart2_if);
+    uart_register(UART_PORT_CONSOLE, &uart1_if);
+    uart_rx_diagnostics_t uart_diagnostics;
+    for (int port = 0; port < UART_PORT_COUNT; ++port) {
+        if (!uart_get_rx_diagnostics(port, &uart_diagnostics)) Error_Handler();
+    }
 
     if (osThreadNew(StartDefaultTask, NULL, &s_default_task_attributes) == NULL) {
         Error_Handler();

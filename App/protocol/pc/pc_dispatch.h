@@ -15,12 +15,8 @@
 extern "C" {
 #endif
 
-/* 容纳单条功能测试结果及最长合法FRU标签；含18字节头，仍受4096字节PDU限制。 */
-#if defined(B1_RK_UART) || (defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION)
-#define PC_DISPATCH_RESPONSE_CAPACITY 1024U /* 容纳附加的18项测量统计。 */
-#else
-#define PC_DISPATCH_RESPONSE_CAPACITY 512U
-#endif
+/* 容纳双颗DDR结果、最长转义FRU标签和18项共用统计；含18字节头，PDU上限仍为4096。 */
+#define PC_DISPATCH_RESPONSE_CAPACITY 1024U
 
 typedef enum {
     PC_DISPATCH_ERROR = -1,          /* 接口参数或内部组包失败，应关闭连接。 */
@@ -51,7 +47,7 @@ pc_dispatch_result_t pc_dispatch_handle(
     uint32_t mcu_tx_sequence,
     pc_dispatch_response_t *response);
 
-/** TCP有界等待后调用，处理业务空闲超时；不读写socket、不推进发送序号。 */
+/** TCP有界等待后调用；无连接也推进电源编排和业务超时，不读写socket或推进Seq。 */
 void pc_dispatch_poll(void);
 /* 由唯一TCP任务周期调用，领取异步完整PDU；1就绪、0无、-1失败须关闭连接。
  * 使用传入的MCU发送序号，不回显PC/RK序号。成功发送后TCP任务才递增计数。

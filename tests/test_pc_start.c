@@ -8,12 +8,13 @@
 #include "ota_app.h"
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #define S1(x) #x
 #define S(x) S1(x)
 #define CHECK(c) do { if (!(c)) fail("FAIL " S(__LINE__) ": " #c "\n"); } while (0)
-#define VALID_JSON "{\"algorithmType\":\"parametric\",\"algorithmName\":\"idd_0\",\"algorithmIndex\":1,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1Steps\":0,\"vdd2Steps\":0,\"vddqSteps\":0},\"reboot\":true,\"bootMode\":\"emmc\"}"
+#define VALID_JSON "{\"algorithmType\":\"parametric\",\"algorithmName\":\"idd_0\",\"algorithmIndex\":1,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":true,\"bootMode\":\"emmc\"}"
 static int confirmed = 1;
 static int query_monitor;
 
@@ -43,12 +44,20 @@ static _Noreturn void finish(uint32_t code)
 }
 static _Noreturn void fail(const char *text) { message(text); finish(1U); }
 void test_abort(void) { fail("FAIL CPU exception\n"); }
+size_t log_console_write(const char *text, size_t length)
+{ (void)text; (void)length; fail("FAIL unexpected power log\n"); }
 
 /* 0103仅允许OTA健康查询；任何电源、DAC、采样、Flash或其他业务调用均失败。 */
 int ota_app_is_confirmed(void) { return confirmed; }
+void ota_download_get_progress(ota_download_progress_t *out)
+{ memset(out, 0, sizeof(*out)); out->state = OTA_DOWNLOAD_IDLE; }
 uint32_t HAL_GetTick(void) { if (query_monitor) return 1000U; fail("FAIL unexpected HAL_GetTick\n"); }
 pwr_ctrl_state_t pwr_ctrl_get_state(void) { fail("FAIL unexpected power access\n"); }
 pwr_ctrl_result_t monitor_request_power_on(uint32_t now) { (void)now; fail("FAIL power on\n"); }
+uint8_t pwr_ctrl_is_configured(void) { fail("FAIL unexpected power configuration access\n"); }
+pwr_ctrl_result_t monitor_request_training_power_on(ddr_memory_type_t type, const uint16_t mv[3], uint32_t now)
+{ (void)type; (void)mv; (void)now; fail("FAIL training power on\n"); }
+pwr_ctrl_result_t monitor_request_power_off(uint32_t now) { (void)now; fail("FAIL power off\n"); }
 monitor_boot_result_t monitor_set_boot_mode(boot_mode_t mode) { (void)mode; fail("FAIL Boot write\n"); }
 monitor_boot_result_t monitor_get_boot_mode(boot_mode_t *mode, uint16_t *mv)
 { (void)mode; (void)mv; fail("FAIL Boot query\n"); }
@@ -68,6 +77,13 @@ int monitor_get_latest(monitor_snapshot_t *out)
         out->memory.idd[rail].current_ma = pac1934_current_ma(0x8000U, PAC1934_RSENSE_B1_UOHM);
         out->memory.idd[rail].power_mw = pac1934_power_mw(0x08000000U, PAC1934_RSENSE_B1_UOHM);
     }
+    return 1;
+}
+/* 采样查询只读空统计，任何其它路径读取统计均立即判失败。 */
+int monitor_idd_get(idd_stats_t *out)
+{
+    if (!query_monitor) fail("FAIL statistics access\n");
+    memset(out, 0, sizeof(*out));
     return 1;
 }
 HAL_StatusTypeDef result_led_set(result_led_target_t target, result_led_state_t state)
@@ -122,10 +138,65 @@ static void replace(cJSON *root, const char *key, cJSON *value)
     CHECK(value && cJSON_ReplaceItemInObjectCaseSensitive(root, key, value));
 }
 
+/* 穷举两种内存、每轨256个原生码，直接执行正式JSON解析和共享电压换算。 */
+static void test_native_power_mv(void)
+{
+    const char *const types[] = {"LPDDR4", "LPDDR4X"};
+    const char *const keys[] = {"vdd1", "vdd2", "vddq"};
+    const int16_t minimum_steps[2][3] = {{-100, -140, -140}, {-100, -140, -40}};
+    const uint16_t nominal[2][3] = {{1800U, 1100U, 1100U}, {1800U, 1100U, 600U}};
+    const uint16_t minimum[] = {800U, 400U, 400U};
+    const uint16_t step_mv[] = {10U, 5U, 5U};
+    for (unsigned type = 0U; type < 2U; ++type) {
+        for (unsigned rail = 0U; rail < 3U; ++rail) {
+            cJSON *root = base_request();
+            cJSON *power = cJSON_GetObjectItemCaseSensitive(root, "power");
+            replace(power, "memoryType", cJSON_CreateString(types[type]));
+            replace(power, "vddq", cJSON_CreateString(type == 0U ? "1100" : "600"));
+            cJSON *number = cJSON_GetObjectItemCaseSensitive(power, keys[rail]);
+            char text[16];
+            pc_test_start_view_t view;
+            for (unsigned code = 0U; code < 256U; ++code) {
+                int16_t step = (int16_t)(minimum_steps[type][rail] + (int)code);
+                snprintf(text, sizeof(text), "%u", minimum[rail] + code * step_mv[rail]);
+                CHECK(cJSON_SetValuestring(number, text));
+                CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK);
+                CHECK(view.power_steps[rail] == step);
+                for (unsigned other = 0U; other < 3U; ++other) {
+                    CHECK(view.target_mv[other] == (other == rail ?
+                        minimum[rail] + code * step_mv[rail] : nominal[type][other]));
+                }
+            }
+            /* 上下边界各越1档必须拒绝，失败不能交付部分目标给业务层。 */
+            const uint16_t invalid[] = {(uint16_t)(minimum[rail] - step_mv[rail]),
+                                        (uint16_t)(minimum[rail] + 256U * step_mv[rail]),
+                                        (uint16_t)(nominal[type][rail] - 1U),
+                                        (uint16_t)(nominal[type][rail] + 1U)};
+            for (unsigned i = 0U; i < 4U; ++i) {
+                snprintf(text, sizeof(text), "%u", invalid[i]);
+                CHECK(cJSON_SetValuestring(number, text));
+                memset(&view, 0xA5, sizeof(view));
+                pc_test_start_view_t before = view;
+                CHECK(pc_test_start_parse(root, &view) != PC_TEST_JSON_OK);
+                CHECK(memcmp(&view, &before, sizeof(view)) == 0);
+                const char *memory_type = "unchanged";
+                int16_t steps[] = {1, 2, 3};
+                uint16_t mv[] = {11, 22, 33};
+                CHECK(pc_power_parse(power, &memory_type, steps, mv) != PC_TEST_JSON_OK);
+                CHECK(strcmp(memory_type, "unchanged") == 0 && steps[0] == 1 && steps[1] == 2 && steps[2] == 3);
+                CHECK(mv[0] == 11 && mv[1] == 22 && mv[2] == 33);
+            }
+            cJSON_Delete(root);
+        }
+    }
+    message("PASS: string mV, 1536 exact targets, range/grid rejection and unchanged outputs\n");
+}
+
 void test_main(void)
 {
+    test_native_power_mv();
     const char *const required[] = {"algorithmType", "algorithmName", "algorithmIndex", "power", "reboot", "bootMode"};
-    const char *const power_keys[] = {"memoryType", "vdd1Steps", "vdd2Steps", "vddqSteps"};
+    const char *const power_keys[] = {"memoryType", "vdd1", "vdd2", "vddq"};
     cJSON *root = base_request();
     pc_test_start_view_t view;
     CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK);
@@ -144,6 +215,7 @@ void test_main(void)
         replace(root, "reboot", cJSON_CreateBool(0));
         replace(root, "algorithmIndex", cJSON_CreateNumber(i == 0U ? 0.0 : 4294967295.0));
         replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "memoryType", cJSON_CreateString("LPDDR4"));
+        replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vddq", cJSON_CreateString("1100"));
         CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK && view.target_mv[2] == 1100U && view.reboot == 0U);
         check_request(root, "notReady", 1, i == 0U ? 0U : UINT32_MAX);
     }
@@ -186,20 +258,35 @@ void test_main(void)
     }
     root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "memoryType", cJSON_CreateString("LPDDR5"));
     check_request(root, "invalidArgument", 1, 1U);
-    const double invalid_steps[] = {-32769.0, 32768.0, 0.5, 78.0, -51.0};
-    for (size_t i = 0U; i < 5U; i++) {
-        root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1Steps", cJSON_CreateNumber(invalid_steps[i]));
+    const char *const invalid_mv[] = {"", " ", " 1800", "1800 ", "+1800", "-1800", "1800.0",
+        "1.8e3", "0x708", "1800mV", "1800x", "0", "65536", "999999999999999999999999",
+        "1801", "1799", "790", "3360", "１８００"};
+    for (size_t i = 0U; i < sizeof(invalid_mv) / sizeof(invalid_mv[0]); i++) {
+        root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1", cJSON_CreateString(invalid_mv[i]));
         check_request(root, "invalidArgument", 1, 1U);
     }
-    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vddqSteps", cJSON_CreateBool(1));
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1", cJSON_CreateNumber(1800));
     check_request(root, "invalidArgument", 1, 1U);
-    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vddqSteps", cJSON_CreateNumber(54));
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vddq", cJSON_CreateBool(1));
     check_request(root, "invalidArgument", 1, 1U);
-    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd2Steps", cJSON_CreateNumber(29));
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vddq", cJSON_CreateString("1680"));
     check_request(root, "invalidArgument", 1, 1U);
-    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1Steps", cJSON_CreateNumber(77));
-    CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK && view.target_mv[0] == 3340U);
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd2", cJSON_CreateString("1680"));
+    check_request(root, "invalidArgument", 1, 1U);
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1", cJSON_CreateString("3350"));
+    CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK && view.target_mv[0] == 3350U);
     check_request(root, "notReady", 1, 1U); /* 可写但极端值也不执行，不能当成安全批准。 */
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1", cJSON_CreateString("01800"));
+    CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK && view.target_mv[0] == 1800U);
+    cJSON_Delete(root);
+    /* 旧键和新旧混用均拒绝，不能把电压误当档位；错误仍关联原algorithmIndex。 */
+    const char *const old_keys[] = {"vdd1Steps", "vdd2Steps", "vddqSteps"};
+    for (unsigned i = 0U; i < 3U; ++i) {
+        root = base_request(); cJSON *power = cJSON_GetObjectItemCaseSensitive(root, "power");
+        cJSON_DeleteItemFromObjectCaseSensitive(power, power_keys[i + 1U]);
+        CHECK(cJSON_AddNumberToObject(power, old_keys[i], 0));
+        check_request(root, "invalidArgument", 1, 1U);
+    }
 
     /* 直接构造非有限cJSON值，证明浮点转整数前已拒绝；失败不改变输出视图。 */
     for (size_t i = 0U; i < 2U; i++) {
@@ -213,7 +300,8 @@ void test_main(void)
         CHECK(pc_test_start_parse(root, &view) != PC_TEST_JSON_OK && memcmp(&view, &before, sizeof(view)) == 0);
         cJSON_Delete(root);
         root = base_request();
-        number = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd2Steps");
+        replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd2", cJSON_CreateNumber(1100));
+        number = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd2");
         number->valuedouble = i == 0U ? NAN : INFINITY;
         CHECK(pc_test_start_parse(root, &view) != PC_TEST_JSON_OK);
         cJSON_Delete(root);

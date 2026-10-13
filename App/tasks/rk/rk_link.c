@@ -63,6 +63,61 @@ uint64_t rk_link_next_sequence(void)
     taskEXIT_CRITICAL();
     return sequence;
 }
+
+/* TCP任务布防、RK任务更新；64位Seq及令牌须在同一临界区读写。
+ * 上电前布防后，首个成功下发的心跳确定下界，拒绝旧启动/未来Seq；
+ * RK定时发送可滞后、多帧同Seq，只要落在本轮窗口即有效。
+ */
+static struct {
+    uint32_t token;
+    uint64_t arm_sequence, first_tx, last_tx;
+    uint8_t tx_seen, ready;
+} s_ready;
+
+int rk_link_ready_begin(uint32_t token)
+{
+    if (token == 0U) return -1;
+    taskENTER_CRITICAL();
+    memset(&s_ready, 0, sizeof(s_ready));
+    s_ready.token = token;
+    s_ready.arm_sequence = s_next_sequence;
+    taskEXIT_CRITICAL();
+    return 0;
+}
+
+int rk_link_ready_poll(uint32_t token)
+{
+    taskENTER_CRITICAL();
+    int result = token != 0U && token == s_ready.token ? s_ready.ready : -1;
+    taskEXIT_CRITICAL();
+    return result;
+}
+
+void rk_link_ready_note_tx(uint64_t sequence)
+{
+    taskENTER_CRITICAL();
+    /* 排除布防前已经分配Seq、但因UART锁/任务切换而较晚返回的旧发送。 */
+    if (s_ready.token != 0U && !s_ready.ready &&
+        (uint64_t)(sequence - s_ready.arm_sequence) <= INT64_MAX) {
+        if (!s_ready.tx_seen) s_ready.first_tx = sequence;
+        s_ready.last_tx = sequence;
+        s_ready.tx_seen = 1U;
+    }
+    taskEXIT_CRITICAL();
+}
+
+void rk_link_ready_note_rx(const tlv_frame_t *frame)
+{
+    if (frame == NULL || !(frame->count == 0U ||
+        (frame->count == 1U && frame->units[0].type == TLV_TYPE_HEARTBEAT &&
+         frame->units[0].data_len == 0U))) return;
+    taskENTER_CRITICAL();
+    if (s_ready.token != 0U && s_ready.tx_seen &&
+        (uint64_t)(frame->sequence - s_ready.first_tx) <=
+        (uint64_t)(s_ready.last_tx - s_ready.first_tx)) s_ready.ready = 1U;
+    taskEXIT_CRITICAL();
+}
+
 int rk_link_request(const rk_request_t *request)
 {
     if (request == NULL || rkRequestQueue == NULL || rkResponseQueue == NULL ||
