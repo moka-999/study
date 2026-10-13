@@ -33,6 +33,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "pwr_ctrl.h"
+#include "pc_power_service.h"
 #include "result_led.h"
 #if defined(ENABLE_RESULT_LED_WAVE_TEST) && ENABLE_RESULT_LED_WAVE_TEST
 extern void result_led_wave_early_init(void);
@@ -173,9 +174,11 @@ int main(void)
 #endif
   /*
    * 未确认 PC6/PC7 真板时序前不加载默认配置，电源保持安全关闭。
-   * 后续完成硬件评审后，只需在此传入经过批准的 pwr_ctrl_config_t。
+   * 板级联调在此提供pwr_ctrl_config_t及pc_power_config_t/RK确认适配器；
+   * 两层配置分别控制轨间时序和业务等待，接入方法见doc/power_sequence_20261012.md。
    */
   pwr_ctrl_init(NULL);
+  (void)pc_power_service_configure(NULL, NULL);
 
   /* USER CODE END 2 */
 

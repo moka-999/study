@@ -67,7 +67,7 @@ def run(host: str, port: int) -> int:
                               0x55667788, 0)
         body = recv_exact(connection, fields[0] - HEADER_SIZE)
     assert json.loads(body.decode("utf-8")) == {
-        "testerName": "LPDDR4/X_200B",
+        "testerName": "JMCT-4000",
         "testerVersion": "D00",
         "testBoard": "RK3588_test",
     }

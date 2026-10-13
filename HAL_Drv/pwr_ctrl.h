@@ -113,7 +113,7 @@ pwr_ctrl_result_t pwr_ctrl_select_memory_type(ddr_memory_type_t type);
 
 /**
  * @brief 在ON状态同步写入三轨相对标称值的拉偏档位。
- * @param[in] steps 非NULL、至少3项，依次VDD1/VDD2/VDDQ，每档20mV。
+ * @param[in] steps 非NULL、至少3项，依次VDD1/VDD2/VDDQ，每档10/5/5mV。
  * @return OK写入成功；ERR_PARAM目标不可编码；ERR_BUSY非ON；ERR_FAULT已故障
  *         或任一轨写失败（立即关断全部使能并进入FAULT）。
  * @note 调用方须确保RK已完成DDR初始化；当前未实现RK ready强制门控。

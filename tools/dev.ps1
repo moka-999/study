@@ -8,10 +8,14 @@
     [int]$Port = 8888,
     [ValidateSet('NO', 'YES')][string]$ConfirmIdle = 'NO',
     [switch]$LegacyOtaActions,
-    [switch]$PowerSimulation
+    [switch]$PowerSimulation,
+    [switch]$MatsFailTest
 )
 
 $ErrorActionPreference = 'Stop'
+if ($MatsFailTest -and (-not $PowerSimulation -or $Task -notin @('ota-build', 'ota-swd', 'ota-net'))) {
+    throw '-MatsFailTest 仅允许配合 -PowerSimulation 生成或安装V2联调镜像。'
+}
 if ($PowerSimulation -and $Task -notin @('ota-build', 'ota-swd', 'ota-net')) {
     throw '-PowerSimulation 仅用于V2的OTA构建/下载入口，RK必须已经独立启动。'
 }
@@ -81,6 +85,7 @@ if ($Task -in @('ota-build', 'ota-swd', 'ota-net')) {
         '--ninja', (Find-BundledExe 'ninja' 'ninja.exe')
     )
     if ($PowerSimulation) { $otaArgs += '--power-simulation' }
+    if ($MatsFailTest) { $otaArgs += '--mats-fail-test' }
     if ($action -ne 'build') {
         if ($ConfirmIdle -ne 'YES') { throw '请先停止测试并协调B2温控；确认允许复位后加 -ConfirmIdle YES。' }
         $otaArgs += '--confirm-idle'
@@ -200,6 +205,7 @@ $cmakeArgs = @(
     $pcNetTestOption
     '-DENABLE_RK_GATEWAY_TEST=OFF'
     '-DENABLE_V2_POWER_SIMULATION=OFF'
+    '-DENABLE_V2_MATS_FAIL_TEST=OFF'
 )
 if (-not (Test-Path -LiteralPath $cache)) {
     $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake"

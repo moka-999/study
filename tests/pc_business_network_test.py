@@ -85,7 +85,7 @@ def run(host: str, port: int) -> None:
         # 0103只验证协议软件接入；RK接口未定，合法请求也必须明确拒绝且不启动电源。
         start_request = {
             "algorithmType": "parametric", "algorithmName": "idd_0", "algorithmIndex": 7,
-            "power": {"memoryType": "LPDDR4X", "vdd1Steps": 0, "vdd2Steps": 0, "vddqSteps": 0},
+            "power": {"memoryType": "LPDDR4X", "vdd1": "1800", "vdd2": "1100", "vddq": "600"},
             "reboot": True, "bootMode": "emmc",
         }
         body = send_json(connection, 0x0103, start_request, pc_seq, mcu_seq, 0x0006)
@@ -147,16 +147,16 @@ def run(host: str, port: int) -> None:
 
         nominal = {
             "memoryType": "LPDDR4X",
-            "vdd1Steps": 0, "vdd2Steps": 0, "vddqSteps": 0,
+            "vdd1": "1800", "vdd2": "1100", "vddq": "600",
         }
         body = send_json(connection, 0x0509, nominal,
                          pc_seq, mcu_seq, 0x0006)
         assert body == {"requestCommandId": 0x0509, "status": "completed"}
-        print("[PASS] 0x0509 OFF+全零选择LPDDR4X")
+        print("[PASS] 0x0509 OFF+三轨标称电压选择LPDDR4X")
         passed += 1
         mcu_seq += 1; pc_seq += 1
 
-        adjusted = dict(nominal, vdd1Steps=1)
+        adjusted = dict(nominal, vdd1="1810")
         body = send_json(connection, 0x0509, adjusted,
                          pc_seq, mcu_seq, 0x0006)
         assert body["status"] == "failed" and body["errorCode"] == "invalidState"
@@ -164,11 +164,11 @@ def run(host: str, port: int) -> None:
         passed += 1
         mcu_seq += 1; pc_seq += 1
 
-        out_of_range = dict(nominal, vdd1Steps=78)
+        out_of_range = dict(nominal, vdd1="3360")
         body = send_json(connection, 0x0509, out_of_range,
                          pc_seq, mcu_seq, 0x0006)
         assert body["errorCode"] == "invalidArgument"
-        print("[PASS] 0x0509拒绝20mV档位越界")
+        print("[PASS] 0x0509拒绝原生档位越界")
         passed += 1
         mcu_seq += 1; pc_seq += 1
 

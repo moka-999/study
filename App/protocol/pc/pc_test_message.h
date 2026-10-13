@@ -1,9 +1,10 @@
-/* PC测试业务JSON：完整启动请求的纯校验与芯片测试结果组包。 */
+/* PC电源与测试业务JSON：目标电压/启动请求的纯校验与芯片测试结果组包。 */
 #ifndef PC_TEST_MESSAGE_H
 #define PC_TEST_MESSAGE_H
 
 #include "cJSON.h"
 #include "pc_command.h"
+#include "mcp4725.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -30,7 +31,7 @@ typedef struct {
     const char *algorithm_name;  /* 借用root内字符串，不能单独释放。 */
     uint32_t algorithm_index;    /* PC计划项编号，有限的0..UINT32_MAX整数。 */
     const char *memory_type;     /* LPDDR4或LPDDR4X；借用power中的字符串。 */
-    int16_t power_steps[3];      /* VDD1/VDD2/VDDQ相对标称值的20mV有符号档位。 */
+    int16_t power_steps[3];      /* 从字符串mV换算的内部档位，依次每档10/5/5mV；不是PC字段。 */
     uint16_t target_mv[3];       /* 三路目标mV；可编码不等于DDR安全或已经生效。 */
     uint8_t reboot;              /* JSON布尔值，false=0、true=1。 */
     const char *boot_mode;       /* 已支持的Boot模式名称；不是PXE开关。 */
@@ -38,11 +39,14 @@ typedef struct {
     uint32_t timeout_ms;         /* 最终结果等待毫秒数；0=不限制，非零最多86400000。 */
 } pc_test_start_view_t;
 
+/** 将已定义的PC启动介质名称转为DAC业务枚举；0成功，-1无效，失败不改输出。 */
+int pc_boot_mode_parse(const char *name, boot_mode_t *mode);
+
 /* MCU准备上报给PC的一条芯片测试结果；本结构不拥有字符串，组包时复制。 */
 typedef struct {
     const char *site_id;       /* 辅助函数接受空串；业务有效性尚待冻结。 */
-    uint32_t mirror_index;     /* B2测试机编号。 */
-    int32_t test_status;       /* 测试状态码，业务枚举待冻结。 */
+    uint32_t mirror_index;     /* DDR标志：0为第一颗、1为第二颗；RK原值不作偏移。 */
+    int32_t test_status;       /* PC测试结论：0=FAIL、1=PASS；不能直接填RK的FAIL位。 */
     const char *result_desc;   /* 结果描述，UTF-8字符串；NULL或空串均上报""。 */
 } pc_chip_test_result_t;
 
@@ -55,6 +59,20 @@ typedef struct {
 pc_test_json_result_t pc_test_start_read_index(const cJSON *root, uint32_t *index);
 
 /**
+ * @brief 0103.power与0509共用的四字段校验；不访问硬件、不修改电源状态。
+ * @param[in] root 仅含memoryType/vdd1/vdd2/vddq；电压是非空十进制数字串，单位mV。
+ * @param[out] memory_type 借用root中的LPDDR4或LPDDR4X字符串；root释放后失效。
+ * @param[out] steps 三项内部有符号档位，分别为(目标mV-该类型标称mV)/(10/5/5mV)。
+ * @param[out] target_mv 三项绝对目标，依次为VDD1/VDD2/VDDQ，单位mV。
+ * @return PC_TEST_JSON_OK成功；字段、格式、越界或不能精确编码时返回错误。
+ * @note 输出均须非NULL，失败全部保持原值。拒绝旧Steps键、数值型电压、符号、
+ *       空白、小数、指数和单位，不做取整；"0"不是保持现状，而是越界电压。
+ *       完整PC正文先经pc_json_parse_object拒绝内嵌NUL；可编码不代表DDR安全。
+ */
+pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type,
+                                      int16_t steps[3], uint16_t target_mv[3]);
+
+/**
  * @brief 校验START_TEST六个必填字段及可选timeoutMs，不操作任何硬件。
  * @param[in] root 非NULL JSON对象；网络正文须先经pc_json_parse_object拒绝内嵌NUL。
  * @param[out] view 非NULL输出视图，失败不修改。
@@ -63,7 +81,8 @@ pc_test_json_result_t pc_test_start_read_index(const cJSON *root, uint32_t *inde
  *       power和bootMode同时为null且reboot=false时，输出external_ready=1，
  *       memory_type/boot_mode为NULL且目标电压为0；0不表示要求输出0V。
  *       timeoutMs省略或为0表示不限制结果等待，非零整数范围为1..86400000毫秒。
- *       电压对象仍严格要求四个字段。TPS可编码不等于DDR安全范围已经批准。
+ *       电压对象严格要求memoryType和字符串mV的vdd1/vdd2/vddq，复用pc_power_parse。
+ *       TPS可编码不等于DDR安全范围已经批准。
  *       algorithmName只校验字符串类型，具体算法支持情况由命令表决定。
  */
 pc_test_json_result_t pc_test_start_parse(const cJSON *root,
@@ -76,7 +95,7 @@ pc_test_json_result_t pc_test_start_parse(const cJSON *root,
  * @param[in] results 含result_count项的数组；仅在项数为0时可为NULL。
  * @param[in] result_count 结果项数；每项site_id须为非NULL的NUL结尾字符串。
  * @return 新cJSON对象，调用方用cJSON_Delete释放；参数或分配失败返回NULL。
- * @note 不限制尚未冻结的业务编号/状态范围；不检查最终序列化PDU容量。
+ * @note 仅供隔离测试适配器使用，调用方保证编号/状态合法；不检查最终序列化PDU容量。
  *       每项均输出字符串resultDesc；result_desc为NULL时使用空串，否则须为
  *       NUL结尾的UTF-8字符串，并在调用期间保持有效。
  */
@@ -85,32 +104,36 @@ cJSON *pc_test_result_create(const char *algorithm_name,
                              const pc_chip_test_result_t *results,
                              size_t result_count);
 
+/* 一颗DDR的FUNC结论；数组位置0/1对应mirrorIndex，不含共用板卡信息与测量值。 */
+#define PC_FUNCTIONAL_DIE_COUNT 2U
+typedef struct {
+    uint64_t error_address;  /* 失败时原样输出16位十六进制地址，包括0；通过时输出null。 */
+    const char *error_type;  /* 借用非NULL字符串；RK未提供类型时为空，不能根据地址猜类型。 */
+    uint8_t failed;          /* 0=PASS、1=FAIL；组包转换为PC testStatus的1/0。 */
+} pc_functional_die_result_t;
+
 /**
- * @brief 为一次真实FUNC算法最终结果创建0x0105 JSON，仅输出一条结果。
+ * @brief 为一次FUNC算法创建0x0105，两条结果按mirrorIndex=0、1排列。
  * @param[in] algorithm_name 非NULL、NUL结尾的算法名称，复制到结果中。
  * @param[in] algorithm_index PC计划项编号，原样回带。
  * @param[in] site_id 非NULL板卡标志字符串，内容由业务层加载。
- * @param[in] mirror_index B2测试机编号；0可表示尚未分配。
- * @param[in] physical_addr 非NULL颗粒标志；尚未确定映射时传空字符串。
- * @param[in] error_address RK首错地址；0输出null，非0输出16位十六进制字符串，不决定PASS/FAIL。
  * @param[in] elapsed_ms RK上报的本次算法整体耗时，单位ms；0也是有效值，不用MCU等待时间替代。
- * @param[in] failed 已收到的RK 0x1017值：0输出PASS(1)、1输出FAIL(2)，其他值拒绝。
+ * @param[in] dies 非NULL且恰有两项；failed只能为0/1，字符串组包时复制。
  * @return 新cJSON对象，由调用方cJSON_Delete；参数或分配失败返回NULL。
- * @note resultDesc为对象，errorType和measurementData为null，不能用伪造的0代替未知值。
- *       顶层testTimeMs按uint64十进制JSON整数无损输出，不经过double换算。
+ * @note siteId、testTimeMs及measurementData均在顶层；测量初始为null，由调用方追加共用统计。
+ *       physicalAddr固定为空。PASS的地址为null且错误类型为空；FAIL地址0仍保留为十六进制字符串。
+ *       testTimeMs按uint64十进制JSON整数无损输出，不经过double换算。
  */
 cJSON *pc_functional_result_create(const char *algorithm_name,
                                     uint32_t algorithm_index,
                                     const char *site_id,
-                                    uint32_t mirror_index,
-                                    const char *physical_addr,
-                                    uint64_t error_address,
                                     uint64_t elapsed_ms,
-                                    uint8_t failed);
+                                    const pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT]);
 
 /* 仅借用统计快照，不依赖采样任务或器件；组包不会推进窗口或增加样本。
- * statistics用于0602，measurementData用于0105唯一结果项，字段沿用既有合同。
- * 无样本的单项写null；返回1成功、0参数/分配失败，失败时调用方删除整个body。
+ * statistics用于0602，measurementData位于0105顶层，表示B1共用电源轨而非单颗DDR电流。
+ * 全部无样本时measurementData为null；部分无样本的单项为null。
+ * 返回1成功、0参数/分配失败，失败时调用方删除整个body。
  */
 struct idd_stats;
 int pc_test_add_statistics(cJSON *body, const struct idd_stats *stats);

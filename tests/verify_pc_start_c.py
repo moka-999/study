@@ -49,7 +49,7 @@ void pc_test_service_disconnected(void) { }
 ''', encoding="utf-8")
     sources = [Path(__file__).with_name("test_pc_start.c"), build / "service_stub.c",
                *[root / p for p in ("App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_protocol.c",
-                                   "App/protocol/pc/pc_state_machine.c", "App/protocol/pc/pc_test_message.c", "HAL_Drv/ddr_power.c", "BSP/PAC1934/pac1934.c",
+                                   "App/protocol/pc/pc_state_machine.c", "App/protocol/pc/pc_test_message.c", "App/protocol/pc/pc_power_service.c", "HAL_Drv/ddr_power.c", "BSP/PAC1934/pac1934.c",
                                    "Middlewares/Third_Party/cJSON/cJSON.c")],
                args.boot_root / "tests/qemu_start.s"]
     includes = [build, *[root / p for p in ("App/protocol/pc", "App/tasks/common", "App/ota", "HAL_Drv",

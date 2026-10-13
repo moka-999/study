@@ -315,7 +315,7 @@ static void fill_test_fru(fru_info_t *fru, const char *site_label)
     memcpy(fru->configured_gateway, gateway, sizeof(gateway));
     fru->service_port = 8888U;
     snprintf(fru->site_label, sizeof(fru->site_label), "%s", site_label);
-    snprintf(fru->tester_name, sizeof(fru->tester_name), "LPDDR4/X_200B");
+    snprintf(fru->tester_name, sizeof(fru->tester_name), "JMCT-4000");
     snprintf(fru->test_board, sizeof(fru->test_board), "RK3588_test");
 }
 

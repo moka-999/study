@@ -343,16 +343,19 @@ def check_network_cli_flag():
 
 def check_power_simulation_build():
     """模拟选项传到双槽构建，输出目录隔离；此检查不执行构建或访问设备。"""
-    for enabled in (False, True):
+    for enabled, mats_fail in ((False, False), (True, False), (True, True)):
         args = Namespace(cmake="cmake", ninja="ninja", compiler="gcc", version="0.1.18",
-                         configuration="Release", power_simulation=enabled)
+                         configuration="Release", power_simulation=enabled, mats_fail_test=mats_fail)
         with patch.object(dev, "run") as calls:
             build = dev.build_package(args)
         assert ("--power-simulation" in calls.call_args_list[0].args) == enabled
+        assert ("--mats-fail-test" in calls.call_args_list[0].args) == mats_fail
         prefix = "ota-app-power-sim" if enabled else "ota-app"
+        if mats_fail:
+            prefix += "-mats-fail"
         assert build.name == f"{prefix}-0.1.18-release-a1"
         assert build in calls.call_args_list[1].args
-    print("PASS：电源模拟仅显式启用，复用正式OTA构建且不混用产物")
+    print("PASS：电源模拟及MATS失败联调仅显式启用，复用正式OTA且不混用产物")
 
 
 if __name__ == "__main__":

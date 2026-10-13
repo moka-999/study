@@ -12,11 +12,21 @@ def main():
     parser.add_argument("--qemu", default="D:/qemu/qemu-system-arm.exe")
     parser.add_argument("--b1-guard", action="store_true", help="核对B1真实ON门禁及实际采样统计接入")
     parser.add_argument("--power-simulation", action="store_true", help="验证V2部分模拟仍通过真实RK队列及正式分发")
+    parser.add_argument("--mats-fail-test", action="store_true", help="仅V2电源模拟：验证每次MATS最终回包强制FAIL")
+    parser.add_argument("--power-sequence", action="store_true", help="执行正式电源编排与0103的故障注入，不访问设备")
     args = parser.parse_args()
     root = args.app_root.resolve()
     if args.power_simulation and (args.b1_guard or root.name == "b1"):
         parser.error("B1禁止电源模拟")
+    if args.mats_fail_test and not args.power_simulation:
+        parser.error("MATS失败联调必须显式开启V2电源模拟")
+    if args.power_sequence and args.power_simulation:
+        parser.error("真实电源编排回归不启用V2模拟实现")
     suffix = "-power-sim" if args.power_simulation else "-b1-guard" if args.b1_guard else ""
+    if args.mats_fail_test:
+        suffix += "-mats-fail"
+    if args.power_sequence:
+        suffix += "-power-sequence"
     build = root / "build" / ("pc-rk-service" + suffix)
     build.mkdir(parents=True, exist_ok=True)
     # 只模拟RTOS队列和HAL类型，不替换命令表、JSON解析、服务生命周期或响应组包。
@@ -43,6 +53,7 @@ uint32_t HAL_GetTick(void);
     (build / "main.h").write_text('#include "stm32h7xx_hal.h"\n', encoding="utf-8")
     sources = [Path(__file__).with_name("test_pc_rk_service.c"), *[root / path for path in (
         "App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_test_service.c",
+        "App/protocol/pc/pc_power_service.c",
         "App/protocol/pc/pc_protocol.c", "App/protocol/pc/pc_test_message.c",
         "App/tasks/rk/rk_link.c", "HAL_Drv/ddr_power.c", "Middlewares/Third_Party/cJSON/cJSON.c")]]
     if args.power_simulation or args.b1_guard or root.name == "b1":
@@ -61,6 +72,10 @@ uint32_t HAL_GetTick(void);
         command += ["-DB1_RK_UART=4"]
     if args.power_simulation:
         command += ["-DENABLE_V2_POWER_SIMULATION=1"]
+    if args.mats_fail_test:
+        command += ["-DENABLE_V2_MATS_FAIL_TEST=1"]
+    if args.power_sequence:
+        command += ["-DPC_POWER_SEQUENCE_TEST=1"]
     command += ["-I" + str(path) for path in includes]
     command += [*map(str, sources), str(boot / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
                 "-T" + str(boot / "qemu_test.ld"), "-Wl,--gc-sections", "-o", str(build / "test.elf")]

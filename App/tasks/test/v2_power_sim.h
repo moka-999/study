@@ -20,7 +20,7 @@ void v2_power_sim_restart(void); /* 调用方确认虚拟电源ON后使用，不
 monitor_boot_result_t v2_power_sim_set_boot(boot_mode_t mode);
 /* 未配置为ERR_NOT_SET；成功写出模式及0..1800mV目标值，均非硬件回读。 */
 monitor_boot_result_t v2_power_sim_get_boot(boot_mode_t *mode, uint16_t *mv);
-/* steps为3轨20mV档位；OFF须全零，ON须同类型。非法参数ERR_PARAM、状态ERR_BUSY。 */
+/* steps为VDD1/VDD2/VDDQ的10/5/5mV档位；OFF须全零，ON须同类型；参数ERR_PARAM、状态ERR_BUSY。 */
 pwr_ctrl_result_t v2_power_sim_set_ddr(ddr_memory_type_t type, const int16_t steps[3]);
 int v2_power_sim_latest(monitor_snapshot_t *out); /* 只复制，不产生新样本。 */
 void v2_power_sim_poll(void); /* 约500ms生成一个样本；积压时不补造历史样本。 */

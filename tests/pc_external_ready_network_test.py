@@ -39,8 +39,8 @@ def main():
                         expect=6, error="notSupported")
             client.call(dict(body, timeoutMs=1.5), command=0x0103,
                         expect=6, error="invalidArgument")
-            client.call(dict(body, power=dict(memoryType="LPDDR4X", vdd1Steps=0,
-                        vdd2Steps=0, vddqSteps=0), bootMode="emmc"), command=0x0103,
+            client.call(dict(body, power=dict(memoryType="LPDDR4X", vdd1="1800",
+                        vdd2="1100", vddq="600"), bootMode="emmc"), command=0x0103,
                         expect=6, error="notReady")
             client.call({}, command=0x0002, expect=0x0001)
             report["passed"] = True

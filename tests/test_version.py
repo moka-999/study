@@ -210,7 +210,10 @@ def verify_source_contract() -> None:
     assert "offsetof(fru_info_t, tester_name) == 138U" in layout_h
     assert "offsetof(fru_info_t, test_board) == 170U" in layout_h
     assert "fru_info_load_legacy_v1" in layout_c
-    assert "select_legacy_fru_target" in layout_c
+    assert "read_legacy_slot" in layout_c, "选择写入槽前必须纳入旧格式的有效代数"
+    assert "record_payload_is_valid" in layout_c, "每槽先验证字段再选择最新记录"
+    assert "FLASH_STORE_ERR_UNSUPPORTED" in layout_c and "FLASH_STORE_ERR_LEGACY" in tester_info
+    assert "fill_missing_fields" in tester_info, "迁移只补空字段，不覆盖旧板身份"
     for removed_field in ("flags", "build_number", "git_commit", "part_number", "mac_valid"):
         assert removed_field not in layout_h, f"精简布局不应再包含字段: {removed_field}"
     assert "fixed_string_is_terminated" in layout_c, "定长FRU字符串必须校验NUL结尾"
@@ -235,6 +238,7 @@ def verify_source_contract() -> None:
     assert "SELF_TEST_ALIAS_ADDRESS" in qspi_test, "高地址测试必须检查24位地址回卷"
     assert "firmware_version_save" in qspi_test and "fru_info_save" in qspi_test
     assert 'TESTER_PRODUCT_NAME        "LPDDR4/X_200B"' in tester_info
+    assert 'TESTER_NAME                "JMCT-4000"' in tester_info
     assert 'TESTER_HARDWARE_REVISION   "D00"' in tester_info
     assert 'TESTER_BOARD_NAME          "RK3588_test"' in tester_info
     assert "fru_info_load" in tester_info and "fru_info_save" in tester_info

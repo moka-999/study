@@ -270,12 +270,13 @@ def main() -> None:
     tester_store_source = (ROOT / "App" / "protocol" / "pc" /
                            "pc_tester_info.c").read_text(encoding="utf-8")
     assert 'TESTER_PRODUCT_NAME        "LPDDR4/X_200B"' in tester_store_source
+    assert 'TESTER_NAME                "JMCT-4000"' in tester_store_source
     assert 'TESTER_HARDWARE_REVISION   "D00"' in tester_store_source
     assert 'TESTER_BOARD_NAME          "RK3588_test"' in tester_store_source
     assert "fru_info_load" in tester_store_source
     assert "fru_info_load_legacy_v1" in tester_store_source
     assert "fru_info_save" in tester_store_source
-    assert "if (load_result == FLASH_STORE_OK) return 0;" in tester_store_source
+    assert 'if (strcmp(fru->tester_name, "LPDDR4/X_200B") != 0) return 0;' in tester_store_source
     passed += 1
 
     # 正式TCP任务只保留socket与状态机编排，不能再包含JSON/业务处理细节。
@@ -312,7 +313,7 @@ def main() -> None:
 
     # 测试仪信息必须由0x0101查询触发，不允许连接建立后主动推送。
     tester_info = {
-        "testerName": "LPDDR4/X_200B",
+        "testerName": "JMCT-4000",
         "testerVersion": "D00",
         "testBoard": "RK3588_test",
     }
@@ -350,7 +351,9 @@ def main() -> None:
     assert '"resultDesc"' in business_source
     assert all(f'"{field}"' in business_source for field in (
         "algorithmType", "power", "reboot", "bootMode", "memoryType",
-        "vdd1Steps", "vdd2Steps", "vddqSteps"))
+        "vdd1", "vdd2", "vddq"))
+    assert "pc_power_parse" in business_source and "pc_power_parse" in dispatch_source
+    assert "vdd1Steps" not in business_source and "vdd1Steps" not in dispatch_source
     assert "ddr_power_build_step_targets" in business_source
     assert "isfinite" in business_source and "pc_test_start_read_index" in business_source
     start_handler = dispatch_source.split("static pc_dispatch_result_t handle_start_test(", 1)[1].split("\n}", 1)[0]

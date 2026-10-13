@@ -120,14 +120,16 @@ int  tps62868_write_reg(tps62868_t *d, uint8_t reg, uint8_t val);
  * @return IF_OK写成功；IF_ERR参数/编码范围错误，或透传底层总线错误。
  * @note 不量化截断目标；寄存器可写不代表DDR安全或输出已经稳定。
  */
-int  tps62868_set_vout1(tps62868_t *d, uint16_t mv);   /**
+int  tps62868_set_vout1(tps62868_t *d, uint16_t mv);
+
+/**
  * @brief 将目标电压精确编码后写VOUT2，VID为高时生效。
  * @param[in] d 非NULL句柄，factor_x10须按BOM提供5/10/20。
  * @param[in] mv 目标毫伏，须能按器件倍率和5mV基础步进精确表示。
  * @return IF_OK写成功；IF_ERR参数/编码范围错误，或透传底层总线错误。
  * @note 不量化截断目标；寄存器可写不代表DDR安全或输出已经稳定。
  */
-int  tps62868_set_vout2(tps62868_t *d, uint16_t mv);   /* VID=高 生效 */
+int  tps62868_set_vout2(tps62868_t *d, uint16_t mv);
 
 /**
  * @brief 用CONTROL软件镜像置位软件使能位。

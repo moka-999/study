@@ -62,7 +62,7 @@ void monitor_ota_leave(void);
 /**
  * @brief 持事务锁执行PC的内存类型选择或三轨拉偏。
  * @param[in] type LPDDR4或LPDDR4X；ON时必须等于当前类型。
- * @param[in] steps 非NULL、3项，顺序VDD1/VDD2/VDDQ，每档20mV；OFF时须全零。
+ * @param[in] steps 非NULL、3项，顺序VDD1/VDD2/VDDQ，每档10/5/5mV；OFF时须全零。
  * @return PWR_CTRL_OK成功；ERR_PARAM非法目标；ERR_NOT_CONFIGURED锁未建立；
  *         ERR_RESOURCE_BUSY取锁失败；ERR_BUSY状态/类型不允许；ERR_FAULT故障。
  * @note 任务上下文，取锁最多等待500ms后还可能同步I2C阻塞。ON拉偏仍要求

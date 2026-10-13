@@ -542,9 +542,9 @@ static void test_lpddr_power_idd_bias_flow(void)
     mock_i2c_t mock;
     uint16_t target[DDR_RAIL_COUNT];
     const int16_t normal_steps[DDR_RAIL_COUNT] = {2, -3, 5};
-    const int16_t lp4x_min_steps[DDR_RAIL_COUNT] = {-50, -35, -10};
-    const int16_t lp4x_max_steps[DDR_RAIL_COUNT] = {77, 28, 53};
-    const int16_t vdd1_too_high[DDR_RAIL_COUNT] = {78, 0, 0};
+    const int16_t lp4x_min_steps[DDR_RAIL_COUNT] = {-100, -140, -40};
+    const int16_t lp4x_max_steps[DDR_RAIL_COUNT] = {155, 115, 215};
+    const int16_t vdd1_too_high[DDR_RAIL_COUNT] = {156, 0, 0};
     pac1934_measurement_t idd[4];
 
     mock_i2c_reset(&mock);
@@ -577,23 +577,23 @@ static void test_lpddr_power_idd_bias_flow(void)
 
     mock_check(ddr_power_build_step_targets(DDR_MEMORY_LPDDR4X,
                                             normal_steps, target) == IF_OK &&
-               target[0] == 1840U && target[1] == 1040U && target[2] == 700U,
-               "LPDDR4X三路独立20mV步进目标");
+               target[0] == 1820U && target[1] == 1085U && target[2] == 625U,
+               "LPDDR4X三路独立10/5/5mV步进目标");
     mock_check(ddr_power_build_step_targets(DDR_MEMORY_LPDDR4X,
                                             lp4x_min_steps, target) == IF_OK &&
                target[0] == 800U && target[1] == 400U && target[2] == 400U,
-               "LPDDR4X全三路20mV步进下边界");
+               "LPDDR4X全三路原生步进下边界");
     mock_check(ddr_power_build_step_targets(DDR_MEMORY_LPDDR4X,
                                             lp4x_max_steps, target) == IF_OK &&
-               target[0] == 3340U && target[1] == 1660U && target[2] == 1660U,
-               "LPDDR4X全三路20mV步进上边界");
+               target[0] == 3350U && target[1] == 1675U && target[2] == 1675U,
+               "LPDDR4X全三路原生步进上边界");
     mock_check(ddr_power_build_step_targets(DDR_MEMORY_LPDDR4X,
                                             vdd1_too_high, target) == IF_ERR,
-               "20mV步进超出TPS可写范围时拒绝");
+               "原生步进超出TPS可写范围时拒绝");
     mock_check(pwr_ctrl_apply_ddr_steps(normal_steps) == PWR_CTRL_OK &&
-               ddr_power_get_mv(DDR_RAIL_VDD1) == 1840U &&
-               ddr_power_get_mv(DDR_RAIL_VDD2) == 1040U &&
-               ddr_power_get_mv(DDR_RAIL_VDDQ) == 700U,
+               ddr_power_get_mv(DDR_RAIL_VDD1) == 1820U &&
+               ddr_power_get_mv(DDR_RAIL_VDD2) == 1085U &&
+               ddr_power_get_mv(DDR_RAIL_VDDQ) == 625U,
                "LPDDR上电完成后允许独立步进拉偏");
 
     s_pac_waited_ms = 0U;
@@ -652,7 +652,7 @@ static void test_lpddr_power_idd_bias_flow(void)
                bsp_gpio_get(GPIO_FUNC_PWR_3V3_EN) == 0U &&
                bsp_gpio_get(GPIO_FUNC_PWR_4V0_EN) == 0U &&
                mock_i2c_has_write(&mock, TPS62868_ADDR_VDD1,
-                                   TPS62868_REG_VOUT1, 0x68U) &&
+                                   TPS62868_REG_VOUT1, 0x66U) &&
                mock_i2c_has_write(&mock, TPS62868_ADDR_VDD1,
                                    TPS62868_REG_VOUT1, 0x64U),
                "拉偏中途失败回滚已改轨并进入全关故障态");
@@ -673,7 +673,7 @@ static void test_lpddr_training_startup(void)
     const uint16_t target[DDR_RAIL_COUNT] = {1820U, 1080U, 620U};
     const uint16_t invalid[DDR_RAIL_COUNT] = {1805U, 1100U, 600U};
     const uint16_t overflow[DDR_RAIL_COUNT] = {3360U, 1100U, 600U};
-    const int16_t bias[DDR_RAIL_COUNT] = {2, 1, -1};
+    const int16_t bias[DDR_RAIL_COUNT] = {4, 1, -1};
     uint16_t borrowed[DDR_RAIL_COUNT];
     i2c_if_t saved_i2c1 = i2c1_if;
     i2c_if_t saved_i2c2 = i2c2_if;
@@ -1046,7 +1046,7 @@ static void test_pc_test_json_contract(void)
 {
     static const char request_json[] =
         "{\"algorithmType\":\"parametric\",\"algorithmName\":\"algorithmName\",\"algorithmIndex\":1,"
-        "\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1Steps\":0,\"vdd2Steps\":0,\"vddqSteps\":0},"
+        "\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},"
         "\"reboot\":true,\"bootMode\":\"emmc\"}";
     static const char trailing_comma_json[] =
         "{\"algorithmName\":\"algorithmName\",\"algorithmIndex\":1,}";
@@ -1151,7 +1151,7 @@ static void test_pc_dispatch(void)
          PC_DISPATCH_RESPONSE_READY, "PC查表拒绝只有旧两字段的START_TEST"},
         {PC_COMMAND_START_TEST,
          "{\"algorithmType\":\"parametric\",\"algorithmName\":\"idd_0\",\"algorithmIndex\":1,"
-         "\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1Steps\":0,\"vdd2Steps\":0,\"vddqSteps\":0},"
+         "\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},"
          "\"reboot\":false,\"bootMode\":\"emmc\"}",
          PC_DISPATCH_RESPONSE_READY, "完整START_TEST在RK未接时明确拒绝，不访问硬件"},
         {PC_COMMAND_START_TEST, "{}", PC_DISPATCH_RESPONSE_READY,

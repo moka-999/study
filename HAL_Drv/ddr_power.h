@@ -17,7 +17,7 @@
  *
  * 上电流程: OFF时选训练目标 → TPS可访问 → ddr_power_init()直接写训练目标。
  *           默认目标为对应类型标称值；B1的TPS随PC6开启4V自动启动，PG11为NC预留。
- * 拉偏:     三路相对各自标称值独立按20mV步进调压
+ * 拉偏:     相对各自标称值独立调压，VDD1每档10mV，VDD2/VDDQ每档5mV。
  *
  * V2 阶段: i2c1_if/i2c4_if 可用 (V2 已配), i2c2_if 未配置 → rail1 返回 IF_ERR
  * B1阶段：硬件I2C2与PH4/PH5软件开漏总线已绑定，真实三轨仍待真板验证。
@@ -48,10 +48,11 @@
 
 /*
  * TPS寄存器的物理可写范围。VDD1使用×2器件，原生分辨率为10mV；
- * VDD2/VDDQ使用×1器件，原生分辨率为5mV。上层老化测试统一只暴露20mV步进。
+ * VDD2/VDDQ使用×1器件，原生分辨率为5mV。上层steps直接使用各轨原生步进。
  * 这些上限是“芯片能写”而不是“DDR安全”上限，极端值可能永久损坏被测器件。
  */
-#define DDR_VOLTAGE_STEP_MV      20
+#define DDR_VDD1_STEP_MV         10
+#define DDR_VDDX_STEP_MV         5
 #define DDR_VDD1_WRITABLE_MIN_MV 800
 #define DDR_VDD1_WRITABLE_MAX_MV 3350
 #define DDR_VDDX_WRITABLE_MIN_MV 400
@@ -85,7 +86,7 @@ int  ddr_power_select_memory_type(ddr_memory_type_t type);
 
 /**
  * @brief 复制本次冷启动的训练目标，不访问硬件，不更新已写入电压缓存。
- * @param[in] type LPDDR4或LPDDR4X，决定后续20mV拉偏的标称零点。
+ * @param[in] type LPDDR4或LPDDR4X，决定后续原生档位拉偏的标称零点。
  * @param[in] mv 非NULL、3项，依次为VDD1/VDD2/VDDQ，单位mV；调用后可释放。
  * @return IF_OK已保存；IF_ERR类型或任一目标不可精确编码，原配置保持不变。
  * @note 控制层必须保证OFF并串行调用；业务使用monitor_request_training_power_on。
@@ -96,9 +97,10 @@ int ddr_power_configure_training(ddr_memory_type_t type,
                                  const uint16_t mv[DDR_RAIL_COUNT]);
 
 /**
- * @brief 计算三轨标称值加20mV档位后的目标，检查能否精确编码。
+ * @brief 按各轨原生步进计算标称值加档位后的目标，检查能否精确编码。
  * @param[in] type DDR_MEMORY_LPDDR4或DDR_MEMORY_LPDDR4X。
- * @param[in] steps 非NULL、至少3项，顺序为VDD1/VDD2/VDDQ。
+ * @param[in] steps 非NULL、至少3项，顺序为VDD1/VDD2/VDDQ，每档分别10/5/5mV。
+ *                 0为标称值，正数升压、负数降压，不在当前电压上累加。
  * @param[out] mv 非NULL、至少3项，单位mV；失败时可能已部分或全部写入。
  * @return IF_OK三个目标可写；IF_ERR参数、算术范围或编码步进不合法。
  * @note 纯计算，不写硬件；TPS可写范围不代表DDR安全范围。
@@ -108,7 +110,7 @@ int  ddr_power_build_step_targets(ddr_memory_type_t type,
                                   uint16_t mv[DDR_RAIL_COUNT]);
 
 /**
- * @brief 按当前内存类型计算并同步应用三轨20mV档位。
+ * @brief 按当前内存类型计算并同步应用三轨原生档位。
  * @param[in] steps 非NULL、至少3项，相对标称值的有符号档位。
  * @return IF_OK成功；IF_ERR目标无效或调压失败。
  * @note 本层不判断ON/DDR初始化完成、不自动断电；业务须通过pwr_ctrl调用。
@@ -139,6 +141,9 @@ int  ddr_power_read_status(uint8_t rail, uint8_t *flags);
  * @return 目标mV；非法轨返回0。不是ADC实测值，失败回退后不可用来证明电压。
  */
 uint16_t ddr_power_get_mv(uint8_t rail);
+
+/** 读取下次冷启动训练目标mV；非法轨返回0。与运行期拉偏缓存分开，不是实测值。 */
+uint16_t ddr_power_get_training_mv(uint8_t rail);
 
 /**
  * @brief 查询当前选定的内存类型。

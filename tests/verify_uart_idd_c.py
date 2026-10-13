@@ -9,10 +9,13 @@ def main():
     parser.add_argument("--app-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--compiler", required=True)
     parser.add_argument("--qemu", default="D:/qemu/qemu-system-arm.exe")
+    parser.add_argument("--log-default", choices=(0, 1), type=int, default=0,
+                        help="仅B1控制台回归：0=MCU默认，1=RK默认")
     args = parser.parse_args()
     root = args.app_root.resolve()
     boot = root.parent / "bootloader"
-    build = root / "build/uart-idd-test"
+    is_b1 = (root / "b1.ioc").exists()
+    build = root / ("build/uart-idd-test-rk-default" if is_b1 and args.log_default else "build/uart-idd-test")
     build.mkdir(parents=True, exist_ok=True)
     # 仅用队列/HAL声明替换硬件和调度器；被测路由、状态机、帧及统计原样链接。
     (build / "test_port.h").write_text('''#pragma once
@@ -43,6 +46,7 @@ UBaseType_t uxQueueMessagesWaiting(QueueHandle_t);
 int HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *);
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *, uint16_t);
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *);
+uint32_t __get_IPSR(void);
 ''', encoding="utf-8")
     for name in ("main", "FreeRTOS", "task", "queue"):
         (build / f"{name}.h").write_text('#include "test_port.h"\n', encoding="utf-8")
@@ -50,11 +54,16 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *);
     sources = [Path(__file__).with_name("test_uart_idd.c")] + [root / p for p in (
         "HAL_Drv/uart_router.c", "HAL_Drv/idd_stats.c", "App/protocol/rk/frame.c",
         "App/protocol/rk/crc.c", "App/protocol/rk/state_machine.c")] + [boot / "tests/qemu_start.s"]
+    if is_b1:
+        sources.append(root / "Core/Src/log_console.c")
+        includes.append(root / "Core/Inc")
     command = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-ffunction-sections",
                "-fdata-sections", *["-I" + str(p) for p in includes], *map(str, sources),
                "-nostartfiles", "--specs=nosys.specs", "-T" + str(boot / "tests/qemu_test.ld"),
                "-Wl,--gc-sections", "-o", str(build / "test.elf")]
+    if is_b1:
+        command += ["-DTEST_B1_LOG_CONSOLE=1", f"-DB1_LOG_DEFAULT_SOURCE={args.log_default}"]
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode:
@@ -66,6 +75,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *);
     (build / "run.log").write_text(output, encoding="utf-8")
     if result.returncode or "PASS: UART recovery, RK bounds and IDD windows" not in output:
         raise RuntimeError(output)
+    if is_b1 and "PASS: B1 selectable log console" not in output:
+        raise RuntimeError("B1日志切换用例未实际执行")
     print(f"{root.name}: {output.strip()}")
 
 

@@ -23,6 +23,11 @@ static const uint16_t _nominal_mv[2][DDR_RAIL_COUNT] = {
     [DDR_MEMORY_LPDDR4X] = {1800U, 1100U,  600U},
 };
 
+/* steps按轨换算；每增加1档，恰好增加一个TPS电压寄存器码。 */
+static const uint16_t _step_mv[DDR_RAIL_COUNT] = {
+    DDR_VDD1_STEP_MV, DDR_VDDX_STEP_MV, DDR_VDDX_STEP_MV
+};
+
 static ddr_memory_type_t _memory_type = DDR_MEMORY_LPDDR4X;
 /*
  * 训练目标与运行中的拉偏缓存分开保存。前者仅在OFF时由控制层选择，
@@ -32,6 +37,11 @@ static ddr_memory_type_t _memory_type = DDR_MEMORY_LPDDR4X;
 static uint16_t _training_mv[DDR_RAIL_COUNT] = {
     DDR_VDD1_DEFAULT_MV, DDR_VDD2_DEFAULT_MV, DDR_VDDQ_DEFAULT_MV
 };
+
+uint16_t ddr_power_get_training_mv(uint8_t rail)
+{
+    return rail < DDR_RAIL_COUNT ? _training_mv[rail] : 0U;
+}
 static uint16_t _mv[DDR_RAIL_COUNT] = {
     DDR_VDD1_DEFAULT_MV, DDR_VDD2_DEFAULT_MV, DDR_VDDQ_DEFAULT_MV
 };
@@ -64,13 +74,13 @@ static int _targets_are_writable(const uint16_t mv[DDR_RAIL_COUNT])
      */
     return mv[DDR_RAIL_VDD1] >= DDR_VDD1_WRITABLE_MIN_MV &&
            mv[DDR_RAIL_VDD1] <= DDR_VDD1_WRITABLE_MAX_MV &&
-           (mv[DDR_RAIL_VDD1] % 10U) == 0U &&
+           (mv[DDR_RAIL_VDD1] % DDR_VDD1_STEP_MV) == 0U &&
            mv[DDR_RAIL_VDD2] >= DDR_VDDX_WRITABLE_MIN_MV &&
            mv[DDR_RAIL_VDD2] <= DDR_VDDX_WRITABLE_MAX_MV &&
-           ((mv[DDR_RAIL_VDD2] - DDR_VDDX_WRITABLE_MIN_MV) % 5U) == 0U &&
+           ((mv[DDR_RAIL_VDD2] - DDR_VDDX_WRITABLE_MIN_MV) % DDR_VDDX_STEP_MV) == 0U &&
            mv[DDR_RAIL_VDDQ] >= DDR_VDDX_WRITABLE_MIN_MV &&
            mv[DDR_RAIL_VDDQ] <= DDR_VDDX_WRITABLE_MAX_MV &&
-           ((mv[DDR_RAIL_VDDQ] - DDR_VDDX_WRITABLE_MIN_MV) % 5U) == 0U;
+           ((mv[DDR_RAIL_VDDQ] - DDR_VDDX_WRITABLE_MIN_MV) % DDR_VDDX_STEP_MV) == 0U;
 }
 
 int ddr_power_build_step_targets(ddr_memory_type_t type,
@@ -82,7 +92,7 @@ int ddr_power_build_step_targets(ddr_memory_type_t type,
 
     for (uint8_t rail = 0U; rail < DDR_RAIL_COUNT; rail++) {
         int32_t target = (int32_t)_nominal_mv[type][rail] +
-                         (int32_t)steps[rail] * DDR_VOLTAGE_STEP_MV;
+                         (int32_t)steps[rail] * _step_mv[rail];
         if (target < 0 || target > UINT16_MAX) return IF_ERR;
         mv[rail] = (uint16_t)target;
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""离线验证 LPDDR4/4X 三轨、20mV步进、IDD 采样和上下电软件合同。"""
+"""离线验证 LPDDR4/4X 三轨原生步进、IDD 采样和上下电软件合同。"""
 
 from pathlib import Path
 import re
@@ -10,22 +10,22 @@ NOMINAL_MV = {
     "LPDDR4": (1800, 1100, 1100),
     "LPDDR4X": (1800, 1100, 600),
 }
-STEP_MV = 20
+STEP_MV = (10, 5, 5)
 WRITABLE_MV = ((800, 3350), (400, 1675), (400, 1675))
 
 
 def step_range(memory: str, rail: int) -> range:
-    """返回以该轨标称值为零点、又不超出TPS可写范围的全部20mV步数。"""
+    """返回以该轨标称值为零点、又不超出TPS可写范围的全部原生步数。"""
 
     nominal = NOMINAL_MV[memory][rail]
     minimum, maximum = WRITABLE_MV[rail]
-    first = (minimum - nominal + STEP_MV - 1) // STEP_MV
-    last = (maximum - nominal) // STEP_MV
+    first = (minimum - nominal + STEP_MV[rail] - 1) // STEP_MV[rail]
+    last = (maximum - nominal) // STEP_MV[rail]
     return range(first, last + 1)
 
 
 def build_steps(memory: str, steps: tuple[int, int, int]) -> tuple[int, int, int]:
-    target = tuple(mv + step * STEP_MV for mv, step in zip(NOMINAL_MV[memory], steps))
+    target = tuple(mv + step * unit for mv, step, unit in zip(NOMINAL_MV[memory], steps, STEP_MV))
     for rail, mv in enumerate(target):
         assert WRITABLE_MV[rail][0] <= mv <= WRITABLE_MV[rail][1]
     return target
@@ -40,21 +40,23 @@ def tps_code(mv: int, factor: int) -> int:
     return (base_mv - 400) // 5
 
 
-def verify_all_20mv_steps_and_tps_encoding() -> None:
+def verify_all_native_steps_and_tps_encoding() -> None:
     for memory in NOMINAL_MV:
         for rail in range(3):
+            codes = []
             for step in step_range(memory, rail):
-                target = NOMINAL_MV[memory][rail] + step * STEP_MV
+                target = NOMINAL_MV[memory][rail] + step * STEP_MV[rail]
                 factor = (2, 1, 1)[rail]
-                assert 0 <= tps_code(target, factor) <= 0xFF
+                codes.append(tps_code(target, factor))
+            assert codes == list(range(256)), "每轨原生档位须无遗漏覆盖全部寄存器码"
 
-    assert (step_range("LPDDR4X", 0).start, step_range("LPDDR4X", 0).stop - 1) == (-50, 77)
-    assert (step_range("LPDDR4X", 1).start, step_range("LPDDR4X", 1).stop - 1) == (-35, 28)
-    assert (step_range("LPDDR4X", 2).start, step_range("LPDDR4X", 2).stop - 1) == (-10, 53)
-    assert (step_range("LPDDR4", 2).start, step_range("LPDDR4", 2).stop - 1) == (-35, 28)
-    assert build_steps("LPDDR4X", (2, -3, 5)) == (1840, 1040, 700)
-    assert tps_code(800, 2) == 0x00 and tps_code(3340, 2) == 0xFE
-    assert tps_code(400, 1) == 0x00 and tps_code(1660, 1) == 0xFC
+    assert (step_range("LPDDR4X", 0).start, step_range("LPDDR4X", 0).stop - 1) == (-100, 155)
+    assert (step_range("LPDDR4X", 1).start, step_range("LPDDR4X", 1).stop - 1) == (-140, 115)
+    assert (step_range("LPDDR4X", 2).start, step_range("LPDDR4X", 2).stop - 1) == (-40, 215)
+    assert (step_range("LPDDR4", 2).start, step_range("LPDDR4", 2).stop - 1) == (-140, 115)
+    assert build_steps("LPDDR4X", (2, -3, 5)) == (1820, 1085, 625)
+    assert tps_code(800, 2) == 0x00 and tps_code(3350, 2) == 0xFF
+    assert tps_code(400, 1) == 0x00 and tps_code(1675, 1) == 0xFF
     assert tuple(tps_code(mv, factor) for mv, factor in
                  zip(NOMINAL_MV["LPDDR4X"], (2, 1, 1))) == (0x64, 0x8C, 0x28)
     assert tps_code(1100, 1) == 0x8C  # LPDDR4 VDDQ
@@ -92,7 +94,7 @@ def verify_source_contract() -> None:
     assert "(uint32_t)type > DDR_MEMORY_LPDDR4X" in power, "负枚举值不能索引标称表"
     assert "test_lpddr_training_startup();" in mock and "failure <= 9U" in mock, \
         "C Mock须覆盖自定义训练目标与9个逐事务失败点（此脚本不执行C）"
-    assert "steps[rail] * DDR_VOLTAGE_STEP_MV" in power, "拉偏必须以标称值为基准20mV步进"
+    assert "steps[rail] * _step_mv[rail]" in power, "拉偏必须使用各轨原生步进"
     assert "JESD建议值或三路相对电压拦截" in power, "极限测试不应被工作区限制"
     assert power.index("candidate[DDR_RAIL_VDD1] >") < power.index("candidate[DDR_RAIL_VDD2] !=")
     assert power.index("candidate[DDR_RAIL_VDDQ] <") < power.index("candidate[DDR_RAIL_VDD2] !=")
@@ -120,10 +122,10 @@ def verify_source_contract() -> None:
 
 
 def main() -> None:
-    verify_all_20mv_steps_and_tps_encoding()
+    verify_all_native_steps_and_tps_encoding()
     verify_pac_idd_conversion()
     verify_source_contract()
-    print("LPDDR4/4X: all 20mV steps, TPS encoding, PAC IDD and training-target source contracts PASS")
+    print("LPDDR4/4X: all native 10/5/5mV steps, TPS encoding, PAC IDD and training-target source contracts PASS")
     print("New C Mock cases are checked for inclusion here, not executed by this Python test")
     print("Boundary: RK creates JEDEC IDD/CKE conditions; MCU sequences rails and samples them")
 

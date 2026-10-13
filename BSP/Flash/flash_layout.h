@@ -158,6 +158,8 @@ typedef enum {
     FLASH_STORE_ERR_NOT_FOUND     = -3,
     FLASH_STORE_ERR_CORRUPT       = -4,
     FLASH_STORE_ERR_VERIFY        = -5,
+    FLASH_STORE_ERR_UNSUPPORTED   = -6, /* 有效未知格式：拒绝读取及覆盖 */
+    FLASH_STORE_ERR_LEGACY        = -7, /* 最新有效FRU为旧格式，须显式迁移 */
 } flash_store_status_t;
 
 /**
@@ -176,14 +178,15 @@ const firmware_version_info_t *firmware_version_current(void);
 void fru_info_init(fru_info_t *fru);
 
 /**
- * @brief 从A/B副本加载CRC有效且generation最新的固件版本记录。
+ * @brief 从A/B副本加载CRC及字段合法、generation最新的固件版本记录。
  * @param[in,out] flash 已初始化的同步Flash接口，须提供read/write回调。
  * @param[out] info 非NULL输出结构；仅返回FLASH_STORE_OK时有效。
  * @param[out] generation 可为NULL；选中记录的代数，不是输入期望版本。
  * @return FLASH_STORE_OK成功；ERR_PARAM参数无效；ERR_IO无可用副本且访问
- *         失败；ERR_NOT_FOUND两副本空白；ERR_CORRUPT记录或载荷格式损坏。
- * @note 不创建默认记录、不修复副本；失败时输出不保证清零，载荷格式校验
- *       失败时结构和generation可能已写入。整个读写事务由调用方串行化。
+ *         失败；ERR_NOT_FOUND两副本空白；ERR_CORRUPT记录损坏；
+ *         ERR_UNSUPPORTED存在有效未知格式，禁止覆盖或默认初始化。
+ * @note 兼容76/96字节版本记录，旧记录仅在RAM中转换；不写Flash。
+ *       仅成功时使用输出，完整事务由调用方串行化。
  */
 int firmware_version_load(flash_if_t *flash, firmware_version_info_t *info,
                           uint32_t *generation);
@@ -194,7 +197,7 @@ int firmware_version_load(flash_if_t *flash, firmware_version_info_t *info,
  * @param[in] info 非NULL、schema/size/字段合法的记录，返回前保持有效。
  * @param[out] generation 可为NULL；成功时返回新代数，失败保持原值。
  * @return FLASH_STORE_OK成功；ERR_PARAM参数/记录格式无效；ERR_IO读写失败；
- *         ERR_VERIFY写入后回读校验失败。
+ *         ERR_VERIFY写入后回读校验失败；ERR_UNSUPPORTED有效未知格式禁止覆盖。
  * @note 同步擦写，调用方须串行化完整事务。只更新一个副本并保留另一有效
  *       副本；失败可能已改变目标扇区，不表示完全未写入。
  */
@@ -202,14 +205,15 @@ int firmware_version_save(flash_if_t *flash, const firmware_version_info_t *info
                           uint32_t *generation);
 
 /**
- * @brief 从A/B副本加载CRC有效且generation最新的FRU v2记录。
+ * @brief 从A/B副本加载CRC及字段合法、generation最新的FRU v2记录。
  * @param[in,out] flash 已初始化的同步Flash接口，须提供read/write回调。
  * @param[out] fru 非NULL输出结构；仅返回FLASH_STORE_OK时有效。
  * @param[out] generation 可为NULL；选中记录的代数，不是输入期望版本。
  * @return FLASH_STORE_OK成功；ERR_PARAM参数无效；ERR_IO无可用副本且访问
- *         失败；ERR_NOT_FOUND两副本空白；ERR_CORRUPT记录或载荷格式损坏。
- * @note 不创建默认记录、不修复副本；失败时输出不保证清零，载荷格式校验
- *       失败时结构和generation可能已写入。整个读写事务由调用方串行化。
+ *         失败；ERR_NOT_FOUND两副本空白；ERR_CORRUPT记录损坏；ERR_LEGACY
+ *         最新有效记录为已知旧格式；ERR_UNSUPPORTED存在有效未知格式。
+ * @note 先逐槽校验再比较代数，不能让较旧v2掩盖较新v1；不写Flash。
+ *       仅成功时使用fru，完整事务由调用方串行化。
  */
 int fru_info_load(flash_if_t *flash, fru_info_t *fru, uint32_t *generation);
 
@@ -219,7 +223,7 @@ int fru_info_load(flash_if_t *flash, fru_info_t *fru, uint32_t *generation);
  * @param[in] fru 非NULL、schema/size/字段合法的记录，返回前保持有效。
  * @param[out] generation 可为NULL；成功时返回新代数，失败保持原值。
  * @return FLASH_STORE_OK成功；ERR_PARAM参数/记录格式无效；ERR_IO读写失败；
- *         ERR_VERIFY写入后回读校验失败。
+ *         ERR_VERIFY写入后回读校验失败；ERR_UNSUPPORTED有效未知格式禁止覆盖。
  * @note 同步擦写，调用方须串行化完整事务。只更新一个副本并保留另一有效
  *       副本；失败可能已改变目标扇区，不表示完全未写入。
  */
@@ -227,11 +231,12 @@ int fru_info_save(flash_if_t *flash, const fru_info_t *fru,
                   uint32_t *generation);
 
 /**
- * @brief 读取旧160字节FRU v1并转换成RAM中的v2结构。
+ * @brief 读取旧160/192字节FRU v1并转换成RAM中的v2结构。
  * @param[in,out] flash 已初始化且提供read/write回调的Flash接口。
  * @param[out] fru 非NULL输出；成功时保留旧身份/网络/保留字段，新字段为空。
- * @param[out] generation 可为NULL；选中旧记录的代数，载荷校验失败也可能更新。
- * @return FLASH_STORE_OK成功；其他FLASH_STORE_ERR_*区分参数、IO、空白或损坏。
+ * @param[out] generation 可为NULL；成功时返回选中旧记录的代数。
+ * @return FLASH_STORE_OK成功；其他FLASH_STORE_ERR_*区分参数、IO、空白、
+ *         损坏或有效未知格式（UNSUPPORTED，禁止覆盖）。
  * @note 不写Flash；调用方补齐新字段后再保存。fru在失败时保持原值。
  */
 int fru_info_load_legacy_v1(flash_if_t *flash, fru_info_t *fru,

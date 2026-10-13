@@ -56,14 +56,14 @@ int rk_gateway_test_poll(uint32_t sequence, pc_dispatch_response_t *response)
         s_active = 0U;
         if (result.status != RK_RESPONSE_COMPLETE)
             return execution_response(sequence, s_index, "executionFailed", response);
-        char description[160], json[PC_DISPATCH_RESPONSE_CAPACITY - 18U];
-        /* 精简C库不支持printf的64位整数；分高低32位输出，保留完整地址/毫秒值。 */
-        snprintf(description, sizeof(description), "SIMULATED RK: addr=0x%08lX%08lX; elapsedMs=0x%08lX%08lX",
-            (unsigned long)(result.result.error_address >> 32), (unsigned long)(uint32_t)result.result.error_address,
-            (unsigned long)(result.result.elapsed_ms >> 32), (unsigned long)(uint32_t)result.result.elapsed_ms);
-        pc_chip_test_result_t chip = {"RK_SIM", result.result.die,
-                                     result.result.failed ? 2 : 1, description};
-        cJSON *root = pc_test_result_create(s_name, s_index, &chip, 1U);
+        char json[PC_DISPATCH_RESPONSE_CAPACITY - 18U];
+        pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT] = {{0U, "", 0U}, {0U, "", 0U}};
+        for (uint8_t i = 0U; i < result.result.failure_count; ++i) {
+            const rk_failure_detail_t *failure = &result.result.failures[i];
+            dies[failure->die].failed = 1U;
+            dies[failure->die].error_address = failure->error_address;
+        }
+        cJSON *root = pc_functional_result_create(s_name, s_index, "RK_SIM", result.result.elapsed_ms, dies);
         if (root == NULL) return -1;
         int ok = cJSON_PrintPreallocated(root, json, sizeof(json), 0);
         cJSON_Delete(root);

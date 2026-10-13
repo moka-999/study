@@ -86,8 +86,11 @@ def build_package(args: argparse.Namespace) -> Path:
     run(*PYTHON, ROOT / "tests/verify_ota_relocation.py", "--cmake", args.cmake,
         "--ninja", args.ninja, "--compiler", args.compiler, "--ota-boot",
         "--version", args.version, "--build-type", args.configuration,
-        *(["--power-simulation"] if args.power_simulation else []))
+        *(["--power-simulation"] if args.power_simulation else []),
+        *(["--mats-fail-test"] if args.mats_fail_test else []))
     prefix = "ota-app-power-sim" if args.power_simulation else "ota-app"
+    if args.mats_fail_test:
+        prefix += "-mats-fail"
     build = ROOT / "build" / f"{prefix}-{args.version}-{args.configuration.lower()}-a1"
     run(*PYTHON, BOOT / "tools/pack_ota.py", "--app-build", build, "--compiler", args.compiler)
     return build
@@ -208,7 +211,10 @@ def main() -> None:
                         help="仅network旧版迁移：上传用旧动作，重启后先查mcu_query")
     parser.add_argument("--confirm-idle", action="store_true", help="操作者确认已停测试/温控，允许复位升级")
     parser.add_argument("--power-simulation", action="store_true", help="仅V2：模拟电源/测量，保留真实RK与其他正式任务")
+    parser.add_argument("--mats-fail-test", action="store_true", help="仅V2电源模拟：每次真实MATS结束向PC上报模拟FAIL")
     args = parser.parse_args()
+    if args.mats_fail_test and not args.power_simulation:
+        parser.error("--mats-fail-test必须配合--power-simulation，禁止用于普通固件")
     if args.legacy_ota_actions and args.action != "network":
         parser.error("--legacy-ota-actions仅用于network升级旧版固件")
     if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", args.version) or any(int(n) > 65535 for n in args.version.split(".")):

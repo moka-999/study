@@ -28,7 +28,7 @@ typedef struct {
     uint32_t timeout_ms;       /* 结果等待毫秒数；0不限时，非0超时也不自动重发测试。 */
 } rk_request_t;
 typedef enum {
-    RK_RESPONSE_COMPLETE,  /* 接收窗口/算法检查通过，详情与FAIL已收齐；读取result.failed。 */
+    RK_RESPONSE_COMPLETE,  /* 完整3/5/7 TLV结果通过接收窗口/算法检查；两颗结论由失败明细确定。 */
     RK_RESPONSE_TIMEOUT,   /* 最终结果超时；RK可能仍在执行，后续请求暂停发送。 */
     RK_RESPONSE_TX_FAILED, /* 本端整帧未能进入UART发送队列；不自动重发。 */
     RK_RESPONSE_INVALID,   /* 已出队请求不合法，例如命令不支持或时限超范围。 */
@@ -44,7 +44,7 @@ typedef struct {
     uint32_t cookie;             /* 原请求关联令牌，用于找到业务算法index。 */
     uint64_t sequence;           /* 原下行命令Seq，仅内部诊断；不是RK最近上报值或PC Seq。 */
     rk_response_status_t status; /* 通信/执行交付状态；不是DDR算法PASS/FAIL。 */
-    rk_test_result_t result;   /* 仅COMPLETE有效；其他状态不是DDR测试FAIL。 */
+    rk_final_result_t result;    /* 仅COMPLETE有效；含0..2组失败明细，其他状态不是DDR测试FAIL。 */
 } rk_response_t;
 /* 启动阶段建立的8槽队列；业务请用下面的接口，不直接清空或覆盖队列。 */
 extern QueueHandle_t rkRequestQueue;
@@ -58,4 +58,19 @@ int rk_link_request(const rk_request_t *request);
 int rk_link_receive(rk_response_t *response);
 /* 新命令/心跳独立u64序号，启动从0递增，临界区保护；失败允许序号间隙。 */
 uint64_t rk_link_next_sequence(void);
+
+/** TCP电源编排上电前调用；token非0、每轮更新。清除旧就绪，0成功/-1参数错误。
+ * 不发串口数据。确认必须发生在此后成功发出的MCU心跳Seq窗口内。
+ */
+int rk_link_ready_begin(uint32_t token);
+/** 同一启动令牌查询：0等待、1普通心跳已确认、-1令牌不匹配；线程安全、非阻塞。
+ * 这是项目约定的初始化完成信号，不是MCU独立验证DDR训练成功。
+ */
+int rk_link_ready_poll(uint32_t token);
+/** 仅RK任务在普通心跳整帧成功进入UART队列后调用；失败发送不能扩大窗口。 */
+void rk_link_ready_note_tx(uint64_t sequence);
+/** 仅RK任务在完整帧通过长度/HCRC/FCRC/帧尾检查后调用；只认零TLV普通心跳，
+ * 兼容单个0x0000空Value，拒绝进度/结果/未知TLV，不把串口文字视为就绪。
+ */
+void rk_link_ready_note_rx(const tlv_frame_t *frame);
 #endif

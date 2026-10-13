@@ -225,7 +225,7 @@ def main() -> None:
     verify_wave_image_timeline()
     verify_lock_wait_does_not_consume_rail_delay()
     print("pwr_ctrl: production/wave-image contracts and 4 state-machine scenarios PASS")
-    print("Timing values are test-only; B1 PC6/PC7 order remains explicitly unconfigured")
+    print("Timing values here are V2 test-only; B1 defaults have a separate actual-C regression")
 
 
 if __name__ == "__main__":

@@ -29,12 +29,13 @@ def rk_frame(sequence, units):
 
 
 def rk_result(sequence, command, address=0, die=1, elapsed=987, reverse=False, failed=None):
-    units = [(0x5001, struct.pack('<H', command)), (0x9001, struct.pack('<Q', address)),
-             (0x3001, bytes([die])), (0x9002, struct.pack('<Q', elapsed))]
-    # sequence传最近收到的MCU Seq；详情与FAIL是两帧，缺任一帧不能完成。
+    # 一个完整结果包；地址和die必须相邻，不能为了换序把二者拆散。
     flag = int(address != 0) if failed is None else failed
-    return (rk_frame(sequence, list(reversed(units)) if reverse else units)
-            + rk_frame(sequence, [(0x1017, bytes([flag]))]))
+    assert flag in (0, 1) and die in (0, 1)
+    scalars = [(0x5001, struct.pack('<H', command)), (0x1017, bytes([flag])),
+               (0x9002, struct.pack('<Q', elapsed))]
+    pairs = [(0x9001, struct.pack('<Q', address)), (0x3001, bytes([die]))] if flag else []
+    return rk_frame(sequence, list(reversed(scalars)) + pairs if reverse else scalars[:2] + pairs + scalars[2:])
 
 
 class Rk:
@@ -119,18 +120,21 @@ def main():
                     return body
                 def start(name, index, **kwargs):
                     send(0x0103, {'algorithmType': 'functional', 'algorithmName': name,
-                         'algorithmIndex': index, 'power': {'memoryType': 'LPDDR4X', 'vdd1Steps': 0,
-                         'vdd2Steps': 0, 'vddqSteps': 0}, 'reboot': False, 'bootMode': 'emmc'}, **kwargs)
+                         'algorithmIndex': index, 'power': {'memoryType': 'LPDDR4X', 'vdd1': '1800',
+                         'vdd2': '1100', 'vddq': '600'}, 'reboot': False, 'bootMode': 'emmc'}, **kwargs)
                     body = receive(6)
                     assert body['status'] == 'accepted' and body['testOnly'] is True
                     assert body['algorithmIndex'] == index
                 def check_result(index, status, address):
                     body = receive(0x0105)
                     assert body['algorithmIndex'] == index
-                    item = body['testResults'][0]
-                    assert item['testStatus'] == status and item['siteId'] == 'RK_SIM'
-                    assert f'0x{address:016X}' in item['resultDesc'], item
-                    assert 'elapsedMs=0x00000000000003DB' in item['resultDesc'], item
+                    assert body['siteId'] == 'RK_SIM' and body['testTimeMs'] == 987
+                    assert len(body['testResults']) == 2 and body['measurementData'] is None
+                    for die, item in enumerate(body['testResults']):
+                        assert item['mirrorIndex'] == die and 'siteId' not in item and 'measurementData' not in item
+                        assert item['testStatus'] == (status if die == 1 else 1)
+                        assert item['resultDesc'] == {'firstErrorAddress': f'0x{address:016X}' if die == 1 and status == 0 else None,
+                                                       'errorType': ''}, item
 
                 start('gtest-xor', 101, fragmented=True, heartbeat=True)
                 assert receive(1) == {}
@@ -147,14 +151,14 @@ def main():
                 passed('错Seq/缺字段/重复字段/坏CRC不冒充结果，PC心跳仍正常')
                 rk.send(b'\x5A\x99' + rk_result(rk.latest_sequence, cmd), split=True)
                 check_result(101, 1, 0)
-                passed('伪帧头后恢复、串口逐字节两包结果，详情与FAIL合并成0105')
+                passed('伪帧头后恢复、串口逐字节完整结果生成双颗粒0105')
                 rk.send(rk_result(rk.latest_sequence, cmd)); send(2, {}); assert receive(1) == {}
                 passed('重复最终结果不重复回包，PC与RK Seq互不替代')
                 start('mats', 102)
                 seq, cmd = rk.command(); assert cmd == 17
                 address = 0x100000008
                 rk.send(rk_frame(rk.latest_sequence, []) + rk_result(rk.latest_sequence, cmd, address, reverse=True))
-                check_result(102, 2, address)
+                check_result(102, 0, address)
                 passed('17=MATS、结果顺序变化、心跳粘包和64位失败地址')
                 start('marchx', 103)
                 seq, cmd = rk.command(); assert cmd == 18

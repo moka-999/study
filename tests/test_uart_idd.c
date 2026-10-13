@@ -6,6 +6,9 @@
 #include "test_port.h"
 #include <limits.h>
 #include <string.h>
+#if defined(TEST_B1_LOG_CONSOLE)
+#include "log_console.h"
+#endif
 
 #define STR1(x) #x
 #define STR(x) STR1(x)
@@ -31,28 +34,30 @@ void test_abort(void) { fail("FAIL CPU exception\n"); }
 void test_enter(void) { ++critical; }
 void test_exit(void) { CHECK(critical > 0); --critical; }
 TickType_t xTaskGetTickCount(void) { return tick; }
+uint32_t __get_IPSR(void) { return (uint32_t)isr; }
 
 typedef struct {
     uint8_t blocks[8][UART_RX_BUF_SIZE + 2U];
-    unsigned size, count, head, tail;
+    unsigned size, capacity, count, head, tail;
 } fake_queue_t;
-static fake_queue_t queues[2];
+static fake_queue_t queues[3];
 static unsigned queue_count;
 static int allocation_failure;
 QueueHandle_t xQueueCreate(UBaseType_t length, UBaseType_t size)
 {
-    CHECK(length == 8U && size <= sizeof(queues[0].blocks[0]) && queue_count < 2U);
+    CHECK((length == 8U || length == 2U) && size <= sizeof(queues[0].blocks[0]) && queue_count < 3U);
     if (allocation_failure) return NULL;
     queues[queue_count].size = size;
+    queues[queue_count].capacity = length;
     return &queues[queue_count++];
 }
 BaseType_t xQueueSendFromISR(QueueHandle_t handle, const void *data, BaseType_t *wake)
 {
     fake_queue_t *q = handle;
     CHECK(isr && q && wake);
-    if (q->count == 8U) return pdFALSE;
+    if (q->count == q->capacity) return pdFALSE;
     memcpy(q->blocks[q->tail], data, q->size);
-    q->tail = (q->tail + 1U) % 8U; ++q->count;
+    q->tail = (q->tail + 1U) % q->capacity; ++q->count;
     return pdTRUE;
 }
 BaseType_t xQueueReceive(QueueHandle_t handle, void *data, TickType_t wait)
@@ -61,7 +66,7 @@ BaseType_t xQueueReceive(QueueHandle_t handle, void *data, TickType_t wait)
     CHECK(!isr && wait == 0U && critical);
     if (!q->count) return pdFALSE;
     memcpy(data, q->blocks[q->head], q->size);
-    q->head = (q->head + 1U) % 8U; --q->count;
+    q->head = (q->head + 1U) % q->capacity; --q->count;
     return pdTRUE;
 }
 BaseType_t xQueueReset(QueueHandle_t handle)
@@ -75,36 +80,62 @@ UBaseType_t uxQueueMessagesWaiting(QueueHandle_t handle) { return ((fake_queue_t
 int HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *uart) { return uart->event; }
 void uart_tx_mutex_init(void) { }
 void uart_tx_isr_attach(void) { }
-static UART_HandleTypeDef uart[2];
-static uint8_t *dma_buffer[2];
-static unsigned starts[2], aborts;
-static int fail_start[2], fail_abort;
+static UART_HandleTypeDef uart[3];
+static uint8_t *dma_buffer[3];
+static unsigned starts[3], aborts;
+static int fail_start[3], fail_abort;
+#if defined(TEST_B1_LOG_CONSOLE)
+static char console_output[8192];
+static size_t console_output_length;
+static int fail_console_send;
+#endif
 static int start_rx(uart_if_t *port, uint8_t *buffer, uint16_t length)
 {
-    unsigned index = port->handle == &uart[0] ? 0U : 1U;
+    unsigned index = (unsigned)((UART_HandleTypeDef *)port->handle - uart);
+    CHECK(index < 3U);
     CHECK(length == UART_RX_BUF_SIZE);
     ++starts[index]; dma_buffer[index] = buffer;
     return fail_start[index] ? IF_ERR : IF_OK;
 }
 static int send_tx(uart_if_t *port, uint8_t *data, uint16_t length)
-{ (void)port; (void)data; (void)length; return IF_OK; }
+{
+#if defined(TEST_B1_LOG_CONSOLE)
+    CHECK(port->handle != &uart[1]); /* 日志输入永远不能收到MCU发出的控制台字符。 */
+    if (port->handle == &uart[2]) {
+        CHECK(!isr && critical && length <= 128U);
+        if (fail_console_send) return IF_ERR;
+        CHECK(console_output_length + length < sizeof(console_output));
+        memcpy(console_output + console_output_length, data, length);
+        console_output_length += length;
+        console_output[console_output_length] = '\0';
+    }
+#else
+    (void)port; (void)data; (void)length;
+#endif
+    return IF_OK;
+}
 int uart_rx_abort(uart_if_t *port)
 {
-    CHECK(!isr && !critical && port->handle == &uart[0]);
+    CHECK(!isr && !critical &&
+          (port->handle == &uart[0] || port->handle == &uart[1] || port->handle == &uart[2]));
     ++aborts;
     return fail_abort ? IF_ERR : IF_OK;
 }
-static uart_if_t ports[2] = {
+static uart_if_t ports[3] = {
     {.handle = &uart[0], .send = send_tx, .start_rx = start_rx},
     {.handle = &uart[1], .send = send_tx, .start_rx = start_rx},
+    {.handle = &uart[2], .send = send_tx, .start_rx = start_rx},
 };
-static void receive(const uint8_t *bytes, uint16_t size, int event)
+static void receive_port(unsigned port, const uint8_t *bytes, uint16_t size, int event)
 {
     CHECK(size <= UART_RX_BUF_SIZE && !critical);
-    if (size) memcpy(dma_buffer[0], bytes, size);
-    uart[0].event = event;
-    isr = 1; HAL_UARTEx_RxEventCallback(&uart[0], size); isr = 0;
+    CHECK(port < 3U && dma_buffer[port]);
+    if (size) memcpy(dma_buffer[port], bytes, size);
+    uart[port].event = event;
+    isr = 1; HAL_UARTEx_RxEventCallback(&uart[port], size); isr = 0;
 }
+static void receive(const uint8_t *bytes, uint16_t size, int event)
+{ receive_port(0U, bytes, size, event); }
 static void error_event(uint32_t error)
 {
     uart[0].ErrorCode = error;
@@ -158,6 +189,9 @@ static void test_uart(void)
     CHECK(!uart_get_rx_diagnostics(0, &diag));
     allocation_failure = 0; uart_register(0, &ports[0]); uart_register(0, &ports[0]);
     fail_start[1] = 1; uart_register(1, &ports[1]);
+#if defined(TEST_B1_LOG_CONSOLE)
+    uart_register(UART_PORT_CONSOLE, &ports[2]);
+#endif
     uart_start_all(); CHECK(starts[0] == 1U && starts[1] == 1U);
     CHECK(uart_get_rx_diagnostics(1, &diag) && diag.restart_failures == 1U && diag.recovery_pending);
     receive(heartbeat, 10U, HAL_UART_RXEVENT_HT);
@@ -287,9 +321,126 @@ static void test_stats(void)
     idd_stats_finish(NULL);
 }
 
+#if defined(TEST_B1_LOG_CONSOLE)
+/* 实际日志模块加实际三槽路由；只替代队列、DMA及TX出口，不另写选择器模型。 */
+int _write(int file, char *data, int length);
+static void clear_console_output(void)
+{ console_output_length = 0U; console_output[0] = '\0'; }
+static void console_input(const char *text)
+{
+    receive_port(UART_PORT_CONSOLE, (const uint8_t *)text, (uint16_t)strlen(text), HAL_UART_RXEVENT_IDLE);
+    log_console_process();
+}
+static void rk_log_input(const char *text)
+{
+    receive_port(UART_PORT_RK_DEBUG, (const uint8_t *)text, (uint16_t)strlen(text), HAL_UART_RXEVENT_IDLE);
+    log_console_process();
+}
+static void test_log_console(void)
+{
+    uint8_t buffer[UART_RX_BUF_SIZE];
+    CHECK(log_console_write("early", 5U) == 0U);
+    fail_start[1] = 0; tick += 100U;
+    (void)uart_poll_rx(UART_PORT_RK_DEBUG, buffer, sizeof(buffer));
+    log_console_start();
+    CHECK((console_output_length != 0U) == (B1_LOG_DEFAULT_SOURCE == 0));
+    clear_console_output();
+    CHECK(log_console_write("mcu", 3U) == 3U);
+    rk_log_input("rk");
+    CHECK(strcmp(console_output, B1_LOG_DEFAULT_SOURCE == 0 ? "mcu" : "rk") == 0);
+
+    console_input("log mcu\r\n");
+    clear_console_output();
+    /* 半行不能切换；逐字节与CRLF分片都合法。 */
+    console_input("log r");
+    CHECK(log_console_write("still-mcu", 9U) == 9U);
+    CHECK(strcmp(console_output, "still-mcu") == 0);
+    clear_console_output();
+    console_input("k\r"); console_input("\n");
+    CHECK(strcmp(console_output, "\r\n[log] source=rk\r\n") == 0);
+    clear_console_output();
+    CHECK(log_console_write("hidden", 6U) == 6U && console_output_length == 0U);
+    /* RK输出即使包含命令文字，也必须原样转发而不能解释。 */
+    rk_log_input("log mcu\nRK text\r\n");
+    CHECK(strcmp(console_output, "log mcu\nRK text\r\n") == 0);
+    CHECK(log_console_write("hidden", 6U) == 6U);
+    CHECK(strcmp(console_output, "log mcu\nRK text\r\n") == 0);
+
+    clear_console_output();
+    console_input("log unknown\n");
+    CHECK(strstr(console_output, "use: log mcu | log rk") != NULL);
+    clear_console_output();
+    static const uint8_t bad_nul[] = {'l','o','g',' ','m','c','u',0,'\n'};
+    receive_port(UART_PORT_CONSOLE, bad_nul, sizeof(bad_nul), HAL_UART_RXEVENT_IDLE);
+    log_console_process();
+    CHECK(strstr(console_output, "source=mcu") == NULL);
+    memset(buffer, 'x', 40U);
+    memcpy(buffer + 40U, "log mcu\n", 8U);
+    receive_port(UART_PORT_CONSOLE, buffer, 48U, HAL_UART_RXEVENT_IDLE);
+    log_console_process();
+    CHECK(strstr(console_output, "source=mcu") == NULL);
+    clear_console_output();
+    rk_log_input("still-rk");
+    CHECK(strcmp(console_output, "still-rk") == 0);
+
+    /* 控制台断流不能把后续命令尾部拼成有效切换；协议队列始终不被消费。 */
+    console_input("log m");
+    uart[2].ErrorCode = 8U;
+    isr = 1; HAL_UART_ErrorCallback(&uart[2]); isr = 0;
+    tick += 100U; log_console_process();
+    clear_console_output();
+    console_input("cu\n");
+    CHECK(strstr(console_output, "source=mcu") == NULL);
+    uint8_t heartbeat[16];
+    CHECK(tlv_pack_heartbeat(77U, heartbeat, sizeof(heartbeat)) == 16);
+    receive(heartbeat, sizeof(heartbeat), HAL_UART_RXEVENT_IDLE);
+    for (unsigned i = 0U; i < 3U; ++i)
+        receive_port(UART_PORT_RK_DEBUG, (const uint8_t *)"rk", 2U, HAL_UART_RXEVENT_IDLE);
+    log_console_process();
+    CHECK(uart_poll_rx(UART_PORT_RK_PROTOCOL, buffer, sizeof(buffer)) == 16);
+    CHECK(memcmp(buffer, heartbeat, 16U) == 0);
+    clear_console_output(); rk_log_input("after-log-overflow");
+    CHECK(strcmp(console_output, "after-log-overflow") == 0);
+
+    /* TX拥塞时先保留控制回复；恢复出口后先确认再输出新来源，不能死等。 */
+    clear_console_output(); fail_console_send = 1;
+    console_input("log mcu\n");
+    CHECK(console_output_length == 0U);
+    CHECK(log_console_write("drop-until-ack", 14U) == 14U);
+    fail_console_send = 0; log_console_process();
+    CHECK(strcmp(console_output, "\r\n[log] source=mcu\r\n") == 0);
+    clear_console_output();
+    rk_log_input("discard-rk-now");
+    CHECK(console_output_length == 0U);
+    char big[300]; memset(big, 'm', sizeof(big));
+    CHECK(log_console_write(big, sizeof(big)) == sizeof(big));
+    CHECK(console_output_length == sizeof(big) && memcmp(console_output, big, sizeof(big)) == 0);
+    fail_console_send = 1;
+    CHECK(log_console_write("full", 4U) == 0U);
+    fail_console_send = 0;
+
+    clear_console_output();
+    CHECK(_write(1, "stdio", 5) == 5 && strcmp(console_output, "stdio") == 0);
+    CHECK(_write(0, "no", 2) == -1 && _write(1, NULL, 1) == -1);
+    CHECK(_write(2, NULL, 0) == 0 && _write(1, "no", -1) == -1);
+    isr = 1; CHECK(log_console_write("no-isr", 6U) == 0U); isr = 0;
+    console_input("log rk\n"); clear_console_output();
+    CHECK(_write(2, "hidden", 6) == 6 && console_output_length == 0U);
+    /* 默认值在重新初始化后恢复，两种编译配置各执行一次本用例。 */
+    log_console_start(); clear_console_output();
+    CHECK(log_console_write("mcu", 3U) == 3U); rk_log_input("rk");
+    CHECK(strcmp(console_output, B1_LOG_DEFAULT_SOURCE == 0 ? "mcu" : "rk") == 0);
+    CHECK(!critical && !isr);
+    message("PASS: B1 selectable log console\n");
+}
+#endif
+
 void test_main(void)
 {
     test_frames(); test_uart(); test_stats();
+#if defined(TEST_B1_LOG_CONSOLE)
+    test_log_console();
+#endif
     message("PASS: UART recovery, RK bounds and IDD windows\n");
     finish(0U);
 }

@@ -44,9 +44,9 @@ def main():
             "algorithmIndex": index,
             "power": {
                 "memoryType": "LPDDR4X",
-                "vdd1Steps": step,
-                "vdd2Steps": step,
-                "vddqSteps": step,
+                "vdd1": str(1800 + 10 * step),
+                "vdd2": str(1100 + 5 * step),
+                "vddq": str(600 + 5 * step),
             },
             "reboot": False,
             "bootMode": "emmc",

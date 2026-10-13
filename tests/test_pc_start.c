@@ -9,12 +9,14 @@
 #include "ota_app.h"
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define S1(x) #x
 #define S(x) S1(x)
 #define CHECK(c) do { if (!(c)) fail("FAIL " S(__LINE__) ": " #c "\n"); } while (0)
-#define VALID_JSON "{\"algorithmType\":\"parametric\",\"algorithmName\":\"idd_0\",\"algorithmIndex\":1,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1Steps\":0,\"vdd2Steps\":0,\"vddqSteps\":0},\"reboot\":true,\"bootMode\":\"emmc\"}"
+#define VALID_JSON "{\"algorithmType\":\"parametric\",\"algorithmName\":\"idd_0\",\"algorithmIndex\":1,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":true,\"bootMode\":\"emmc\"}"
 static int confirmed = 1;
 static int query_monitor;
 
@@ -45,11 +47,65 @@ static _Noreturn void finish(uint32_t code)
 static _Noreturn void fail(const char *text) { message(text); finish(1U); }
 void test_abort(void) { fail("FAIL CPU exception\n"); }
 
+/* 对双颗粒JSON每个分配点逐一注入失败，检查第二颗及测量对象失败时无泄漏。 */
+static unsigned allocation_calls, allocation_fail_at, allocations_live;
+static void *fault_allocate(size_t bytes)
+{
+    if (++allocation_calls == allocation_fail_at) return NULL;
+    void *memory = malloc(bytes);
+    if (memory) ++allocations_live;
+    return memory;
+}
+static void fault_free(void *memory)
+{
+    if (memory) { CHECK(allocations_live > 0U); --allocations_live; free(memory); }
+}
+static void test_result_capacity_and_allocation(void)
+{
+    char site[16]; memset(site, 1, 15U); site[15] = '\0';
+    const pc_functional_die_result_t dies[2] = {{UINT64_MAX, "SAF", 1U}, {UINT64_MAX, "", 1U}};
+    idd_stats_t stats = {0};
+    for (unsigned rail = 0U; rail < 3U; ++rail) {
+        stats.voltage[rail].valid_count = stats.current[rail].valid_count = 1U;
+        stats.voltage[rail].mean = stats.voltage[rail].minimum = stats.voltage[rail].maximum = INT32_MIN;
+        stats.current[rail].mean = stats.current[rail].minimum = stats.current[rail].maximum = UINT32_MAX;
+    }
+    unsigned reached_success = 0U;
+    cJSON_Hooks hooks = {fault_allocate, fault_free};
+    cJSON_InitHooks(&hooks);
+    for (allocation_fail_at = 1U; allocation_fail_at < 256U; ++allocation_fail_at) {
+        allocation_calls = 0U;
+        cJSON *body = pc_functional_result_create("gtest-stuck-address", UINT32_MAX, site, UINT64_MAX, dies);
+        if (body && pc_test_add_measurement(body, &stats)) {
+            char json[PC_DISPATCH_RESPONSE_CAPACITY - PC_PROTOCOL_HEADER_SIZE];
+            CHECK(cJSON_PrintPreallocated(body, json, sizeof(json), 0));
+            CHECK(strlen(json) + PC_PROTOCOL_HEADER_SIZE <= PC_DISPATCH_RESPONSE_CAPACITY);
+            reached_success = 1U;
+        }
+        cJSON_Delete(body);
+        CHECK(allocations_live == 0U);
+        if (reached_success) break;
+    }
+    cJSON_InitHooks(NULL);
+    CHECK(reached_success);
+    message("PASS: dual-die worst-case PDU and every JSON allocation failure without leaks\n");
+}
+
 /* 0103仅允许OTA健康查询；任何电源、DAC、采样、Flash或其他业务调用均失败。 */
 int ota_app_is_confirmed(void) { return confirmed; }
+void ota_download_get_progress(ota_download_progress_t *out)
+{ memset(out, 0, sizeof(*out)); out->state = OTA_DOWNLOAD_IDLE; }
+#if defined(B1_RK_UART)
+size_t log_console_write(const char *text, size_t length)
+{ (void)text; (void)length; fail("FAIL unexpected power log\n"); }
+#endif
 uint32_t HAL_GetTick(void) { if (query_monitor) return 1000U; fail("FAIL unexpected HAL_GetTick\n"); }
 pwr_ctrl_state_t pwr_ctrl_get_state(void) { fail("FAIL unexpected power access\n"); }
 pwr_ctrl_result_t monitor_request_power_on(uint32_t now) { (void)now; fail("FAIL power on\n"); }
+uint8_t pwr_ctrl_is_configured(void) { fail("FAIL unexpected power configuration access\n"); }
+pwr_ctrl_result_t monitor_request_training_power_on(ddr_memory_type_t type, const uint16_t mv[3], uint32_t now)
+{ (void)type; (void)mv; (void)now; fail("FAIL training power on\n"); }
+pwr_ctrl_result_t monitor_request_power_off(uint32_t now) { (void)now; fail("FAIL power off\n"); }
 monitor_boot_result_t monitor_set_boot_mode(boot_mode_t mode) { (void)mode; fail("FAIL Boot write\n"); }
 monitor_boot_result_t monitor_get_boot_mode(boot_mode_t *mode, uint16_t *mv)
 { (void)mode; (void)mv; fail("FAIL Boot query\n"); }
@@ -194,35 +250,48 @@ static void test_message_contract(void)
         CHECK(pc_json_parse_object((const uint8_t *)nul_json[i], strlen(nul_json[i]),
                                    &root, NULL) == PC_JSON_ERROR_SYNTAX && root == NULL);
     }
+    pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT] = {{0U, "", 0U}, {0U, "", 0U}};
     const uint64_t addresses[] = {0U, UINT64_C(0x0000000123456780), UINT64_MAX};
-    const char *const address_text[] = {NULL, "0x0000000123456780", "0xFFFFFFFFFFFFFFFF"};
-    for (size_t i = 0U; i < 3U; i++) {
-        root = pc_functional_result_create("gtest-xor", UINT32_MAX, "B1-01", 0U, "", addresses[i], 42000U, i != 0U);
-        CHECK(root != NULL && cJSON_GetArraySize(root) == 5);
-        CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(root, "algorithmType")->valuestring, "functional") == 0);
-        CHECK(cJSON_GetObjectItemCaseSensitive(root, "algorithmIndex")->valuedouble == 4294967295.0);
-        const cJSON *array = cJSON_GetObjectItemCaseSensitive(root, "testResults");
-        CHECK(cJSON_IsArray(array) && cJSON_GetArraySize(array) == 1);
-        const cJSON *entry = cJSON_GetArrayItem(array, 0);
-        CHECK(cJSON_GetArraySize(entry) == 6);
-        CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(entry, "siteId")->valuestring, "B1-01") == 0);
-        CHECK(cJSON_GetObjectItemCaseSensitive(entry, "mirrorIndex")->valueint == 0);
-        CHECK(cJSON_GetObjectItemCaseSensitive(entry, "testStatus")->valueint == (i == 0U ? 1 : 2));
-        CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(entry, "physicalAddr")->valuestring, "") == 0);
-        CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(entry, "measurementData")));
-        const cJSON *desc = cJSON_GetObjectItemCaseSensitive(entry, "resultDesc");
-        CHECK(cJSON_IsObject(desc) && cJSON_GetArraySize(desc) == 2);
-        CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(desc, "errorType")));
-        const cJSON *address = cJSON_GetObjectItemCaseSensitive(desc, "firstErrorAddress");
-        CHECK(i == 0U ? cJSON_IsNull(address) :
-              cJSON_IsString(address) && strcmp(address->valuestring, address_text[i]) == 0);
-        cJSON_Delete(root);
+    const char *const address_text[] = {"0x0000000000000000", "0x0000000123456780", "0xFFFFFFFFFFFFFFFF"};
+    for (unsigned mask = 0U; mask < 4U; ++mask) {
+        for (size_t i = 0U; i < 3U; ++i) {
+            for (unsigned die = 0U; die < PC_FUNCTIONAL_DIE_COUNT; ++die) {
+                dies[die].failed = (mask >> die) & 1U;
+                dies[die].error_address = addresses[i];
+                dies[die].error_type = "SAF";
+            }
+            root = pc_functional_result_create("gtest-xor", UINT32_MAX, "B1-01", 42000U, dies);
+            CHECK(root && cJSON_GetArraySize(root) == 7);
+            CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(root, "siteId")->valuestring, "B1-01") == 0);
+            CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(root, "algorithmType")->valuestring, "functional") == 0);
+            CHECK(cJSON_GetObjectItemCaseSensitive(root, "algorithmIndex")->valuedouble == 4294967295.0);
+            CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(root, "measurementData")));
+            const cJSON *array = cJSON_GetObjectItemCaseSensitive(root, "testResults");
+            CHECK(cJSON_IsArray(array) && cJSON_GetArraySize(array) == 2);
+            for (unsigned die = 0U; die < PC_FUNCTIONAL_DIE_COUNT; ++die) {
+                const cJSON *entry = cJSON_GetArrayItem(array, die);
+                CHECK(cJSON_GetArraySize(entry) == 4);
+                CHECK(!cJSON_GetObjectItemCaseSensitive(entry, "siteId"));
+                CHECK(!cJSON_GetObjectItemCaseSensitive(entry, "measurementData"));
+                CHECK(cJSON_GetObjectItemCaseSensitive(entry, "mirrorIndex")->valueint == (int)die);
+                CHECK(cJSON_GetObjectItemCaseSensitive(entry, "testStatus")->valueint == (dies[die].failed ? 0 : 1));
+                CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(entry, "physicalAddr")->valuestring, "") == 0);
+                const cJSON *desc = cJSON_GetObjectItemCaseSensitive(entry, "resultDesc");
+                CHECK(cJSON_IsObject(desc) && cJSON_GetArraySize(desc) == 2);
+                CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(desc, "errorType")->valuestring,
+                             dies[die].failed ? "SAF" : "") == 0);
+                const cJSON *address = cJSON_GetObjectItemCaseSensitive(desc, "firstErrorAddress");
+                CHECK(dies[die].failed ? cJSON_IsString(address) && strcmp(address->valuestring, address_text[i]) == 0
+                                      : cJSON_IsNull(address));
+            }
+            cJSON_Delete(root);
+        }
     }
     /* 核对线上数字文本，不能用double比较掩盖uint64大值的末位丢失。 */
     const uint64_t times[] = {0U, 42000U, UINT64_C(4294967296), UINT64_C(9007199254740993), UINT64_MAX};
     const char *const time_text[] = {"0", "42000", "4294967296", "9007199254740993", "18446744073709551615"};
     for (size_t i = 0U; i < sizeof(times) / sizeof(times[0]); ++i) {
-        root = pc_functional_result_create("gtest-xor", 1U, "", 0U, "", 0U, times[i], 0U);
+        root = pc_functional_result_create("gtest-xor", 1U, "", times[i], dies);
         CHECK(root);
         char *json = cJSON_PrintUnformatted(root);
         CHECK(json);
@@ -236,20 +305,15 @@ static void test_message_contract(void)
         cJSON_free(json);
         cJSON_Delete(root);
     }
-    CHECK(pc_functional_result_create(NULL, 1U, "", 0U, "", 0U, 0U, 0U) == NULL);
-    CHECK(pc_functional_result_create("gtest-xor", 1U, NULL, 0U, "", 0U, 0U, 0U) == NULL);
-    CHECK(pc_functional_result_create("gtest-xor", 1U, "", 0U, NULL, 0U, 0U, 0U) == NULL);
-    CHECK(pc_functional_result_create("gtest-xor", 1U, "", 0U, "", 0U, 0U, 2U) == NULL);
-    /* FAIL由显式标志判定，地址为0仍可失败；非零地址也不能覆盖显式PASS。 */
-    for (unsigned failed = 0U; failed <= 1U; ++failed) {
-        root = pc_functional_result_create("gtest-xor", 1U, "", 0U, "", failed ? 0U : 0x1234U, 0U, failed);
-        CHECK(root != NULL);
-        const cJSON *entry = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(root, "testResults"), 0);
-        CHECK(cJSON_GetObjectItemCaseSensitive(entry, "testStatus")->valueint == (failed ? 2 : 1));
-        const cJSON *address = cJSON_GetObjectItemCaseSensitive(
-            cJSON_GetObjectItemCaseSensitive(entry, "resultDesc"), "firstErrorAddress");
-        CHECK(failed ? cJSON_IsNull(address) : cJSON_IsString(address));
-        cJSON_Delete(root);
+    CHECK(pc_functional_result_create(NULL, 1U, "", 0U, dies) == NULL);
+    CHECK(pc_functional_result_create("gtest-xor", 1U, NULL, 0U, dies) == NULL);
+    CHECK(pc_functional_result_create("gtest-xor", 1U, "", 0U, NULL) == NULL);
+    for (unsigned die = 0U; die < PC_FUNCTIONAL_DIE_COUNT; ++die) {
+        dies[die].failed = 2U;
+        CHECK(pc_functional_result_create("gtest-xor", 1U, "", 0U, dies) == NULL);
+        dies[die].failed = 1U; dies[die].error_type = NULL;
+        CHECK(pc_functional_result_create("gtest-xor", 1U, "", 0U, dies) == NULL);
+        dies[die].error_type = "";
     }
     message("PASS: external-ready JSON, optional timeout, NUL rejection and real FUNC result\n");
 }
@@ -385,12 +449,68 @@ static void test_stream_recovery(void)
     message("PASS: actual PC stream recovery, malformed JSON, no embedded dispatch and bounded scan\n");
 }
 
+/* 穷举两种内存、每轨256个原生码，直接执行正式JSON解析和共享电压换算。 */
+static void test_native_power_mv(void)
+{
+    const char *const types[] = {"LPDDR4", "LPDDR4X"};
+    const char *const keys[] = {"vdd1", "vdd2", "vddq"};
+    const int16_t minimum_steps[2][3] = {{-100, -140, -140}, {-100, -140, -40}};
+    const uint16_t nominal[2][3] = {{1800U, 1100U, 1100U}, {1800U, 1100U, 600U}};
+    const uint16_t minimum[] = {800U, 400U, 400U};
+    const uint16_t step_mv[] = {10U, 5U, 5U};
+    for (unsigned type = 0U; type < 2U; ++type) {
+        for (unsigned rail = 0U; rail < 3U; ++rail) {
+            cJSON *root = base_request();
+            cJSON *power = cJSON_GetObjectItemCaseSensitive(root, "power");
+            replace(power, "memoryType", cJSON_CreateString(types[type]));
+            replace(power, "vddq", cJSON_CreateString(type == 0U ? "1100" : "600"));
+            cJSON *number = cJSON_GetObjectItemCaseSensitive(power, keys[rail]);
+            char text[16];
+            pc_test_start_view_t view;
+            for (unsigned code = 0U; code < 256U; ++code) {
+                int16_t step = (int16_t)(minimum_steps[type][rail] + (int)code);
+                snprintf(text, sizeof(text), "%u", minimum[rail] + code * step_mv[rail]);
+                CHECK(cJSON_SetValuestring(number, text));
+                CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK);
+                CHECK(view.power_steps[rail] == step);
+                for (unsigned other = 0U; other < 3U; ++other) {
+                    CHECK(view.target_mv[other] == (other == rail ?
+                        minimum[rail] + code * step_mv[rail] : nominal[type][other]));
+                }
+            }
+            /* 上下边界各越1档必须拒绝，失败不能交付部分目标给业务层。 */
+            const uint16_t invalid[] = {(uint16_t)(minimum[rail] - step_mv[rail]),
+                                        (uint16_t)(minimum[rail] + 256U * step_mv[rail]),
+                                        (uint16_t)(nominal[type][rail] - 1U),
+                                        (uint16_t)(nominal[type][rail] + 1U)};
+            for (unsigned i = 0U; i < 4U; ++i) {
+                snprintf(text, sizeof(text), "%u", invalid[i]);
+                CHECK(cJSON_SetValuestring(number, text));
+                memset(&view, 0xA5, sizeof(view));
+                pc_test_start_view_t before = view;
+                CHECK(pc_test_start_parse(root, &view) != PC_TEST_JSON_OK);
+                CHECK(memcmp(&view, &before, sizeof(view)) == 0);
+                const char *memory_type = "unchanged";
+                int16_t steps[] = {1, 2, 3};
+                uint16_t mv[] = {11, 22, 33};
+                CHECK(pc_power_parse(power, &memory_type, steps, mv) != PC_TEST_JSON_OK);
+                CHECK(strcmp(memory_type, "unchanged") == 0 && steps[0] == 1 && steps[1] == 2 && steps[2] == 3);
+                CHECK(mv[0] == 11 && mv[1] == 22 && mv[2] == 33);
+            }
+            cJSON_Delete(root);
+        }
+    }
+    message("PASS: string mV, 1536 exact targets, range/grid rejection and unchanged outputs\n");
+}
+
 void test_main(void)
 {
+    test_native_power_mv();
+    test_result_capacity_and_allocation();
     test_stream_recovery();
     test_message_contract();
     const char *const required[] = {"algorithmType", "algorithmName", "algorithmIndex", "power", "reboot", "bootMode"};
-    const char *const power_keys[] = {"memoryType", "vdd1Steps", "vdd2Steps", "vddqSteps"};
+    const char *const power_keys[] = {"memoryType", "vdd1", "vdd2", "vddq"};
     cJSON *root = base_request();
     pc_test_start_view_t view;
     CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK);
@@ -410,6 +530,7 @@ void test_main(void)
         replace(root, "reboot", cJSON_CreateBool(0));
         replace(root, "algorithmIndex", cJSON_CreateNumber(i == 0U ? 0.0 : 4294967295.0));
         replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "memoryType", cJSON_CreateString("LPDDR4"));
+        replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vddq", cJSON_CreateString("1100"));
         CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK && view.target_mv[2] == 1100U && view.reboot == 0U);
         check_request(root, "notReady", 1, i == 0U ? 0U : UINT32_MAX);
     }
@@ -452,20 +573,35 @@ void test_main(void)
     }
     root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "memoryType", cJSON_CreateString("LPDDR5"));
     check_request(root, "invalidArgument", 1, 1U);
-    const double invalid_steps[] = {-32769.0, 32768.0, 0.5, 78.0, -51.0};
-    for (size_t i = 0U; i < 5U; i++) {
-        root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1Steps", cJSON_CreateNumber(invalid_steps[i]));
+    const char *const invalid_mv[] = {"", " ", " 1800", "1800 ", "+1800", "-1800", "1800.0",
+        "1.8e3", "0x708", "1800mV", "1800x", "0", "65536", "999999999999999999999999",
+        "1801", "1799", "790", "3360", "１８００"};
+    for (size_t i = 0U; i < sizeof(invalid_mv) / sizeof(invalid_mv[0]); i++) {
+        root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1", cJSON_CreateString(invalid_mv[i]));
         check_request(root, "invalidArgument", 1, 1U);
     }
-    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vddqSteps", cJSON_CreateBool(1));
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1", cJSON_CreateNumber(1800));
     check_request(root, "invalidArgument", 1, 1U);
-    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vddqSteps", cJSON_CreateNumber(54));
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vddq", cJSON_CreateBool(1));
     check_request(root, "invalidArgument", 1, 1U);
-    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd2Steps", cJSON_CreateNumber(29));
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vddq", cJSON_CreateString("1680"));
     check_request(root, "invalidArgument", 1, 1U);
-    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1Steps", cJSON_CreateNumber(77));
-    CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK && view.target_mv[0] == 3340U);
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd2", cJSON_CreateString("1680"));
+    check_request(root, "invalidArgument", 1, 1U);
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1", cJSON_CreateString("3350"));
+    CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK && view.target_mv[0] == 3350U);
     check_request(root, "notReady", 1, 1U); /* 可写但极端值也不执行，不能当成安全批准。 */
+    root = base_request(); replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd1", cJSON_CreateString("01800"));
+    CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK && view.target_mv[0] == 1800U);
+    cJSON_Delete(root);
+    /* 旧键和新旧混用均拒绝，不能把电压误当档位；错误仍关联原algorithmIndex。 */
+    const char *const old_keys[] = {"vdd1Steps", "vdd2Steps", "vddqSteps"};
+    for (unsigned i = 0U; i < 3U; ++i) {
+        root = base_request(); cJSON *power = cJSON_GetObjectItemCaseSensitive(root, "power");
+        cJSON_DeleteItemFromObjectCaseSensitive(power, power_keys[i + 1U]);
+        CHECK(cJSON_AddNumberToObject(power, old_keys[i], 0));
+        check_request(root, "invalidArgument", 1, 1U);
+    }
 
     /* 直接构造非有限cJSON值，证明浮点转整数前已拒绝；失败不改变输出视图。 */
     for (size_t i = 0U; i < 2U; i++) {
@@ -479,7 +615,8 @@ void test_main(void)
         CHECK(pc_test_start_parse(root, &view) != PC_TEST_JSON_OK && memcmp(&view, &before, sizeof(view)) == 0);
         cJSON_Delete(root);
         root = base_request();
-        number = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd2Steps");
+        replace(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd2", cJSON_CreateNumber(1100));
+        number = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "power"), "vdd2");
         number->valuedouble = i == 0U ? NAN : INFINITY;
         CHECK(pc_test_start_parse(root, &view) != PC_TEST_JSON_OK);
         cJSON_Delete(root);

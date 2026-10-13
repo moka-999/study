@@ -219,6 +219,7 @@ def main() -> None:
     parser.add_argument("--version", default="0.1.0", help="打包语义版本，例如0.1.1")
     parser.add_argument("--rk-gateway-test", action="store_true", help="仅V2临时全链路联调镜像，正式业务不得启用")
     parser.add_argument("--power-simulation", action="store_true", help="V2正式任务联调：仅模拟电源/测量，RK仍为真实串口")
+    parser.add_argument("--mats-fail-test", action="store_true", help="仅V2电源模拟：构建每次MATS结果报FAIL的联调镜像")
     args = parser.parse_args()
     self_check()
     if not re.fullmatch(r"\d+\.\d+\.\d+", args.version) or any(int(v) > 65535 for v in args.version.split(".")):
@@ -229,6 +230,8 @@ def main() -> None:
         raise ValueError("B1禁止使用V2临时业务门禁模拟")
     if args.power_simulation and (app != "test" or args.rk_gateway_test):
         raise ValueError("电源模拟仅用于V2真实RK路径，不能与旧网关联调开关混用")
+    if args.mats_fail_test and (app != "test" or not args.power_simulation or root.name == "b1"):
+        raise ValueError("MATS失败联调仅用于V2电源模拟镜像，禁止B1启用")
     env = dict(os.environ)
     env["PATH"] = str(args.compiler.parent) + os.pathsep + env.get("PATH", "")
     # 两槽必须共用构建时间；日常入口传入本轮时间，独立实验保留固定默认值。
@@ -241,6 +244,8 @@ def main() -> None:
             prefix += "-rk-test"
         if args.power_simulation:
             prefix += "-power-sim"
+        if args.mats_fail_test:
+            prefix += "-mats-fail"
         suffix = "-uart2" if app == "b1" and args.rk_uart == 2 else ""
         build = root / "build" / f"{prefix}-{args.version}-{args.build_type.lower()}-{name}{suffix}"
         build.mkdir(parents=True, exist_ok=True)
@@ -254,6 +259,7 @@ def main() -> None:
         if app == "test":
             configure += [f"-DENABLE_RK_GATEWAY_TEST={'ON' if args.rk_gateway_test else 'OFF'}"]
             configure += [f"-DENABLE_V2_POWER_SIMULATION={'ON' if args.power_simulation else 'OFF'}"]
+            configure += [f"-DENABLE_V2_MATS_FAIL_TEST={'ON' if args.mats_fail_test else 'OFF'}"]
         if app == "b1":
             configure += [f"-DB1_RK_UART={args.rk_uart}"]
         configure += [f"-DFIRMWARE_VERSION_{part}={value}" for part, value in
@@ -300,6 +306,7 @@ def main() -> None:
         "app_name": app,
         "scope": "offline-only; no boot installer, no board execution, not an OTA package",
         "build_type": args.build_type,
+        "v2_mats_fail_test": args.mats_fail_test,
         "image_bytes": len(images[0]), "relocation_count": len(offsets),
         "offset_table_bytes": 4 * len(offsets),
         "arm_relocation_types": dict(kinds), "patched_sections": dict(patched_sections),

@@ -6,6 +6,12 @@
 
 | 归档文件 | 原文件 | SHA-256 |
 |---|---|---|
+| [pc_tcp协议_20261012_141806.docx](pc_tcp协议_20261012_141806.docx) | pc_tcp协议.docx，补齐B1电源执行说明及已确认的双颗粒0105结构前；2026-10-13归档 | 882665edacb2d586cac49b6cf774ad662de34fd33418f2c62ecdb7fce024a3d0 |
+| [pc_tcp协议_20261012_102554.docx](pc_tcp协议_20261012_102554.docx) | pc_tcp协议.docx，0103/0509从Steps整数改为绝对电压mV字符串前 | 7732172cd92dafcbd1026c71781b6d0468a8159c602de3b0d064802cfe576b89 |
+| [pc_tcp协议_20261009_180501.docx](pc_tcp协议_20261009_180501.docx) | pc_tcp协议.docx，0103/0509从统一20mV改为原生10/5/5mV步进前；2026-10-12归档 | 9a70a6b44d025c9fec4b5df6430a3d770210e5dcb600bda657a173b0b2a3cede |
+| [pc_tcp协议_20261009_161948.docx](pc_tcp协议_20261009_161948.docx) | pc_tcp协议.docx，0105明确0=FAIL/1=PASS、DDR编号0/1及errorType字符串前；2026-10-10完成替换 | 4d6b450e2ea85d6a6d47a339a16d520e43bf8b191c45c586bb0ece6e7eb059f4 |
+| [pc_tcp协议_20261009_120958.docx](pc_tcp协议_20261009_120958.docx) | pc_tcp协议.docx，测试仪名称改为JMCT-4000前 | 8345a79dde4ed4e778b43d5bcee09701b29451fa1347d679c36e0a495fe276a1 |
+| [pc_tcp协议_20260928_174309.docx](pc_tcp协议_20260928_174309.docx) | pc_tcp协议.docx，mirrorIndex改为RK 0x3001 DDR标志、physicalAddr保留为空前 | 1ed1d279b4ed0b8366b9a6869c5a90d3b97237d7f1313b7eec879fffbbd5a09f |
 | [pc_tcp协议_20260924_171548.docx](pc_tcp协议_20260924_171548.docx) | pc_tcp协议.docx，0105新增testTimeMs及明确OTA download返回条件前 | edb17231a178bdfff9723187987274a4b180669bfa39d343413362a449f1bfd8 |
 | [pc_tcp协议_20260924_170645.docx](pc_tcp协议_20260924_170645.docx) | pc_tcp协议.docx，0602采样及0901–0903升级说明改为字段简表前 | 1817f13022c474136f57e620f85cb84460cc639d40d2f598cd720ab484f33ea2 |
 | [pc_tcp协议_20260924_165259.docx](pc_tcp协议_20260924_165259.docx) | pc_tcp协议.docx，resultDesc改为按算法大类区分的对象并补充FUNC子字段前 | c93bde6b962a2c1baaa1370373d89a3487b50179228ec3819d427fef11a3e9df |

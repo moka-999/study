@@ -54,6 +54,9 @@ option(ENABLE_RK_GATEWAY_TEST "Build temporary PC MCU RK gateway test image" OFF
 # 不替代真实RK算法；B1及量产构建禁用，只有显式选择才会编入。
 option(ENABLE_V2_POWER_SIMULATION "Simulate V2 power and measurements with real RK" OFF)
 
+# 仅供PC失败界面联调；收到真实MATS完整结果后覆盖PC视图，默认及B1构建均禁用。
+option(ENABLE_V2_MATS_FAIL_TEST "V2联调：每次MATS结果上报FAIL" OFF)
+
 # 固件身份由构建系统统一提供，禁止在 C 源文件中散落手写版本字符串。
 set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
 set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
@@ -111,6 +114,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_state_machine.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_test_message.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_test_service.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_power_service.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_tester_info.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/crc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/frame.c
@@ -164,6 +168,14 @@ if(ENABLE_V2_POWER_SIMULATION)
     endif()
     target_sources(${CMAKE_PROJECT_NAME} PRIVATE App/tasks/test/v2_power_sim.c)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ENABLE_V2_POWER_SIMULATION=1)
+endif()
+
+if(ENABLE_V2_MATS_FAIL_TEST)
+    if(NOT ENABLE_V2_POWER_SIMULATION OR DEFINED B1_RK_UART)
+        message(FATAL_ERROR "MATS失败联调仅允许显式启用电源模拟的V2镜像")
+    endif()
+    message(WARNING "此镜像每次MATS都向PC上报模拟FAIL，不可作为真实测试结论")
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ENABLE_V2_MATS_FAIL_TEST=1)
 endif()
 
 if(ENABLE_DRIVER_MOCK_TEST)

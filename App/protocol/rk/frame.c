@@ -179,6 +179,56 @@ invalid_frame:
     frame_init(out);
     return -1;
 }
+int rk_final_result_decode(const tlv_frame_t *frame, rk_final_result_t *result)
+{
+    if (result == NULL) return -1;
+    memset(result, 0, sizeof(*result));
+    if (payload_length(frame) < 0 ||
+        (frame->count != 3U && frame->count != 5U && frame->count != 7U)) return -1;
+
+    rk_final_result_t decoded = {0};
+    uint64_t values[RK_RESULT_FIELD_COUNT] = {0U};
+    uint64_t pending_address = 0U;
+    uint8_t seen = 0U, seen_dies = 0U, awaiting_die = 0U;
+    for (uint8_t i = 0U; i < frame->count; ++i) {
+        const tlv_unit_t *unit = &frame->units[i];
+        const rk_tlv_rule_t *rule = find_tlv_rule(unit->type);
+        if (rule == NULL || rule->result_field == RK_RESULT_FIELD_COUNT ||
+            rule->result_field == RK_RESULT_FIELD_PROGRESS ||
+            (awaiting_die && unit->type != TLV_TYPE_RESULT_DIE)) return -1;
+        uint64_t value = read_le(tlv_unit_get_data(frame, unit), unit->data_len);
+        if (rule->result_field == RK_RESULT_FIELD_ADDRESS) {
+            pending_address = value;
+            awaiting_die = 1U;
+        } else if (rule->result_field == RK_RESULT_FIELD_DIE) {
+            if (!awaiting_die || value >= RK_RESULT_DIE_COUNT ||
+                decoded.failure_count >= RK_RESULT_DIE_COUNT ||
+                (seen_dies & (1U << value)) != 0U) return -1;
+            rk_failure_detail_t *failure = &decoded.failures[decoded.failure_count++];
+            failure->error_address = pending_address;
+            failure->die = (uint8_t)value;
+            seen_dies |= (uint8_t)(1U << value);
+            awaiting_die = 0U;
+        } else {
+            uint8_t field_bit = (uint8_t)(1U << rule->result_field);
+            if ((seen & field_bit) != 0U) return -1;
+            seen |= field_bit;
+            values[rule->result_field] = value;
+        }
+    }
+    const uint8_t required = (1U << RK_RESULT_FIELD_COMMAND) |
+                             (1U << RK_RESULT_FIELD_FAIL) |
+                             (1U << RK_RESULT_FIELD_TIME);
+    if (awaiting_die || seen != required ||
+        ((values[RK_RESULT_FIELD_FAIL] != 0U) != (decoded.failure_count != 0U))) return -1;
+    decoded.command_id = (uint16_t)values[RK_RESULT_FIELD_COMMAND];
+    decoded.failed = (uint8_t)values[RK_RESULT_FIELD_FAIL];
+    decoded.elapsed_ms = values[RK_RESULT_FIELD_TIME];
+    /* 整帧通过后一次提交，两组明细中的坏项不能留下部分有效结果。 */
+    *result = decoded;
+    return 0;
+}
+
 int rk_report_decode(const tlv_frame_t *frame, rk_report_t *report)
 {
     if (report == NULL) return -1;
@@ -200,10 +250,18 @@ int rk_report_decode(const tlv_frame_t *frame, rk_report_t *report)
         values[rule->result_field] = read_le(tlv_unit_get_data(frame, unit), unit->data_len);
     }
     const uint8_t details_mask = (1U << RK_RESULT_FIELD_PROGRESS) - 1U;
-    if ((seen & details_mask) != 0U && (seen & details_mask) != details_mask) return -1;
+    const uint8_t command_bit = 1U << RK_RESULT_FIELD_COMMAND;
+    const uint8_t progress_bit = 1U << RK_RESULT_FIELD_PROGRESS;
+    const uint8_t progress_mask = command_bit | progress_bit;
+    /* 进度必须带算法号；只有这两个已知字段时不是残缺的最终详情。 */
+    if ((seen & progress_bit) != 0U && (seen & command_bit) == 0U) return -1;
+    if (seen != progress_mask &&
+        (seen & details_mask) != 0U && (seen & details_mask) != details_mask) return -1;
+    if (seen & command_bit) {
+        report->result.command_id = (uint16_t)values[RK_RESULT_FIELD_COMMAND];
+    }
     if ((seen & details_mask) == details_mask) {
         report->fields |= RK_REPORT_DETAILS;
-        report->result.command_id = (uint16_t)values[RK_RESULT_FIELD_COMMAND];
         report->result.error_address = values[RK_RESULT_FIELD_ADDRESS];
         report->result.die = (uint8_t)values[RK_RESULT_FIELD_DIE];
         report->result.elapsed_ms = values[RK_RESULT_FIELD_TIME];

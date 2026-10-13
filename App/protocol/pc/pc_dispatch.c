@@ -9,6 +9,7 @@
 #include "ota_app.h"
 #include "pc_ota.h"
 #include "pc_test_service.h"
+#include "pc_power_service.h"
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
 #include "v2_power_sim.h"
 /* 仅替换本文件的电源/测量依赖；正式监测任务、真实RK及Flash不变。 */
@@ -31,6 +32,11 @@
 #endif
 
 #include <string.h>
+
+/* 电源命令的终态只能交给发起连接；断线后继续收尾，但不能发给新客户端。 */
+static uint16_t s_power_command;
+static pc_power_action_t s_power_action;
+static uint8_t s_power_owner_connected;
 
 /*
  * 每个命令处理函数只负责本命令的字段校验和本地响应。
@@ -170,21 +176,6 @@ static int object_has_exact_fields(const cJSON *root,
         if (cJSON_GetObjectItemCaseSensitive(root, names[i]) == NULL)
             return 0;
     }
-    return 1;
-}
-
-static int read_i16(const cJSON *root, const char *name, int16_t *value)
-{
-    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
-    double number;
-    int16_t integer;
-
-    if (!item || !value || !cJSON_IsNumber(item)) return 0;
-    number = item->valuedouble;
-    if (number < INT16_MIN || number > INT16_MAX) return 0;
-    integer = (int16_t)number;
-    if ((double)integer != number) return 0;
-    *value = integer;
     return 1;
 }
 
@@ -404,6 +395,22 @@ static pc_dispatch_result_t handle_query_power_status(
 }
 
 
+/* 先组好受理应答才启动业务。后续0006 completed/failed由next_response发送。 */
+#if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
+static pc_dispatch_result_t start_real_power(const pc_protocol_frame_t *request,
+    uint32_t sequence, pc_power_action_t action, pc_dispatch_response_t *response)
+{
+    int result = build_command_accepted(request, sequence, response);
+    if (result != PC_DISPATCH_RESPONSE_READY) return result;
+    const char *error = pc_power_service_start(action, NULL, 0U);
+    if (error) return build_command_failure(request, sequence, error, response);
+    s_power_command = request->command_id;
+    s_power_action = action;
+    s_power_owner_connected = 1U;
+    return result;
+}
+#endif
+
 static pc_dispatch_result_t handle_power_on(
     const pc_protocol_frame_t *request,
     uint32_t mcu_tx_sequence,
@@ -411,7 +418,6 @@ static pc_dispatch_result_t handle_power_on(
     pc_dispatch_response_t *response)
 {
     pwr_ctrl_state_t previous;
-    pwr_ctrl_result_t result;
 
     if (root->child != NULL) {
         return build_command_failure(request, mcu_tx_sequence,
@@ -421,7 +427,10 @@ static pc_dispatch_result_t handle_power_on(
     if (previous == PWR_CTRL_STATE_ON)
         return build_command_success(request, mcu_tx_sequence, response);
 
-    result = pc_power_on(HAL_GetTick());
+#if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
+    return start_real_power(request, mcu_tx_sequence, PC_POWER_ON, response);
+#else
+    pwr_ctrl_result_t result = pc_power_on(HAL_GetTick());
     if (result == PWR_CTRL_OK)
         return build_command_accepted(request, mcu_tx_sequence, response);
     if (result == PWR_CTRL_ERR_NOT_CONFIGURED)
@@ -434,11 +443,11 @@ static pc_dispatch_result_t handle_power_on(
     }
     return build_command_failure(request, mcu_tx_sequence,
                                  "executionFailed", response);
+#endif
 }
 
 /*
- * 正常下电必须先取得RK安全关机确认。第1项RK业务冻结前，ON状态明确返回
- * notReady，绝不能为了接入命令而直接调用底层关轨接口。
+ * 下电交给正式编排器直接关轨，不等待RK关机应答；在途互斥由分发入口检查。
  */
 static pc_dispatch_result_t handle_power_off(
     const pc_protocol_frame_t *request,
@@ -458,40 +467,29 @@ static pc_dispatch_result_t handle_power_off(
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     v2_power_sim_off();
     return build_command_success(request, mcu_tx_sequence, response);
+#else
+    return start_real_power(request, mcu_tx_sequence, PC_POWER_OFF, response);
 #endif
-    if (state == PWR_CTRL_STATE_ON)
-        return build_command_failure(request, mcu_tx_sequence,
-                                     "notReady", response);
-    if (state == PWR_CTRL_STATE_FAULT)
-        return build_command_failure(request, mcu_tx_sequence,
-                                     "executionFailed", response);
-    return build_command_failure(request, mcu_tx_sequence,
-                                 "busy", response);
 }
 
-/* RK电源循环同样依赖安全关机确认；当前先冻结入口和错误语义。 */
+/* 冷重启保留训练目标和当前Boot设置；直接关电、等待、上电和本轮心跳确认逐步推进。 */
 static pc_dispatch_result_t handle_reset_rk(
     const pc_protocol_frame_t *request,
     uint32_t mcu_tx_sequence,
     const cJSON *root,
     pc_dispatch_response_t *response)
 {
-    pwr_ctrl_state_t state;
 
     if (root->child != NULL) {
         return build_command_failure(request, mcu_tx_sequence,
                                      "invalidArgument", response);
     }
-    state = pc_power_state();
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
+    pwr_ctrl_state_t state = pc_power_state();
     if (state == PWR_CTRL_STATE_ON) {
         v2_power_sim_restart();
         return build_command_success(request, mcu_tx_sequence, response);
     }
-#endif
-    if (state == PWR_CTRL_STATE_ON)
-        return build_command_failure(request, mcu_tx_sequence,
-                                     "notReady", response);
     if (state == PWR_CTRL_STATE_OFF)
         return build_command_failure(request, mcu_tx_sequence,
                                      "invalidState", response);
@@ -500,6 +498,9 @@ static pc_dispatch_result_t handle_reset_rk(
                                      "executionFailed", response);
     return build_command_failure(request, mcu_tx_sequence,
                                  "busy", response);
+#else
+    return start_real_power(request, mcu_tx_sequence, PC_POWER_RESTART, response);
+#endif
 }
 
 static const named_value_t s_boot_mode_values[] = {
@@ -544,6 +545,7 @@ static pc_dispatch_result_t handle_set_boot_mode(
                                      "invalidArgument", response);
     }
 
+    pc_power_service_invalidate();
     result = pc_boot_set((boot_mode_t)mode);
     if (result == MONITOR_BOOT_OK)
         return build_command_success(request, mcu_tx_sequence, response);
@@ -606,14 +608,9 @@ static pc_dispatch_result_t handle_query_boot_mode(
     return result;
 }
 
-static const named_value_t s_memory_type_values[] = {
-    {"LPDDR4",  DDR_MEMORY_LPDDR4},
-    {"LPDDR4X", DDR_MEMORY_LPDDR4X},
-};
-
 /*
- * 0x0509固定四字段：三路steps都是相对所选内存标称值的有符号20mV档位。
- * OFF+全零只选择类型；ON+相同类型才执行调压，不缓存下次上电的拉偏值。
+ * 0x0509固定memoryType及字符串mV的vdd1/vdd2/vddq，与0103共用精确编码校验。
+ * OFF+三轨标称值只选择类型；ON+相同类型才调压，不缓存下次上电的拉偏值。
  */
 static pc_dispatch_result_t handle_set_ddr_config(
     const pc_protocol_frame_t *request,
@@ -621,26 +618,19 @@ static pc_dispatch_result_t handle_set_ddr_config(
     const cJSON *root,
     pc_dispatch_response_t *response)
 {
-    static const char *const fields[] = {
-        "memoryType", "vdd1Steps", "vdd2Steps", "vddqSteps"
-    };
     int16_t steps[DDR_RAIL_COUNT];
-    uint8_t memory_type;
+    uint16_t target_mv[DDR_RAIL_COUNT];
+    const char *memory_type;
     pwr_ctrl_result_t result;
 
-    if (!object_has_exact_fields(root, fields,
-                                 sizeof(fields) / sizeof(fields[0])) ||
-        !read_named_value(root, "memoryType", s_memory_type_values,
-                          sizeof(s_memory_type_values) /
-                          sizeof(s_memory_type_values[0]), &memory_type) ||
-        !read_i16(root, "vdd1Steps", &steps[DDR_RAIL_VDD1]) ||
-        !read_i16(root, "vdd2Steps", &steps[DDR_RAIL_VDD2]) ||
-        !read_i16(root, "vddqSteps", &steps[DDR_RAIL_VDDQ])) {
+    if (pc_power_parse(root, &memory_type, steps, target_mv) != PC_TEST_JSON_OK) {
         return build_command_failure(request, mcu_tx_sequence,
                                      "invalidArgument", response);
     }
 
-    result = pc_ddr_set((ddr_memory_type_t)memory_type, steps);
+    ddr_memory_type_t type = strcmp(memory_type, "LPDDR4") == 0 ? DDR_MEMORY_LPDDR4 : DDR_MEMORY_LPDDR4X;
+    pc_power_service_invalidate();
+    result = pc_ddr_set(type, steps);
     if (result == PWR_CTRL_OK)
         return build_command_success(request, mcu_tx_sequence, response);
     if (result == PWR_CTRL_ERR_PARAM)
@@ -912,7 +902,7 @@ pc_dispatch_result_t pc_dispatch_handle(
         PC_COMMAND_POWER_ON, PC_COMMAND_POWER_OFF, PC_COMMAND_RESET_RK,
         PC_COMMAND_SET_BOOT_MODE, PC_COMMAND_SET_DDR_CONFIG,
     };
-    if (pc_test_service_busy()) {
+    if (pc_test_service_busy() || pc_power_service_busy()) {
         int conflict = 0;
         for (size_t i = 0U; i < sizeof(test_conflicts) / sizeof(test_conflicts[0]); ++i)
             if (request->command_id == test_conflicts[i]) conflict = 1;
@@ -926,8 +916,8 @@ pc_dispatch_result_t pc_dispatch_handle(
         }
     }
 
-#if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION && defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
-    /* 虚拟电源也遵守维护互斥，不能因真实pwr_ctrl仍为OFF就跳过升级流程约束。 */
+#if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
+    /* 下载维护期间不启动新的电源流程；真实/虚拟电源使用同一业务互斥规则。 */
     ota_download_progress_t progress;
     ota_download_get_progress(&progress);
     int maintenance = progress.state == OTA_DOWNLOAD_RECEIVING || progress.state == OTA_DOWNLOAD_READY ||
@@ -938,6 +928,7 @@ pc_dispatch_result_t pc_dispatch_handle(
             return build_command_failure(request, mcu_tx_sequence, "busy", response);
         }
     }
+#if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     const cJSON *action = cJSON_GetObjectItemCaseSensitive(root, "action");
     if (request->command_id == PC_COMMAND_FIRMWARE_UPGRADE_REQUEST &&
         cJSON_IsString(action) && strcmp(action->valuestring, "mcu_begin") == 0 &&
@@ -945,6 +936,7 @@ pc_dispatch_result_t pc_dispatch_handle(
         cJSON_Delete(root);
         return build_command_failure(request, mcu_tx_sequence, "invalidState", response);
     }
+#endif
 #endif
 
     /* 共用入口拦住试运行期间的电源配置；查询、心跳、下电仍可用。 */
@@ -978,6 +970,11 @@ pc_dispatch_result_t pc_dispatch_handle(
 
 void pc_dispatch_poll(void)
 {
+    pc_power_service_poll();
+    if (s_power_command && !s_power_owner_connected) {
+        const char *error;
+        if (pc_power_service_take(s_power_action, &error)) s_power_command = 0U;
+    }
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     v2_power_sim_poll();
 #endif
@@ -992,6 +989,14 @@ void pc_dispatch_poll(void)
 
 int pc_dispatch_next_response(uint32_t sequence, pc_dispatch_response_t *response)
 {
+    const char *error;
+    if (s_power_command && s_power_owner_connected && response &&
+        pc_power_service_take(s_power_action, &error)) {
+        pc_protocol_frame_t request = {.command_id = s_power_command};
+        s_power_command = 0U;
+        return error ? build_command_failure(&request, sequence, error, response)
+                     : build_command_success(&request, sequence, response);
+    }
 #if defined(ENABLE_RK_GATEWAY_TEST) && ENABLE_RK_GATEWAY_TEST
     /* 旧隔离镜像仍只有一个RK结果消费者，不能与正式业务同时抢队列。 */
     return rk_gateway_test_poll(sequence, response);
@@ -1002,6 +1007,7 @@ int pc_dispatch_next_response(uint32_t sequence, pc_dispatch_response_t *respons
 
 void pc_dispatch_disconnected(void)
 {
+    s_power_owner_connected = 0U;
     pc_test_service_disconnected();
 #if defined(ENABLE_RK_GATEWAY_TEST) && ENABLE_RK_GATEWAY_TEST
     rk_gateway_test_disconnect();
