@@ -6,6 +6,10 @@
 
 | 归档文件 | 原文件 | SHA-256 |
 |---|---|---|
+| [pc_tcp协议_20261014_150058.docx](pc_tcp协议_20261014_150058.docx) | pc_tcp协议.docx，数组评审稿同步飞书及保留云端电压安全范围、明确默认常温显示边界前 | 3e93fa06fe83bf5feb5a75060ebb55d4ab61a2617575a09e17bd034bf96bb8e6 |
+| [pc_tcp协议_20261014_120844.docx](pc_tcp协议_20261014_120844.docx) | pc_tcp协议.docx，0106改为空对象、0107改为失败芯片数组及明确镜像/芯片语义前；新稿仅供本地评审 | d583e27674f9ad522f6cc1a8424401320f54bccdfac14ac0deccccd60bb6e439 |
+| [pc_tcp协议_20261014_114043.docx](pc_tcp协议_20261014_114043.docx) | pc_tcp协议.docx，全篇精简、SLT改为两颗DDR汇总及空index、移除070x前 | 3e3684171dcb057c5cae3dec851bc6209447f8d03f9f9c4423195106c6bc5d5b |
+| [pc_tcp协议_20261013_173536.docx](pc_tcp协议_20261013_173536.docx) | pc_tcp协议.docx，新增整轮控制及SLT独立命令、将PARA开始/结果仅作预留前；2026-10-14归档 | 9e274b74776fb41e2489525ce964ff36d06ecccc6e658fb6650c875aabd6a82e |
 | [pc_tcp协议_20261012_141806.docx](pc_tcp协议_20261012_141806.docx) | pc_tcp协议.docx，补齐B1电源执行说明及已确认的双颗粒0105结构前；2026-10-13归档 | 882665edacb2d586cac49b6cf774ad662de34fd33418f2c62ecdb7fce024a3d0 |
 | [pc_tcp协议_20261012_102554.docx](pc_tcp协议_20261012_102554.docx) | pc_tcp协议.docx，0103/0509从Steps整数改为绝对电压mV字符串前 | 7732172cd92dafcbd1026c71781b6d0468a8159c602de3b0d064802cfe576b89 |
 | [pc_tcp协议_20261009_180501.docx](pc_tcp协议_20261009_180501.docx) | pc_tcp协议.docx，0103/0509从统一20mV改为原生10/5/5mV步进前；2026-10-12归档 | 9a70a6b44d025c9fec4b5df6430a3d770210e5dcb600bda657a173b0b2a3cede |

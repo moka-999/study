@@ -38,6 +38,7 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 - 初版固定`Version=1`、`Flag=8`、`ServiceID=0`。非法头前缀逐字节丢弃并有界寻找下一头；两次完整帧消费之间累计丢弃超过4096字节才关闭连接。完整帧的UTF-8/JSON错误回`0006 failed/invalidArgument`并继续；认可长度后不扫描正文内部。仍无法收齐的半帧超过500ms字节间空闲则断连，正常空闲不受此限制。详见[TCP接收恢复](doc/pc_tcp_recovery_20260929.md)。
 - 每条连接中PC和MCU分别维护发送u32 Seq，每发一帧本端加1，不回显请求Seq；接收不改变本端发送计数，两个方向允许同号且可同时发送。Seq仅是发送流水号，业务关联另行定义；绝不能把内部RK Seq写入PC响应头。ServiceID保留2字节但固定0、不参与分发。首值、重连初始化和回绕边界仍待PC双方最终确认，暂定实现与验证状态见任务清单，测试通过不等于批准。
 - 心跳固定为PC主动发送`CMD_CLIENT_HEART_BEAT(0x0002)+{}`，MCU返回`CMD_SERVER_HEART_BEAT(0x0001)+{}`，新合同使用MCU本端递增Seq；心跳不承载其他状态。
+- 测试须先0106 `{}`建立当前连接的整轮，再串行0103/0105 FUNC或010A/010B SLT，最后0107提交errorchip失败数组。mirrorIndex 0/1/2映射两组LPDDR/eMCP灯，未知编号整包拒绝；0701/0702/0703已从固件删除，合法旧请求回0006/notSupported。0108 PARA预留，0109仅MCU方向。提前0107只废弃结果、不取消RK或提前解除busy；未入RK队列的FUNC不再投递。SLT固定slt/memtest86、index=null，只准备电源/Boot，不等RK心跳或检查EDK；同连接010B回收占用，断线不自动认领或释放SLT。B2温度/灯态合同仍未定义，0106常温闪仅为显示初值。
 - TCP解析必须支持半包、粘包和连续多包；第一组测试JSON已确认，其余命令与字段分批冻结。
 - 已固定引入cJSON v1.7.19，使用FreeRTOS堆、递归深度16；完整PDU上限4096字节。
 - 固件升级沿用0x0901–0x0903，MCU动作统一`mcu_begin/mcu_write/mcu_finish/mcu_query/mcu_cancel`；对应五个`rk_*`仅保留并回notSupported，不访问Flash/RK。W25Q256为RK预留0x00410000和0x00C10000起始的两块8MiB，不定义RK包体。旧版首次迁移须显式旧动作选项，见`doc/ota_daily_download.md`。

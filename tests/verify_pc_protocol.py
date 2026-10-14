@@ -262,8 +262,14 @@ def main() -> None:
     assert routes["PC_COMMAND_QUERY_BOOT_MODE"] == "handle_query_boot_mode"
     assert routes["PC_COMMAND_BOOT_MODE_RESP"] == "reject_response_command"
     assert routes["PC_COMMAND_QUERY_POWER_MONITOR"] == "handle_query_power_monitor"
-    assert routes["PC_COMMAND_SET_RESULT_INDICATOR"] == "handle_set_result_indicator"
-    assert routes["PC_COMMAND_QUERY_INDICATOR_STATUS"] == "handle_query_indicator_status"
+    for command, handler in (("PC_COMMAND_ROUND_BEGIN", "handle_round_begin"),
+                             ("PC_COMMAND_ROUND_END", "handle_round_end"),
+                             ("PC_COMMAND_SLT_START", "handle_slt_start"),
+                             ("PC_COMMAND_SLT_RESULT", "handle_slt_result"),
+                             ("PC_COMMAND_PARA_START", "handle_reserved"),
+                             ("PC_COMMAND_PARA_RESULT", "reject_response_command")):
+        assert routes[command] == handler
+    assert not any(0x0700 <= value <= 0x07FF for value in values), "070x已从正式命令表移除"
     assert "s_command_table[i].handler(request, mcu_tx_sequence" in dispatch_source
     passed += 1
 
@@ -308,7 +314,7 @@ def main() -> None:
     assert "PC_COMMAND_QUERY_BOOT_MODE     0x0507U" in command_header
     assert "PC_COMMAND_BOOT_MODE_RESP      0x0508U" in command_header
     assert "PC_COMMAND_QUERY_POWER_MONITOR 0x0601U" in command_header
-    assert "PC_COMMAND_SET_RESULT_INDICATOR    0x0701U" in command_header
+    assert "PC_COMMAND_SET_RESULT_INDICATOR" not in command_header
     passed += 1
 
     # 测试仪信息必须由0x0101查询触发，不允许连接建立后主动推送。

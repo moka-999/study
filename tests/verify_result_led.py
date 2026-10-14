@@ -3,6 +3,8 @@
 
 from enum import IntEnum
 from pathlib import Path
+import argparse
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,9 +75,57 @@ def verify_source_contract() -> None:
         "提前初始化必须仅存在于独立测试镜像"
 
 
+def verify_actual_c(root: Path, compiler: str, qemu: str) -> None:
+    """实际驱动只替换HAL/RTOS端口；源码与Cortex-M7指令均真实编译运行。"""
+    build = root / "build/result-led-c"
+    build.mkdir(parents=True, exist_ok=True)
+    (build / "stm32h7xx_hal.h").write_text('''#pragma once
+#include <stdint.h>
+typedef struct { uint32_t unused; } GPIO_TypeDef;
+typedef enum { HAL_OK=0, HAL_ERROR=1 } HAL_StatusTypeDef;
+typedef enum { GPIO_PIN_RESET=0, GPIO_PIN_SET=1 } GPIO_PinState;
+uint32_t HAL_GetTick(void);
+void HAL_GPIO_WritePin(GPIO_TypeDef *, uint16_t, GPIO_PinState);
+''', encoding="utf-8")
+    (build / "FreeRTOS.h").write_text('''#pragma once
+#include <stddef.h>
+void mock_enter(void);
+void mock_exit(void);
+#define taskENTER_CRITICAL() mock_enter()
+#define taskEXIT_CRITICAL() mock_exit()
+''', encoding="utf-8")
+    (build / "task.h").write_text('#include "FreeRTOS.h"\n', encoding="utf-8")
+    boot = root.parent / "bootloader/tests"
+    command = [compiler, "-mcpu=cortex-m7", "-mthumb", "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror",
+               "-I" + str(build), "-I" + str(root / "Core/Inc"),
+               str(ROOT / "tests/test_result_led.c"), str(root / "Core/Src/result_led.c"),
+               str(boot / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
+               "-T" + str(boot / "qemu_test.ld"), "-o", str(build / "test.elf")]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+    if result.returncode:
+        raise RuntimeError(result.stdout + result.stderr)
+    result = subprocess.run([qemu, "-M", "mps2-an500", "-display", "none", "-monitor", "none", "-serial", "none",
+                             "-no-reboot", "-semihosting-config", "enable=on,target=native",
+                             "-kernel", str(build / "test.elf")], capture_output=True, text=True, timeout=30)
+    output = result.stdout + result.stderr
+    (build / "run.log").write_text(output, encoding="utf-8")
+    if result.returncode or "PASS: actual LED C" not in output:
+        raise RuntimeError(output)
+    print(output.strip())
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--actual-c", action="store_true", help="额外运行实际驱动C/QEMU，无硬件操作")
+    parser.add_argument("--app-root", type=Path, default=ROOT)
+    parser.add_argument("--compiler", default="C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gcc.exe")
+    parser.add_argument("--qemu", default="D:/qemu/qemu-system-arm.exe")
+    args = parser.parse_args()
     verify_semantics()
     verify_source_contract()
+    if args.actual_c:
+        verify_actual_c(args.app_root.resolve(), args.compiler, args.qemu)
     print("result_led: 5 states, 500ms blink and isolated V2 waveform image PASS")
     print("V2 waveform accepted and B1 PG0-PG5 ported; real 2N7002 startup check remains")
 

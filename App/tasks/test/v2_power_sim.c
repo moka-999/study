@@ -10,6 +10,7 @@ static uint16_t s_training_mv[3];
 static ddr_memory_type_t s_training_type;
 static boot_mode_t s_boot, s_training_boot;
 static uint8_t s_boot_valid, s_training_valid;
+static uint8_t s_training_slt; /* 不把SLT虚拟准备缓存复用成FUNC启动已确认。 */
 static uint32_t s_cycles, s_sample_index;
 static monitor_snapshot_t s_latest;
 static idd_stats_t s_stats;
@@ -105,17 +106,14 @@ int v2_power_sim_latest(monitor_snapshot_t *out)
     return 1;
 }
 
-void v2_power_sim_test_begin(const pc_test_start_view_t *start)
+static void prepare_target(const pc_test_start_view_t *start)
 {
     if (!start->external_ready) {
-        static const char *const names[BOOT_MODE_COUNT] = {
-            "usbMaskrom", "sdCard", "emmc", "fspiM0", "fspiM1", "fspiM2", "emmcSd"
-        };
         boot_mode_t mode = BOOT_MODE_USB_MASKROM;
-        for (unsigned i = 0; i < BOOT_MODE_COUNT; ++i)
-            if (strcmp(start->boot_mode, names[i]) == 0) mode = (boot_mode_t)i;
+        (void)pc_boot_mode_parse(start->boot_mode, &mode);
+        uint8_t slt = strcmp(start->algorithm_type, "slt") == 0;
         ddr_memory_type_t type = strcmp(start->memory_type, "LPDDR4") == 0 ? DDR_MEMORY_LPDDR4 : DDR_MEMORY_LPDDR4X;
-        int changed = !s_training_valid || s_training_type != type || s_training_boot != mode ||
+        int changed = !s_training_valid || s_training_slt != slt || s_training_type != type || s_training_boot != mode ||
                       memcmp(s_training_mv, start->target_mv, sizeof(s_mv)) != 0 ||
                       s_type != type || !s_boot_valid || s_boot != mode ||
                       memcmp(s_mv, start->target_mv, sizeof(s_mv)) != 0;
@@ -124,11 +122,23 @@ void v2_power_sim_test_begin(const pc_test_start_view_t *start)
         s_training_type = s_type = type;
         s_training_boot = s_boot = mode;
         s_boot_valid = s_training_valid = 1U;
+        s_training_slt = slt;
         memcpy(s_training_mv, start->target_mv, sizeof(s_mv));
         memcpy(s_mv, start->target_mv, sizeof(s_mv));
     }
     /* 外部已启动模式按现有虚拟目标采样，不声称执行了冷重启或改变了启动介质。 */
     s_state = PWR_CTRL_STATE_ON;
+}
+
+void v2_power_sim_prepare_slt(const pc_test_start_view_t *start)
+{
+    prepare_target(start);
+    sample_now(HAL_GetTick());
+}
+
+void v2_power_sim_test_begin(const pc_test_start_view_t *start)
+{
+    prepare_target(start);
     idd_stats_reset(&s_stats);
     /* ponytail: 复用现有有界窗口，上限约24.8天；更长测试需扩展时基再开放。 */
     (void)idd_stats_begin(&s_stats, HAL_GetTick(), INT32_MAX, 1U);

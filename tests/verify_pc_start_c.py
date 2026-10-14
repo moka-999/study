@@ -46,6 +46,15 @@ pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
 int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
 { (void)sequence; (void)response; return 0; }
 void pc_test_service_disconnected(void) { }
+/* 整轮与SLT生命周期由verify_pc_rk_service验证；本测试只替代这些边界。 */
+pc_dispatch_result_t pc_test_round_begin(uint32_t seq, pc_dispatch_response_t *out)
+{ (void)seq; (void)out; return PC_DISPATCH_ERROR; }
+pc_dispatch_result_t pc_test_round_end(uint32_t mask, uint32_t seq, pc_dispatch_response_t *out)
+{ (void)mask; (void)seq; (void)out; return PC_DISPATCH_ERROR; }
+pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *view, uint32_t seq, pc_dispatch_response_t *out)
+{ (void)view; (void)seq; (void)out; return PC_DISPATCH_ERROR; }
+pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *view, uint32_t seq, pc_dispatch_response_t *out)
+{ (void)view; (void)seq; (void)out; return PC_DISPATCH_ERROR; }
 ''', encoding="utf-8")
     sources = [Path(__file__).with_name("test_pc_start.c"), build / "service_stub.c",
                *[root / p for p in ("App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_protocol.c",

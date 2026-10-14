@@ -47,6 +47,9 @@ int monitor_idd_get(idd_stats_t *out)
 #define START_JSON "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":null,\"reboot\":false,\"bootMode\":null}"
 static int confirmed = 1, fru_error, queue_full, response_ready;
 static unsigned queue_calls, fru_calls, ota_calls;
+static result_led_state_t led_states[RESULT_LED_TARGET_COUNT];
+static unsigned led_writes;
+static int led_failure;
 static ota_download_state_t download_state;
 static char site_label[16] = "SITE-7";
 static rk_request_t queued_request;
@@ -177,6 +180,13 @@ HAL_StatusTypeDef result_led_set(result_led_target_t target, result_led_state_t 
 { (void)target; (void)state; fail("FAIL LED write\n"); }
 HAL_StatusTypeDef result_led_get_all(result_led_state_t states[3])
 { (void)states; fail("FAIL LED query\n"); }
+HAL_StatusTypeDef result_led_set_all(const result_led_state_t states[RESULT_LED_TARGET_COUNT])
+{
+    if (led_failure) return HAL_ERROR;
+    memcpy(led_states, states, sizeof(led_states));
+    ++led_writes;
+    return HAL_OK;
+}
 pc_dispatch_result_t pc_ota_handle(const pc_protocol_frame_t *request, uint32_t sequence,
                                   const cJSON *root, pc_dispatch_response_t *response)
 {
@@ -237,6 +247,19 @@ static int dispatch(uint16_t command, const char *json, uint32_t sequence, pc_di
 static void start_expect(const char *json, const char *error)
 {
     pc_dispatch_response_t response;
+    /* 既有FUNC回归现在在显式整轮内运行；0106重复请求的busy不修改该轮。
+     * 新增整轮回归使用dispatch直接调用，另行核对缺少0106必拒绝。
+     */
+    if (confirmed && !pc_test_service_busy() && !pc_power_service_busy() &&
+        download_state == OTA_DOWNLOAD_IDLE) {
+        CHECK(dispatch(PC_COMMAND_ROUND_BEGIN, "{}", 16U, &response) == PC_DISPATCH_RESPONSE_READY);
+        cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 16U);
+        const cJSON *status = cJSON_GetObjectItemCaseSensitive(body, "status");
+        CHECK(cJSON_IsString(status));
+        CHECK(strcmp(status->valuestring, "completed") == 0 ||
+              strcmp(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(body, "errorCode")), "busy") == 0);
+        cJSON_Delete(body);
+    }
     unsigned before = queue_calls;
     CHECK(dispatch(PC_COMMAND_START_TEST, json, 17U, &response) == PC_DISPATCH_RESPONSE_READY);
     status_is(&response, error, 17U);
@@ -889,8 +912,260 @@ static void power_sequence_check(void)
 }
 #endif
 
+#if defined(PC_TEST_ROUND_TEST)
+#define SLT_START "{\"algorithmType\":\"slt\",\"algorithmName\":\"memtest86\",\"algorithmIndex\":null,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\"}"
+#define SLT_RESULT "{\"siteId\":\"SITE-7\",\"algorithmType\":\"slt\",\"algorithmName\":\"memtest86\",\"algorithmIndex\":null,\"testTimeMs\":null,\"testResults\":[{\"mirrorIndex\":0,\"testStatus\":0,\"resultDesc\":null,\"physicalAddr\":\"\"},{\"mirrorIndex\":1,\"testStatus\":1,\"resultDesc\":null,\"physicalAddr\":\"\"}],\"measurementData\":null}"
+
+static void round_command(uint16_t command, const char *json, const char *status, const char *error)
+{
+    pc_dispatch_response_t response;
+    CHECK(dispatch(command, json, 77U, &response) == PC_DISPATCH_RESPONSE_READY);
+    cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 77U);
+    number_is(body, "requestCommandId", command);
+    string_is(body, "status", status);
+    if (error) string_is(body, "errorCode", error);
+    else CHECK(!cJSON_GetObjectItemCaseSensitive(body, "errorCode"));
+    if (command == PC_COMMAND_SLT_START || command == PC_COMMAND_SLT_RESULT)
+        CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(body, "algorithmIndex")));
+    cJSON_Delete(body);
+}
+
+static void round_begin(void) { round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL); }
+static void round_end(void)
+{
+    round_command(PC_COMMAND_ROUND_END, "{\"errorchip\":[]}", "completed", NULL);
+}
+
+static void round_flow_check(void)
+{
+    pc_dispatch_response_t response;
+#if defined(B1_RK_UART)
+    mock_power_state = PWR_CTRL_STATE_ON;
+#endif
+    round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "invalidState");
+    round_command(PC_COMMAND_ROUND_END, "{\"errorchip\":[]}", "failed", "invalidState");
+    round_command(PC_COMMAND_ROUND_BEGIN, "{\"heating\":false}", "failed", "invalidArgument");
+    CHECK(!led_writes);
+    led_failure = 1;
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "executionFailed");
+    led_failure = 0;
+    pc_json_configure_allocator(no_memory, free);
+    CHECK(pc_test_round_begin(77U, &response) == PC_DISPATCH_ERROR);
+    pc_json_configure_allocator(NULL, NULL);
+    CHECK(!led_writes);
+    round_begin();
+    for (unsigned i = 0U; i < RESULT_LED_TARGET_COUNT; ++i) CHECK(led_states[i] == RESULT_LED_TEST_NORMAL);
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "busy");
+    const char *bad_lists[] = {
+        "{}", "{\"errorchip\":null}", "{\"errorchip\":{},\"leds\":{}}",
+        "{\"errorchip\":[{\"physicalAddr\":\"a\",\"mirrorIndex\":0},{\"physicalAddr\":\"b\",\"mirrorIndex\":3}]}",
+        "{\"errorchip\":[{\"physicalAddr\":\"\",\"mirrorIndex\":-1}]}",
+        "{\"errorchip\":[{\"physicalAddr\":\"\",\"mirrorIndex\":1.5}]}",
+        "{\"errorchip\":[{\"physicalAddr\":\"\",\"mirrorindex\":1}]}",
+        "{\"errorchip\":[{\"physicalAddr\":3,\"mirrorIndex\":1}]}",
+        "{\"errorchip\":[{\"physicalAddr\":\"\",\"mirrorIndex\":\"1\"}]}",
+        "{\"errorchip\":[{\"physicalAddr\":\"\",\"mirrorIndex\":0,\"mirrorIndex\":1}]}"
+    };
+    unsigned writes = led_writes;
+    for (unsigned i = 0U; i < sizeof(bad_lists) / sizeof(bad_lists[0]); ++i) {
+        round_command(PC_COMMAND_ROUND_END, bad_lists[i], "failed", "invalidArgument");
+        CHECK(led_writes == writes);
+    }
+    /* 旧070x不论方向都不执行；PARA保留方向，不能冒充已接入IDD。 */
+    for (uint16_t command = 0x0701U; command <= 0x0703U; ++command)
+        round_command(command, "{}", "failed", "notSupported");
+    round_command(PC_COMMAND_PARA_START, "{}", "failed", "notSupported");
+    round_command(PC_COMMAND_PARA_RESULT, "{}", "failed", "invalidDirection");
+    round_command(PC_COMMAND_TEST_RESULT_REPORT, "{}", "failed", "invalidDirection");
+    CHECK(led_writes == writes);
+    pc_json_configure_allocator(no_memory, free);
+    CHECK(pc_test_round_end(7U, 77U, &response) == PC_DISPATCH_ERROR);
+    pc_json_configure_allocator(NULL, NULL);
+    CHECK(led_writes == writes);
+    led_failure = 1;
+    round_command(PC_COMMAND_ROUND_END, "{\"errorchip\":[]}", "failed", "executionFailed");
+    led_failure = 0;
+    /* 同镜像多颗、重复芯片都只归并到一盏FAIL灯，不要求PC发送固定三灯对象。 */
+    round_command(PC_COMMAND_ROUND_END,
+        "{\"errorchip\":[{\"physicalAddr\":\"a\",\"mirrorIndex\":0},{\"physicalAddr\":\"b\",\"mirrorIndex\":0},{\"physicalAddr\":\"b\",\"mirrorIndex\":0},{\"physicalAddr\":\"\",\"mirrorIndex\":2}]}",
+        "completed", NULL);
+    CHECK(led_states[0] == RESULT_LED_FAIL && led_states[1] == RESULT_LED_PASS && led_states[2] == RESULT_LED_FAIL);
+    round_command(PC_COMMAND_ROUND_END, "{\"errorchip\":[]}", "failed", "invalidState");
+    round_begin();
+    round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
+    round_end(); writes = led_writes;
+    CHECK(pc_test_service_busy());
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "busy");
+    round_command(PC_COMMAND_POWER_OFF, "{}", "failed", "busy");
+    round_command(PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, "{\"action\":\"mcu_begin\"}", "failed", "busy");
+    CHECK(dispatch(PC_COMMAND_CLIENT_HEARTBEAT, "{}", 77U, &response) == 1);
+    inject(RK_RESPONSE_COMPLETE, UINT64_C(0x123456789ABCDEF0));
+    CHECK(pc_dispatch_next_response(78U, &response) == 0 && !pc_test_service_busy());
+    CHECK(led_writes == writes);
+    round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "invalidState");
+    round_begin();
+    round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
+    inject(RK_RESPONSE_TIMEOUT, 0U);
+    CHECK(pc_dispatch_next_response(78U, &response) == 1);
+    round_end();
+    CHECK(pc_test_service_busy());
+    inject(RK_RESPONSE_RECOVERED, 0U);
+    CHECK(pc_dispatch_next_response(79U, &response) == 0 && !pc_test_service_busy());
+    round_begin(); pc_dispatch_disconnected();
+    round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "invalidState");
+    round_begin(); round_end();
+    message("PASS: PC RK service round lifecycle, atomic list validation, late result discard, busy, removed 070x\n");
+}
+
+#if defined(PC_POWER_SEQUENCE_TEST) || (defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION)
+/* 推进SLT电源；没有注入任何RK心跳，仍须只按本地电源完成返回completed。 */
+static void slt_complete(int discarded)
+{
+    pc_dispatch_response_t response;
+    unsigned queued = queue_calls;
+    int delivered = 0;
+    for (unsigned i = 0U; i < 12U; ++i) {
+        mock_tick += 20U;
+#if defined(PC_POWER_SEQUENCE_TEST)
+        if (mock_power_state == PWR_CTRL_STATE_WAIT_FIRST_RAIL) mock_power_state = PWR_CTRL_STATE_ON;
+        if (mock_power_state == PWR_CTRL_STATE_WAIT_SECOND_RAIL_OFF) mock_power_state = PWR_CTRL_STATE_OFF;
+#endif
+        pc_dispatch_poll();
+        CHECK(pc_power_service_diagnostic()->phase != PC_POWER_WAIT_RK_READY);
+        int ready = pc_dispatch_next_response(81U, &response);
+        CHECK(ready >= 0);
+        if (ready) {
+            CHECK(!discarded && !delivered);
+            cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 81U);
+            number_is(body, "requestCommandId", PC_COMMAND_SLT_START);
+            CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(body, "algorithmIndex")));
+            string_is(body, "status", "completed"); cJSON_Delete(body);
+            delivered = 1;
+        }
+    }
+    CHECK(delivered == !discarded && !pc_power_service_busy() && pc_test_service_busy());
+    CHECK(queue_calls == queued);
+}
+
+static void mutated_slt(uint16_t command, const char *source, const char *field,
+                        cJSON *value, const char *error)
+{
+    cJSON *body = cJSON_Parse(source); CHECK(body && value);
+    CHECK(cJSON_ReplaceItemInObjectCaseSensitive(body, field, value));
+    char *json = cJSON_PrintUnformatted(body); CHECK(json);
+    round_command(command, json, "failed", error);
+    cJSON_free(json); cJSON_Delete(body);
+}
+
+static void slt_flow_check(void)
+{
+    pc_dispatch_response_t response;
+#if defined(PC_POWER_SEQUENCE_TEST)
+    power_fixture = 1;
+    configure_power();
+    CHECK(pc_power_service_configure(&sequence_config, NULL) == 0);
+    unsigned arms = rk_arms;
+#endif
+    round_begin();
+    mutated_slt(PC_COMMAND_SLT_START, SLT_START, "algorithmName", cJSON_CreateString("MemTest86"), "invalidArgument");
+    mutated_slt(PC_COMMAND_SLT_START, SLT_START, "algorithmType", cJSON_CreateString("functional"), "invalidArgument");
+    mutated_slt(PC_COMMAND_SLT_START, SLT_START, "algorithmIndex", cJSON_CreateNumber(0), "invalidArgument");
+    mutated_slt(PC_COMMAND_SLT_START, SLT_START, "power", cJSON_CreateNull(), "invalidArgument");
+    mutated_slt(PC_COMMAND_SLT_START, SLT_START, "bootMode", cJSON_CreateString(""), "invalidArgument");
+    mutated_slt(PC_COMMAND_SLT_START, SLT_START, "reboot", cJSON_CreateString("true"), "invalidArgument");
+    CHECK(!pc_test_service_busy());
+    round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
+    round_command(PC_COMMAND_SLT_START, SLT_START, "accepted", NULL);
+    round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
+    slt_complete(0);
+#if defined(PC_POWER_SEQUENCE_TEST)
+    CHECK(rk_arms == arms);
+#endif
+    /* 串口完全不回包也不结束SLT；等待PC回送，不能占用期间再启动FUNC或升级。 */
+    mock_tick += 3600000U; pc_dispatch_poll();
+    CHECK(pc_dispatch_next_response(82U, &response) == 0 && pc_test_service_busy());
+    round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "busy");
+    round_command(PC_COMMAND_SLT_START, SLT_START, "failed", "busy");
+    round_command(PC_COMMAND_POWER_OFF, "{}", "failed", "busy");
+    CHECK(dispatch(PC_COMMAND_QUERY_POWER_MONITOR, "{}", 82U, &response) == 1);
+    mutated_slt(PC_COMMAND_SLT_RESULT, SLT_RESULT, "algorithmName", cJSON_CreateString("old"), "invalidState");
+    mutated_slt(PC_COMMAND_SLT_RESULT, SLT_RESULT, "siteId", cJSON_CreateString("SITE-8"), "invalidState");
+    mutated_slt(PC_COMMAND_SLT_RESULT, SLT_RESULT, "algorithmIndex", cJSON_CreateNumber(1), "invalidArgument");
+    mutated_slt(PC_COMMAND_SLT_RESULT, SLT_RESULT, "measurementData", cJSON_CreateObject(), "invalidArgument");
+    mutated_slt(PC_COMMAND_SLT_RESULT, SLT_RESULT, "testTimeMs", cJSON_CreateNumber(-1), "invalidArgument");
+    mutated_slt(PC_COMMAND_SLT_RESULT, SLT_RESULT, "testResults", cJSON_Parse("[{\"mirrorIndex\":0,\"testStatus\":0,\"resultDesc\":null,\"physicalAddr\":\"\"},{\"mirrorIndex\":0,\"testStatus\":1,\"resultDesc\":null,\"physicalAddr\":\"\"}]"), "invalidArgument");
+    CHECK(pc_test_service_busy());
+    round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "completed", NULL);
+    CHECK(!pc_test_service_busy());
+    round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
+    /* 相同SLT配置且false复用；0107提前结束不伪造SLT结束，迟到010B仅回收占用。 */
+#if defined(PC_POWER_SEQUENCE_TEST)
+    unsigned on = power_on_calls, off = power_off_calls, boot = boot_calls;
+#else
+    uint32_t cycles = v2_power_sim_cycles();
+#endif
+    round_command(PC_COMMAND_SLT_START, SLT_START, "accepted", NULL);
+    round_end(); unsigned writes = led_writes;
+    slt_complete(1);
+#if defined(PC_POWER_SEQUENCE_TEST)
+    CHECK(power_on_calls == on && power_off_calls == off && boot_calls == boot);
+#else
+    CHECK(v2_power_sim_cycles() == cycles);
+#endif
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "busy");
+    round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "completed", NULL);
+    CHECK(!pc_test_service_busy() && led_writes == writes);
+    round_begin();
+    /* 硬件异常仍报告失败，不因“无需检查RK”而吞掉驱动错误。 */
+#if defined(PC_POWER_SEQUENCE_TEST)
+    /* 同一电压/Boot的SLT准备完成不能冒充FUNC已ready，仍需FUNC适配器。 */
+    round_command(PC_COMMAND_START_TEST, COLD_START, "failed", "notReady");
+    CHECK(!pc_test_service_busy() && rk_arms == arms);
+    configure_power();
+    unsigned queued = queue_calls;
+    round_command(PC_COMMAND_START_TEST, COLD_START, "accepted", NULL);
+    round_end(); writes = led_writes;
+    cold_to_ready(); confirm_power(1); step_power(0U);
+    CHECK(pc_dispatch_next_response(83U, &response) == 0);
+    CHECK(!pc_test_service_busy() && !pc_power_service_busy() && queue_calls == queued && led_writes == writes);
+    round_begin();
+    configure_power(); boot_failure = 1;
+    round_command(PC_COMMAND_SLT_START, SLT_START, "accepted", NULL);
+    step_power(10U);
+    CHECK(pc_dispatch_next_response(83U, &response) == 1);
+    cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 83U);
+    string_is(body, "errorCode", "executionFailed"); cJSON_Delete(body);
+    CHECK(!pc_test_service_busy());
+    configure_power();
+    power_failure = PWR_CTRL_ERR_FAULT;
+    round_command(PC_COMMAND_SLT_START, SLT_START, "accepted", NULL);
+    step_power(10U); step_power(5U);
+    CHECK(pc_dispatch_next_response(84U, &response) == 1);
+    body = decode(&response, PC_COMMAND_COMMAND_RESP, 84U);
+    string_is(body, "errorCode", "executionFailed"); cJSON_Delete(body);
+    CHECK(!pc_test_service_busy() && queue_calls == queued);
+    configure_power();
+#endif
+    round_command(PC_COMMAND_SLT_START, SLT_START, "accepted", NULL); slt_complete(0);
+    /* 断线不认领旧SLT，无实例ID时不能用新连接的同名报告冒充本次结果。 */
+    pc_dispatch_disconnected();
+    round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "busy");
+    CHECK(pc_test_service_busy());
+    message("PASS: PC RK service SLT exact name/null index, no RK ready, PC completion, discard and reconnect ownership\n");
+}
+#endif
+#endif
+
 void test_main(void)
 {
+#if defined(PC_TEST_ROUND_TEST)
+    round_flow_check();
+#if defined(PC_POWER_SEQUENCE_TEST) || (defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION)
+    slt_flow_check();
+#endif
+    finish(0U);
+#endif
 #if defined(PC_POWER_SEQUENCE_TEST)
     power_sequence_check();
     finish(0U);

@@ -1,5 +1,7 @@
 # PC–MCU JSON业务合同
 
+2026-10-14协议及代码以[PC协议](pc_tcp_protocol_spec.md)和[实现记录§10](pc_test_round_protocol_20261014.md#10-整轮slt及070x删除实现2026-10-14未烧录)为准：0106空对象建轮，之后执行FUNC 0103/0105或SLT 010A/010B，最后0107提交errorchip数组。镜像0/1/2映射两组LPDDR/eMCP；SLT固定slt/memtest86、index=null，只做电源/Boot准备，完成由PC回送。0108/0109 PARA预留；070x已从V2/B1源码删除，合法旧请求回notSupported。B2加热/灯态获取尚无报文合同，默认常温仅为显示初值。两板代码已构建/离线验证，V2已安装0.1.35并通过网络检查，B1未烧录；Word/飞书停留在此前621版，待补齐固定名称及灯映射等后续细化。
+
 0103和0509统一使用`vdd1/vdd2/vddq`字符串，直接表示绝对电压mV，例如`"1800"/"1100"/"600"`。必须是非空ASCII十进制数字串，并满足`valMv=nominalMv+stepMv*n`：VDD1步进10mV、VDD2/VDDQ步进5mV，n为整数。越界或非整档直接拒绝，不取整；旧steps字段不再接受。详见[电压字段修改记录](pc_voltage_mv_20261012.md)。
 
 本页记录PC–MCU的JSON结构，字段定义与固件接入状态分开说明。固定18字节头、连接规则和命令目录见
@@ -7,16 +9,16 @@
 
 当前固件使用双方独立发送Seq和ServiceID=0。V2/B1均已接外部已启动模式：power/bootMode同时null、reboot=false，真实FUNC算法由RK执行，0x0006受理、0x0105返回一个整体最终结果，B1还要求真实电源状态ON。B1完整训练启动已配置初值并接入驱动与本轮RK心跳确认，尚待实板验收；不能把参数解析、受理或启动完成当作测试PASS。
 
-现行[固件升级合同](pc_ota_protocol.md)及[PC协议4.26至4.28](pc_tcp_protocol_spec.md#426-固件升级请求0x0901)复用0901/0902/0903。2026-09-24起，MCU动作使用`mcu_begin/mcu_write/mcu_finish/mcu_query/mcu_cancel`，不再接受旧无前缀动作。V2/B1的MCU下载使用最多3000字节原始块和Base64，完整帧≤4096；普通/隔离构建未启用完整OTA时回notSupported。五个对应`rk_*`动作仅保留入口，返回0006 failed/notSupported，不访问Flash或操作RK，不定义RK结构体/包体。0903当前仍只表示所查询MCU包已健康运行，不恢复Seq回显。本轮离线验证与旧固件迁移说明见[修改记录](firmware_upgrade_reservation_20260924.md)；[2026-09-16实测](ota_network_validation_20260916.md)仅证明当时旧动作，不代表新动作已上板。
+现行[固件升级合同](pc_ota_protocol.md)及[PC协议4.29至4.31](pc_tcp_protocol_spec.md#429-固件升级请求0x0901)复用0901/0902/0903。2026-09-24起，MCU动作使用`mcu_begin/mcu_write/mcu_finish/mcu_query/mcu_cancel`，不再接受旧无前缀动作。V2/B1的MCU下载使用最多3000字节原始块和Base64，完整帧≤4096；普通/隔离构建未启用完整OTA时回notSupported。五个对应`rk_*`动作仅保留入口，返回0006 failed/notSupported，不访问Flash或操作RK，不定义RK结构体/包体。0903当前仍只表示所查询MCU包已健康运行，不恢复Seq回显。本轮离线验证与旧固件迁移说明见[修改记录](firmware_upgrade_reservation_20260924.md)；[2026-09-16实测](ota_network_validation_20260916.md)仅证明当时旧动作，不代表新动作已上板。
 
 ## 1. 算法下发与芯片测试结果
 
-PC工程师草案中的命令映射：
+现有固件的FUNC命令映射（源码常量名尚未随新目录重命名）：
 
 | 方向 | CommandID | JSON用途 |
 |---|---:|---|
-| PC → MCU | `CMD_START_TEST = 0x0103` | 一次提交算法大类/名称、计划项index、训练目标mV及重启/启动模式 |
-| MCU → PC | `CMD_TEST_RESULT_REPORT = 0x0105` | 上报该算法的多项芯片测试结果 |
+| PC → MCU | `PC_COMMAND_START_TEST = 0x0103` | 一次提交FUNC名称、计划项index、训练目标mV及重启/启动模式 |
+| MCU → PC | `PC_COMMAND_TEST_RESULT_REPORT = 0x0105` | 上报该FUNC算法的双颗粒测试结果 |
 
 `ServiceID`固定填0，不参与分发。PC和MCU在每条连接中分别维护自己的发送Seq，每发送一个应用帧本端加1；收到对方报文不改变本端发送计数，不回显对方Seq，与MCU–RK的u64 Seq无关。两个方向允许数值相同且可以同时发送。Seq不用于匹配业务请求；首值1、重连归1、u32回绕及发送失败规则见协议框架第2节。新开始测试按4.7节串行提交，不靠算法名称或Seq区分并发请求。
 
@@ -30,8 +32,8 @@ PC工程师草案中的命令映射：
 
 ```json
 {
-  "algorithmType": "parametric",
-  "algorithmName": "idd_0",
+  "algorithmType": "functional",
+  "algorithmName": "mats",
   "algorithmIndex": 1,
   "power": {
     "memoryType": "LPDDR4X",
@@ -44,11 +46,11 @@ PC工程师草案中的命令映射：
 }
 ```
 
-字段类型、必填要求、算法分类、冷重启判定和响应流程以[协议框架4.7节](pc_tcp_protocol_spec.md#47-开始测试0x0103)为准。
+字段类型、必填要求、算法分类、冷重启判定和响应流程以[协议框架4.7节](pc_tcp_protocol_spec.md#47-func开始测试0x0103)为准。
 `power`为训练期间的绝对电压mV字符串，重复发送不累加；不是运行期拉偏。步进为10/5/5mV，旧steps不再接受。PC确认DDR安全范围与三轨组合，MCU严格校验格式、内存类型、TPS可编码范围和原生步进，不取整或钳位。
 与上一份成功生效且仍有效的配置相比，只要内存类型或任一目标电压改变，就必须受控冷重启，不能由`reboot=false`取消；
 Boot改变或配置状态未知/失效也需重新建立启动状态。`reboot`控制是否主动重启，重启统一采用受控断电方式；`bootMode`表示启动模式，不单列重启类型。
-算法以`algorithmType/algorithmName`标识，大类为`functional/slt/parametric`；保留`algorithmIndex`作为PC当前计划中的算法项编号，同名算法可出现多次并用不同index区分。编号由PC提供，MCU在开始测试执行响应和最终结果中原样带回，不自增、不当作RK算法ID。现有0x0506/0x0509保留，不改变各自包体。
+FUNC以`algorithmType/algorithmName`标识，0103固定为functional；SLT另用010A/010B且algorithmIndex=null，PARA的0108/0109先保留。FUNC的`algorithmIndex`为PC当前计划中的算法项编号，同名算法可出现多次并用不同index区分。编号由PC提供，MCU在开始测试执行响应和最终结果中原样带回，不自增、不当作RK算法ID。现有0x0506/0x0509保留，不改变各自包体。
 
 上述完整B1请求严格校验全部六个根字段及power四字段，不接受缺失、重复、未知键或错误类型；timeoutMs为新增可选根字段。
 三路电压复用TPS编码范围检查，但不代表已批准安全训练范围。参数非法回0006
@@ -60,7 +62,7 @@ V2外部已启动模式使用`{"algorithmType":"functional","algorithmName":"mat
 
 ### TEST_RESULT_REPORT包体
 
-正式结果结构见[协议框架4.9节](pc_tcp_protocol_spec.md#49-上报测试结果0x0105)。每算法一个0105包，根字段为`siteId/algorithmType/algorithmName/algorithmIndex/testTimeMs/testResults/measurementData`。
+正式FUNC结果结构见[协议框架4.9节](pc_tcp_protocol_spec.md#49-func结果上报0x0105)。每算法一个0105包，根字段为`siteId/algorithmType/algorithmName/algorithmIndex/testTimeMs/testResults/measurementData`。
 
 - 顶层siteId从本次受理时读取的W25 FRU站点标签获取，未配置为空；不在每颗里重复。
 - testResults固定两项，mirrorIndex依次为0/1；每项含testStatus、resultDesc和保留空字符串physicalAddr。testStatus为0=FAIL、1=PASS。

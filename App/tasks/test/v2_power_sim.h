@@ -32,6 +32,11 @@ void v2_power_sim_poll(void); /* 约500ms生成一个样本；积压时不补造
 void v2_power_sim_test_begin(const pc_test_start_view_t *start);
 void v2_power_sim_test_end(int complete);
 
+/* 010A只应用虚拟电源/Boot参数，不下发RK、不等待心跳、不开启算法测量窗口。
+ * start须来自pc_slt_start_parse；模拟完成不证明真实RK已经启动EDK。
+ */
+void v2_power_sim_prepare_slt(const pc_test_start_view_t *start);
+
 /* 0602追加statistics；0105替换唯一结果的measurementData，保留字段顺序。 */
 int v2_power_sim_add_statistics(cJSON *body);
 int v2_power_sim_add_measurement(cJSON *body);

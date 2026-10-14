@@ -1,4 +1,4 @@
-"""验证V2新入口的只读/拒绝路径；绝不发送支持的算法、不改电源/Flash或复位。"""
+"""验证V2查询/拒绝及整轮路径；会更新结果灯，不发算法、不改电源或复位。"""
 import argparse
 import json
 from pathlib import Path
@@ -16,7 +16,7 @@ def main():
     args = parser.parse_args()
     if args.report.exists():
         parser.error("报告已存在，换名称以保留证据")
-    report = {"scope": "只读及拒绝路径；未执行RK算法", "events": []}
+    report = {"scope": "查询、拒绝及整轮灯态；未执行RK算法", "events": []}
     try:
         with socket.create_connection((args.host, args.port), timeout=3) as sock:
             sock.settimeout(5)
@@ -25,6 +25,8 @@ def main():
             assert state["confirmed"] and state["firmwareVersion"] == args.version, state
             client.call({}, command=0x0002, expect=0x0001)
             client.call({}, command=0x0101, expect=0x0102)
+            _, result = client.call({}, command=0x0106, expect=6)
+            assert result.get("status") == "completed", result
             # 故意使用不存在的名字，即使后续字段放行，也不能查表下发真实算法。
             body = dict(algorithmType="functional", algorithmName="__NO_SUCH_ALGORITHM__",
                         algorithmIndex=123, power=None, reboot=False, bootMode=None)
@@ -41,10 +43,12 @@ def main():
                         expect=6, error="invalidArgument")
             client.call(dict(body, power=dict(memoryType="LPDDR4X", vdd1="1800",
                         vdd2="1100", vddq="600"), bootMode="emmc"), command=0x0103,
-                        expect=6, error="notReady")
+                        expect=6, error="notSupported")
             client.call({}, command=0x0002, expect=0x0001)
+            _, result = client.call({"errorchip": []}, command=0x0107, expect=6)
+            assert result.get("status") == "completed", result
             report["passed"] = True
-            print("PASS: 11个实际TCP请求；版本/健康、心跳、W25信息与新入口拒绝路径")
+            print("PASS: 版本/健康、心跳、W25信息、轮次与拒绝路径；三灯保留汇总PASS")
             print("未下发RK算法，真实执行和结果回传仍待操作者发起")
     except BaseException as error:
         report["error"] = repr(error)

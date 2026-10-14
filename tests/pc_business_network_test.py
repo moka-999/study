@@ -56,16 +56,6 @@ def send_json(connection: socket.socket, command: int, body: dict,
     return response
 
 
-def expect_disconnect(host: str, port: int, payload: bytes) -> None:
-    with socket.create_connection((host, port), timeout=3.0) as connection:
-        connection.settimeout(2.0)
-        connection.sendall(payload)
-        try:
-            assert connection.recv(1) == b""
-        except (ConnectionResetError, ConnectionAbortedError):
-            return
-
-
 def run(host: str, port: int) -> None:
     # 监测任务启动后先延时1秒发布OFF快照；这里给出少量调度余量。
     time.sleep(1.3)
@@ -82,14 +72,18 @@ def run(host: str, port: int) -> None:
         passed += 1
         mcu_seq += 1; pc_seq += 1
 
-        # 0103只验证协议软件接入；RK接口未定，合法请求也必须明确拒绝且不启动电源。
+        body = send_json(connection, 0x0106, {}, pc_seq, mcu_seq, 0x0006)
+        assert body == {"requestCommandId": 0x0106, "status": "completed"}
+        mcu_seq += 1; pc_seq += 1
+
+        # 轮内仅发不支持的PARA名称，不能启动真实RK算法或电源。
         start_request = {
             "algorithmType": "parametric", "algorithmName": "idd_0", "algorithmIndex": 7,
             "power": {"memoryType": "LPDDR4X", "vdd1": "1800", "vdd2": "1100", "vddq": "600"},
             "reboot": True, "bootMode": "emmc",
         }
         body = send_json(connection, 0x0103, start_request, pc_seq, mcu_seq, 0x0006)
-        assert body == {"requestCommandId": 259, "status": "failed", "errorCode": "notReady", "algorithmIndex": 7}
+        assert body == {"requestCommandId": 259, "status": "failed", "errorCode": "notSupported", "algorithmIndex": 7}
         mcu_seq += 1; pc_seq += 1
         body = send_json(connection, 0x0103, {"algorithmIndex": 8}, pc_seq, mcu_seq, 0x0006)
         assert body == {"requestCommandId": 259, "status": "failed", "errorCode": "invalidArgument", "algorithmIndex": 8}
@@ -98,7 +92,7 @@ def run(host: str, port: int) -> None:
         fields, body = recv_frame(connection)
         assert fields[3:6] == (0, 0x0006, mcu_seq)
         assert body == {"requestCommandId": 259, "status": "failed", "errorCode": "invalidArgument"}
-        print("[PASS] 0103完整请求notReady、非法请求index回带和重复index拒绝；不执行RK")
+        print("[PASS] 0103拒绝非FUNC、非法请求index回带和重复index拒绝；不执行RK")
         passed += 3
         mcu_seq += 1; pc_seq += 1
 
@@ -179,46 +173,23 @@ def run(host: str, port: int) -> None:
         passed += 1
         mcu_seq += 1; pc_seq += 1
 
-        for target, state in (
-            ("lpddr0", "pass"),
-            ("lpddr1", "fail"),
-            ("emcp", "testHot"),
-        ):
-            body = send_json(connection, 0x0701,
-                             {"target": target, "state": state},
-                             pc_seq, mcu_seq, 0x0006)
-            assert body == {"requestCommandId": 0x0701, "status": "completed"}
+        # 070x彻底删除：包括旧响应方向也统一按未知命令拒绝，不更新结果灯。
+        for command in (0x0701, 0x0702, 0x0703):
+            body = send_json(connection, command, {}, pc_seq, mcu_seq, 0x0006)
+            assert body == {"requestCommandId": command, "status": "failed", "errorCode": "notSupported"}
             mcu_seq += 1; pc_seq += 1
+        print("[PASS] 070x旧入口全部notSupported")
+        passed += 3
 
-        body = send_json(connection, 0x0702, {}, pc_seq, mcu_seq, 0x0703)
-        assert body == {
-            "lpddr0": "pass", "lpddr1": "fail", "emcp": "testHot"
-        }
-        print("[PASS] 0x0701设置三对象，0x0702/0x0703原子查询")
-        passed += 1
-        mcu_seq += 1; pc_seq += 1
-
-        body = send_json(connection, 0x0701,
-                         {"target": "lpddr0", "state": "pass", "extra": 1},
+        body = send_json(connection, 0x0107,
+                         {"errorchip": [{"physicalAddr": "", "mirrorIndex": 3}]},
                          pc_seq, mcu_seq, 0x0006)
         assert body["errorCode"] == "invalidArgument"
-        print("[PASS] 0x0701拒绝多余字段")
-        passed += 1
         mcu_seq += 1; pc_seq += 1
-
-        body = send_json(connection, 0x0703, {}, pc_seq, mcu_seq, 0x0006)
-        assert body["errorCode"] == "invalidDirection"
-        print("[PASS] MCU方向响应命令反向发送返回invalidDirection")
-        passed += 1
-        mcu_seq += 1; pc_seq += 1
-
-        # 测试结束恢复三组全灭，避免把测试显示留在开发板替代引脚上。
-        for target in ("lpddr0", "lpddr1", "emcp"):
-            body = send_json(connection, 0x0701,
-                             {"target": target, "state": "off"},
-                             pc_seq, mcu_seq, 0x0006)
-            assert body["status"] == "completed"
-            mcu_seq += 1; pc_seq += 1
+        body = send_json(connection, 0x0107, {"errorchip": []}, pc_seq, mcu_seq, 0x0006)
+        assert body == {"requestCommandId": 0x0107, "status": "completed"}
+        print("[PASS] 0107拒绝未知镜像且整包不改灯，空失败表收尾；三灯保留PASS")
+        passed += 2
 
     with socket.create_connection((host, port), timeout=3.0) as connection:
         connection.settimeout(3.0)
@@ -227,14 +198,21 @@ def run(host: str, port: int) -> None:
     print("[PASS] 新连接MCU发送Seq重新从1开始")
     passed += 1
 
-    expect_disconnect(host, port, make_frame(0x0002, b"{}", 901, service=1))
-    print("[PASS] 非0 ServiceID关闭连接")
-    passed += 1
-
-    nul_body = br'{"target":"lpddr0","state":"pass\u0000junk"}'
-    expect_disconnect(host, port, make_frame(0x0701, nul_body, 902))
-    print("[PASS] JSON字符串\\u0000绕过被统一入口拒绝")
-    passed += 1
+    with socket.create_connection((host, port), timeout=3.0) as connection:
+        connection.settimeout(3.0)
+        # 非0 ServiceID前缀被丢弃，后面的完整心跳须在同一连接正常响应。
+        connection.sendall(make_frame(0x0002, b"{}", 901, service=1) +
+                           make_frame(0x0002, b"{}", 902))
+        fields, body = recv_frame(connection)
+        assert fields[3:6] == (0, 0x0001, 1) and body == {}
+        nul_body = br'{"errorchip":[{"physicalAddr":"bad\u0000tail","mirrorIndex":0}]}'
+        connection.sendall(make_frame(0x0107, nul_body, 903))
+        fields, body = recv_frame(connection)
+        assert fields[3:6] == (0, 0x0006, 2)
+        assert body["errorCode"] == "invalidArgument"
+        assert send_json(connection, 0x0002, {}, 904, 3, 0x0001) == {}
+    print("[PASS] 非法前缀与JSON NUL拒绝后，同连接心跳继续")
+    passed += 2
 
     print(f"PC business network: {passed} PASS, 0 FAIL")
 

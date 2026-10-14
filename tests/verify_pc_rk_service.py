@@ -14,6 +14,7 @@ def main():
     parser.add_argument("--power-simulation", action="store_true", help="验证V2部分模拟仍通过真实RK队列及正式分发")
     parser.add_argument("--mats-fail-test", action="store_true", help="仅V2电源模拟：验证每次MATS最终回包强制FAIL")
     parser.add_argument("--power-sequence", action="store_true", help="执行正式电源编排与0103的故障注入，不访问设备")
+    parser.add_argument("--round", action="store_true", help="验证整轮、SLT收尾和070x删除；只运行离线实际C")
     args = parser.parse_args()
     root = args.app_root.resolve()
     if args.power_simulation and (args.b1_guard or root.name == "b1"):
@@ -27,6 +28,8 @@ def main():
         suffix += "-mats-fail"
     if args.power_sequence:
         suffix += "-power-sequence"
+    if args.round:
+        suffix += "-round"
     build = root / "build" / ("pc-rk-service" + suffix)
     build.mkdir(parents=True, exist_ok=True)
     # 只模拟RTOS队列和HAL类型，不替换命令表、JSON解析、服务生命周期或响应组包。
@@ -51,6 +54,10 @@ typedef enum { HAL_OK=0, HAL_ERROR=1 } HAL_StatusTypeDef;
 uint32_t HAL_GetTick(void);
 ''', encoding="utf-8")
     (build / "main.h").write_text('#include "stm32h7xx_hal.h"\n', encoding="utf-8")
+    if args.b1_guard and root.name != "b1":
+        # V2源码检查B1条件分支时只补日志端口；真实B1构建仍使用自身正式接口头。
+        (build / "log_console.h").write_text(
+            '#include <stddef.h>\nsize_t log_console_write(const char *, size_t);\n', encoding="utf-8")
     sources = [Path(__file__).with_name("test_pc_rk_service.c"), *[root / path for path in (
         "App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_test_service.c",
         "App/protocol/pc/pc_power_service.c",
@@ -76,6 +83,8 @@ uint32_t HAL_GetTick(void);
         command += ["-DENABLE_V2_MATS_FAIL_TEST=1"]
     if args.power_sequence:
         command += ["-DPC_POWER_SEQUENCE_TEST=1"]
+    if args.round:
+        command += ["-DPC_TEST_ROUND_TEST=1"]
     command += ["-I" + str(path) for path in includes]
     command += [*map(str, sources), str(boot / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
                 "-T" + str(boot / "qemu_test.ld"), "-Wl,--gc-sections", "-o", str(build / "test.elf")]

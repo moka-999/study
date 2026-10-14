@@ -41,11 +41,17 @@ typedef struct {
     result_led_pin_pair_t pairs[RESULT_LED_TARGET_COUNT];
 } result_led_board_map_t;
 
-/** 使用板级映射并立即关闭六路结果灯。调用前GPIO时钟和输出模式必须已配置。 */
+/** 使用板级映射并立即关闭六路结果灯；GPIO须已配置，map=NULL返回HAL_ERROR。 */
 HAL_StatusTypeDef result_led_init(const result_led_board_map_t *map);
 
 /** 更新一组测试对象的显示状态；闪烁状态从亮相位开始。 */
 HAL_StatusTypeDef result_led_set(result_led_target_t target, result_led_state_t state);
+
+/** 原子提交三组状态；先完整校验，任何非法状态/未初始化均返回HAL_ERROR且不更新。
+ * 数组依次LPDDR0/LPDDR1/eMCP，HAL_OK表示逻辑提交成功，不是灯珠电气回读。
+ * 一次临界区内更新状态与GPIO，defaultTask不会观察到半份整轮汇总。
+ */
+HAL_StatusTypeDef result_led_set_all(const result_led_state_t states[RESULT_LED_TARGET_COUNT]);
 
 /**
  * 一次复制三组业务状态，数组顺序为LPDDR0、LPDDR1、eMCP。

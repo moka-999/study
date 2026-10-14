@@ -2,12 +2,11 @@
 import argparse
 import json
 from pathlib import Path
-import re
 import socket
 import struct
 import time
 
-from pc_business_network_test import recv_exact
+from pc_business_network_test import make_frame, recv_exact, recv_frame
 
 
 def main():
@@ -17,22 +16,17 @@ def main():
     parser.add_argument("--port", type=int, default=8888)
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[1]
-    document = (root / "doc/func_algorithm_network_packets.md").read_text(encoding="utf-8")
-    body_text, hex_text = re.findall(
-        r"```json\n(.*?)\n```.*?```text\n(.*?)\n```", document, re.S)[0]
-    packet = bytes.fromhex(hex_text)
-    assert packet[18:] == body_text.encode("utf-8")
-    assert struct.unpack(">IHHHHIH", packet[:18]) == (149, 1, 8, 0, 0x0103, 1, 0)
-    body = json.loads(body_text)
-    assert body == dict(algorithmType="functional", algorithmName="gtest-stuck-address",
-                        algorithmIndex=1, power=None, reboot=False, bootMode=None)
+    # 单次复现只用外部已启动模式，不借用文档中会改变模拟电压的20组示例。
+    body = dict(algorithmType="functional", algorithmName="gtest-stuck-address",
+                algorithmIndex=1, power=None, reboot=False, bootMode=None)
+    packet = make_frame(0x0103, json.dumps(body, separators=(",", ":")).encode(), 2)
+    assert struct.unpack(">IHHHHIH", packet[:18]) == (149, 1, 8, 0, 0x0103, 2, 0)
     if not args.execute:
         print("离线校验通过：149字节，gtest-stuck-address，未连接开发板。")
         return
     if args.report is None or args.report.exists():
         parser.error("执行必须指定不存在的--report，禁止覆盖诊断证据")
-    report = {"scope": "真实RK算法仅发送一次；不改电源/启动，不复位、不升级",
+    report = {"scope": "先0106，真实RK算法仅一次，完成后0107；更新灯，不改电源/启动、不复位升级",
               "host": args.host, "port": args.port, "events": []}
     started = time.monotonic()
 
@@ -47,6 +41,10 @@ def main():
         with socket.create_connection((args.host, args.port), timeout=3) as connection:
             connection.settimeout(5)
             record({"event": "connected"})
+            connection.sendall(make_frame(0x0106, b"{}", 1))
+            fields, response = recv_frame(connection)
+            record({"event": "round_begin", "header": fields, "json": response})
+            assert fields[4] == 6 and response == {"requestCommandId": 0x0106, "status": "completed"}, response
             connection.sendall(packet)
             record({"event": "sent_once", "bytes": len(packet), "hex": packet.hex(" "), "json": body})
             accepted = False
@@ -60,6 +58,13 @@ def main():
                         "hex": (header + payload).hex(" "), "json": response})
                 if fields[4] == 0x0105:
                     assert accepted and response["algorithmIndex"] == 1
+                    failures = [{"physicalAddr": chip["physicalAddr"], "mirrorIndex": chip["mirrorIndex"]}
+                                for chip in response["testResults"] if chip["testStatus"] == 0]
+                    summary = json.dumps({"errorchip": failures}, separators=(",", ":")).encode()
+                    connection.sendall(make_frame(0x0107, summary, 3))
+                    fields, summary_response = recv_frame(connection)
+                    record({"event": "round_end", "header": fields, "json": summary_response})
+                    assert fields[4] == 6 and summary_response == {"requestCommandId": 0x0107, "status": "completed"}
                     break
                 assert fields[4] == 0x0006, fields
                 if response.get("status") != "accepted":

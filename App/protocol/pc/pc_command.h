@@ -20,14 +20,20 @@
 #define PC_COMMAND_TESTER_INFO_RESP   0x0102U
 
 /*
- * 第一组测试业务命令：0x0103由PC下发算法，0x0105由MCU上报测试结果。
- * 外部已启动模式已接入功能测试；受理用0x0006，最终结论用0x0105。
- * siteId来自FRU；mirrorIndex原样取RK 0x3001，0为第一颗、1为第二颗；physicalAddr保留为空。
+ * 一轮测试以0106开始、0107结束；轮内串行执行FUNC或SLT，PARA仅保留编号。
+ * FUNC的mirrorIndex取RK 0x3001，表示镜像0/1；当前每镜像一颗，physicalAddr为空。
+ * SLT由PC读取服务器报告后回送010B，不复用FUNC的UART算法或0105结果通道。
  */
 #define PC_COMMAND_START_TEST          0x0103U
 #define PC_COMMAND_TEST_RESULT_REPORT  0x0105U
+#define PC_COMMAND_ROUND_BEGIN         0x0106U /* PC→MCU，{}；只建立整轮上下文。 */
+#define PC_COMMAND_ROUND_END           0x0107U /* PC→MCU，失败芯片数组；汇总灯并废弃未交付结果。 */
+#define PC_COMMAND_PARA_START          0x0108U /* 预留，当前返回notSupported。 */
+#define PC_COMMAND_PARA_RESULT         0x0109U /* 预留MCU→PC，反向请求返回invalidDirection。 */
+#define PC_COMMAND_SLT_START           0x010AU /* slt/memtest86，按参数准备电源与Boot。 */
+#define PC_COMMAND_SLT_RESULT          0x010BU /* PC回送本次SLT结果，不等待RK串口结果。 */
 
-/* RK及内存电源业务：上电走状态机；下电/复位受RK安全关机确认门控。 */
+/* RK及内存电源业务：非阻塞编排；初版直接关电，不等待RK关机应答。 */
 #define PC_COMMAND_POWER_ON            0x0501U
 #define PC_COMMAND_POWER_OFF           0x0502U
 #define PC_COMMAND_QUERY_POWER_STATUS  0x0503U
@@ -41,11 +47,6 @@
 /* 三轨实际采样查询：响应数组顺序固定为VDD1、VDD2、VDDQ。 */
 #define PC_COMMAND_QUERY_POWER_MONITOR 0x0601U
 #define PC_COMMAND_POWER_MONITOR_RESP  0x0602U
-
-/* 三组双色结果灯使用业务对象和状态，不暴露物理颜色或GPIO编号。 */
-#define PC_COMMAND_SET_RESULT_INDICATOR    0x0701U
-#define PC_COMMAND_QUERY_INDICATOR_STATUS  0x0702U
-#define PC_COMMAND_INDICATOR_STATUS_RESP   0x0703U
 
 /* 固件升级请求/动作应答/完成确认；mcu_*已实现，rk_*仅保留且返回notSupported。 */
 #define PC_COMMAND_FIRMWARE_UPGRADE_REQUEST   0x0901U
