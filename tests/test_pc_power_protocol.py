@@ -111,9 +111,12 @@ def main() -> None:
         ("PC_COMMAND_SET_DDR_CONFIG", "0x0509U"),
         ("PC_COMMAND_QUERY_POWER_MONITOR", "0x0601U"),
         ("PC_COMMAND_POWER_MONITOR_RESP", "0x0602U"),
-        ("PC_COMMAND_SET_RESULT_INDICATOR", "0x0701U"),
-        ("PC_COMMAND_QUERY_INDICATOR_STATUS", "0x0702U"),
-        ("PC_COMMAND_INDICATOR_STATUS_RESP", "0x0703U"),
+        ("PC_COMMAND_ROUND_BEGIN", "0x0106U"),
+        ("PC_COMMAND_ROUND_END", "0x0107U"),
+        ("PC_COMMAND_PARA_START", "0x0108U"),
+        ("PC_COMMAND_PARA_RESULT", "0x0109U"),
+        ("PC_COMMAND_SLT_START", "0x010AU"),
+        ("PC_COMMAND_SLT_RESULT", "0x010BU"),
     ):
         require(re.search(rf"#define\s+{symbol}\s+{value}", command) is not None,
                 f"missing command id: {symbol}")
@@ -149,10 +152,12 @@ def main() -> None:
         "handle_query_power_monitor", "monitor_get_latest",
         '"sampleAgeMs"', '"samplePowerState"', '"validMask"',
         '"voltageMv"', '"currentMa"', '"powerMw"',
-        "handle_set_result_indicator", "handle_query_indicator_status",
-        '"lpddr0"', '"lpddr1"', '"emcp"',
-        '"testNormal"', '"testHot"',
-    )), "0x0509/0x0601/0x0701业务处理或JSON字段不完整")
+        "handle_round_begin", "handle_round_end", "handle_slt_start", "handle_slt_result",
+    )), "电源、采样、整轮或SLT未接入命令表")
+    require(not re.search(r"0x070[123]U", command) and
+            "handle_set_result_indicator" not in dispatch and
+            "handle_query_indicator_status" not in dispatch,
+            "已删除070x不能保留枚举或执行入口")
     require("xSemaphoreCreateMutexStatic" in monitor_task and
             monitor_task.count("memory_io_take(") >= 6 and
             "xSemaphoreGive(s_memory_io_mutex)" in monitor_task,
@@ -278,19 +283,9 @@ def main() -> None:
     require("voltageMv" not in partial_monitor,
             "无效测量组必须省略，不能用零数组冒充有效值")
 
-    targets = ("lpddr0", "lpddr1", "emcp")
-    states = ("off", "pass", "fail", "testNormal", "testHot")
-    indicator_requests = [
-        {"target": target, "state": state}
-        for target in targets for state in states
-    ]
-    require(len(indicator_requests) == 15 and
-            all(set(request) == {"target", "state"}
-                for request in indicator_requests),
-            "0x0701应覆盖3对象×5业务状态且只含两个字段")
-    indicator_response = {target: "off" for target in targets}
-    require(tuple(indicator_response) == targets,
-            "0x0703对象顺序/命名必须为lpddr0、lpddr1、emcp")
+    require("pc_round_end_parse" in start_parser and '"errorchip"' in start_parser and
+            "pc_test_round_end" in start_service and "result_led_set_all" in led_source,
+            "0107须完整解析失败数组后一次提交三灯，不能逐项产生部分副作用")
 
     require(not json_string_lexemes_are_safe(
                 br'{"target":"lpddr0","state":"pass\u0000junk"}') and

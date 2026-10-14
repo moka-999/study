@@ -13,6 +13,7 @@
 - RK字节间超时与V2统一为100ms；仅丢弃超时半帧，不改变算法等待或Seq窗口。B1构建拒绝ENABLE_V2_MATS_FAIL_TEST、电源模拟及旧网关联调开关。
 - 通用同步及离线复跑入口见`../test/doc/v2_b1_sync_20261010.md`；板型差异不靠整目录覆盖消除。
 - B1结果灯不作RK通信指示，PC温控边界不变。代码/离线/构建与B1实板验收分开记录，见`docs/rk_protocol_migration_20260923.md`。
+- 整轮先0106 `{}`；轮内FUNC用0103/0105，SLT用010A/010B，最后0107提交errorchip数组。镜像0/1/2分别映射LPDDR0/LPDDR1/eMCP，其他编号整包拒绝；070x已删除，合法旧请求回notSupported。0108预留、0109只允许MCU方向。0107不取消RK或提前释放占用，只阻止尚未入队的FUNC及废弃未交付结果。SLT只匹配slt/memtest86，index=null，按参数准备电源/Boot，不等RK心跳或检查EDK；原连接010B确认实际结束，断线后不自动认领旧SLT。B2灯态/加热状态尚未有报文合同，默认常温闪只作显示初值。
 
 ## 20260920-2134原理图适配边界
 
@@ -126,8 +127,8 @@
   0x0001 with `{}` using the MCU connection-local send Seq.
 - The local business now includes 0x0501/0x0502 power requests, 0x0503/0x0504
   state, 0x0505 reset gate, 0x0506/0x0507/0x0508 Boot configuration/query,
-  0x0509 memory-type/voltage, 0x0601/0x0602 cached monitoring, and
-  0x0701/0x0702/0x0703 indicators. 0x0509 is
+  0x0509 memory-type/voltage and 0x0601/0x0602 cached monitoring.
+  结果灯已迁至0106/0107，070x命令入口已删除。0x0509使用
   固定四字段`memoryType+vdd1+vdd2+vddq`：三路电压是绝对mV十进制字符串，
   必须满足标称值加原生步进乘整数及TPS范围，不自动取整；旧steps字段不再接受。
   0103.power复用同一解析器。OFF只接受所选类型的标称电压；ON只允许当前类型。
@@ -147,7 +148,7 @@
 - B1 and V2 both keep D-Cache disabled. ETH DMA memory belongs in D2 SRAM and
   the FreeRTOS heap belongs in AXI SRAM; never add SCB cache maintenance calls.
 - PG0-PG5仅用于三颗双色结果灯：奇数LED1/3/5为FAIL通道，偶数LED2/4/6为PASS通道；常温测试双通道闪烁，高温测试仅FAIL通道闪烁，亮灭各500ms。图纸料号L-C295JFLBCT的手册为琥珀/蓝，实际灯色及LPDDR0/LPDDR1/eMCP物理顺序等真板确认，不按图面红绿旁注改业务。
-  PC仍用`lpddr0|lpddr1|emcp`和`off|pass|fail|testNormal|testHot`，不新增字段。
+  PC不再单独设置灯态；0107按失败芯片所属mirrorIndex汇总，0/1/2对应两组LPDDR/eMCP。
 - PG6/LED7已确认为MCU正常上电指示：GPIO初始化先低，默认任务完成串口及LwIP初始化后置高常亮，不跟随结果灯、网络连接或RK/DDR电源状态闪烁；不代表整板电压、RK就绪或OTA健康验收。详见`docs/board_status_slot_20261010.md`。
 - Do not copy V2 pin mappings, PCF8574 PHY reset, fixed MAC or test scripts.
 - `B1_RK_UART=4`已固定，CMake拒绝2；逻辑slot0=UART4协议、slot1=USART2日志、slot2=USART1控制台，后两路绝不进入RK解析器。USART2仅RX，不挂TX发送环。

@@ -6,7 +6,9 @@
 #include "mcp4725.h"
 
 typedef enum {
-    PC_POWER_ON = 0, PC_POWER_OFF, PC_POWER_RESTART, PC_POWER_PREPARE_TEST
+    PC_POWER_ON = 0, PC_POWER_OFF, PC_POWER_RESTART,
+    PC_POWER_PREPARE_TEST, /* FUNC：电源/Boot完成后还须本轮RK普通心跳。 */
+    PC_POWER_PREPARE_SLT   /* SLT：只准备电源/Boot，绝不检查RK软件状态。 */
 } pc_power_action_t;
 
 typedef enum {
@@ -60,9 +62,10 @@ typedef struct {
 int pc_power_service_configure(const pc_power_config_t *config,
                                const pc_power_rk_adapter_t *adapter);
 /** 唯一TCP任务调用。NULL=已受理（含立即完成），否则静态业务错误名。
- * PREPARE_TEST必须给target；其它动作target必须NULL。reboot仅对PREPARE_TEST
+ * PREPARE_TEST/PREPARE_SLT必须给target；其它动作target必须NULL。reboot仅对这两项
  * 有效：为0仍会在训练/Boot配置变化、状态未知时强制冷启动。受理时复制target。
  * 预检查不访问GPIO/I2C；实际驱动在poll推进。完成结果未消费前仍为busy。
+ * SLT的DONE仅表示本地准备完成；其成功缓存不能当成FUNC初始化就绪。
  */
 const char *pc_power_service_start(pc_power_action_t action,
                                   const pc_power_target_t *target, uint8_t reboot);

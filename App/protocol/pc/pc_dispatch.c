@@ -93,6 +93,8 @@ static pc_dispatch_result_t build_command_failure_with_index(
         !cJSON_AddStringToObject(body, "status", "failed") ||
         !cJSON_AddStringToObject(body, "errorCode", error_code) ||
         (algorithm_index && !cJSON_AddNumberToObject(body, "algorithmIndex", *algorithm_index)) ||
+        ((request->command_id == PC_COMMAND_SLT_START || request->command_id == PC_COMMAND_SLT_RESULT) &&
+         !cJSON_AddNullToObject(body, "algorithmIndex")) ||
         !cJSON_PrintPreallocated(body, json, sizeof(json), 0)) {
         cJSON_Delete(body);
         return PC_DISPATCH_ERROR;
@@ -324,6 +326,50 @@ static pc_dispatch_result_t handle_start_test(
     }
     return build_command_failure_with_index(request, mcu_tx_sequence,
                                             error_code, valid_index, response);
+}
+
+/* 整轮命令只在完整校验之后提交业务，避免半张失败清单部分改变灯态。 */
+static pc_dispatch_result_t handle_round_begin(const pc_protocol_frame_t *request,
+    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
+{
+    if (root->child != NULL)
+        return build_command_failure(request, sequence, "invalidArgument", response);
+    return pc_test_round_begin(sequence, response);
+}
+
+static pc_dispatch_result_t handle_round_end(const pc_protocol_frame_t *request,
+    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
+{
+    uint32_t failed_mask;
+    if (pc_round_end_parse(root, RESULT_LED_TARGET_COUNT, &failed_mask) != PC_TEST_JSON_OK)
+        return build_command_failure(request, sequence, "invalidArgument", response);
+    return pc_test_round_end(failed_mask, sequence, response);
+}
+
+static pc_dispatch_result_t handle_slt_start(const pc_protocol_frame_t *request,
+    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
+{
+    pc_test_start_view_t start;
+    if (pc_slt_start_parse(root, &start) != PC_TEST_JSON_OK)
+        return build_command_failure(request, sequence, "invalidArgument", response);
+    return pc_test_slt_start(&start, sequence, response);
+}
+
+static pc_dispatch_result_t handle_slt_result(const pc_protocol_frame_t *request,
+    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
+{
+    pc_slt_result_view_t result;
+    if (pc_slt_result_parse(root, &result) != PC_TEST_JSON_OK)
+        return build_command_failure(request, sequence, "invalidArgument", response);
+    return pc_test_slt_result(&result, sequence, response);
+}
+
+/* PARA没有业务合同，不把预留命令转发成FUNC，更不伪造测量结论。 */
+static pc_dispatch_result_t handle_reserved(const pc_protocol_frame_t *request,
+    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
+{
+    (void)root;
+    return build_command_failure(request, sequence, "notSupported", response);
 }
 
 /*
@@ -726,102 +772,6 @@ static pc_dispatch_result_t handle_query_power_monitor(
     return result;
 }
 
-static const named_value_t s_led_target_values[] = {
-    {"lpddr0", RESULT_LED_LPDDR0},
-    {"lpddr1", RESULT_LED_LPDDR1},
-    {"emcp",   RESULT_LED_EMCP},
-};
-
-static const named_value_t s_led_state_values[] = {
-    {"off",        RESULT_LED_OFF},
-    {"pass",       RESULT_LED_PASS},
-    {"fail",       RESULT_LED_FAIL},
-    {"testNormal", RESULT_LED_TEST_NORMAL},
-    {"testHot",    RESULT_LED_TEST_HOT},
-};
-
-static const char *const s_led_state_names[] = {
-    [RESULT_LED_OFF]         = "off",
-    [RESULT_LED_PASS]        = "pass",
-    [RESULT_LED_FAIL]        = "fail",
-    [RESULT_LED_TEST_NORMAL] = "testNormal",
-    [RESULT_LED_TEST_HOT]    = "testHot",
-};
-
-_Static_assert(sizeof(s_led_state_names) / sizeof(s_led_state_names[0]) ==
-               RESULT_LED_TEST_HOT + 1U,
-               "PC LED state table must cover result_led states");
-
-/* 设置业务对象，不在线协议暴露物理颜色、GPIO或LED编号。 */
-static pc_dispatch_result_t handle_set_result_indicator(
-    const pc_protocol_frame_t *request,
-    uint32_t mcu_tx_sequence,
-    const cJSON *root,
-    pc_dispatch_response_t *response)
-{
-    static const char *const fields[] = {"target", "state"};
-    uint8_t target;
-    uint8_t state;
-
-    if (!object_has_exact_fields(root, fields,
-                                 sizeof(fields) / sizeof(fields[0])) ||
-        !read_named_value(root, "target", s_led_target_values,
-                          sizeof(s_led_target_values) /
-                          sizeof(s_led_target_values[0]), &target) ||
-        !read_named_value(root, "state", s_led_state_values,
-                          sizeof(s_led_state_values) /
-                          sizeof(s_led_state_values[0]), &state)) {
-        return build_command_failure(request, mcu_tx_sequence,
-                                     "invalidArgument", response);
-    }
-
-    if (result_led_set((result_led_target_t)target,
-                       (result_led_state_t)state) != HAL_OK) {
-        return build_command_failure(request, mcu_tx_sequence,
-                                     "executionFailed", response);
-    }
-    return build_command_success(request, mcu_tx_sequence, response);
-}
-
-static pc_dispatch_result_t handle_query_indicator_status(
-    const pc_protocol_frame_t *request,
-    uint32_t mcu_tx_sequence,
-    const cJSON *root,
-    pc_dispatch_response_t *response)
-{
-    result_led_state_t states[RESULT_LED_TARGET_COUNT];
-    cJSON *body = NULL;
-    char json[128] = {0};
-    pc_dispatch_result_t result;
-
-    if (root->child != NULL) {
-        return build_command_failure(request, mcu_tx_sequence,
-                                     "invalidArgument", response);
-    }
-    if (result_led_get_all(states) != HAL_OK) {
-        return build_command_failure(request, mcu_tx_sequence,
-                                     "executionFailed", response);
-    }
-
-    body = cJSON_CreateObject();
-    if (!body ||
-        !cJSON_AddStringToObject(body, "lpddr0",
-                                 s_led_state_names[states[RESULT_LED_LPDDR0]]) ||
-        !cJSON_AddStringToObject(body, "lpddr1",
-                                 s_led_state_names[states[RESULT_LED_LPDDR1]]) ||
-        !cJSON_AddStringToObject(body, "emcp",
-                                 s_led_state_names[states[RESULT_LED_EMCP]]) ||
-        !cJSON_PrintPreallocated(body, json, sizeof(json), 0)) {
-        cJSON_Delete(body);
-        return PC_DISPATCH_ERROR;
-    }
-
-    result = build_response(PC_COMMAND_INDICATOR_STATUS_RESP, mcu_tx_sequence,
-                            (const uint8_t *)json,
-                            (uint32_t)strlen(json), response);
-    cJSON_Delete(body);
-    return result;
-}
 
 /*
  * PC命令表：新增命令时编写一个处理函数，并在此添加一项，CommandID不可重复。
@@ -835,21 +785,25 @@ static const pc_command_entry_t s_command_table[] = {
     {PC_COMMAND_COMMAND_RESP,      reject_response_command}, /* MCU -> PC，拒收。 */
     {PC_COMMAND_QUERY_TESTER_INFO, handle_query_tester_info}, /* PC -> MCU，读取FRU。 */
     {PC_COMMAND_TESTER_INFO_RESP,  reject_response_command}, /* MCU -> PC，拒收。 */
-    {PC_COMMAND_START_TEST,        handle_start_test},        /* 完整校验，未接RK则拒绝执行。 */
+    {PC_COMMAND_START_TEST,        handle_start_test},        /* 轮内FUNC，最终上报0105。 */
+    {PC_COMMAND_TEST_RESULT_REPORT, reject_response_command}, /* MCU→PC，拒收。 */
+    {PC_COMMAND_ROUND_BEGIN,       handle_round_begin},       /* 建立当前连接的整轮。 */
+    {PC_COMMAND_ROUND_END,         handle_round_end},         /* 汇总灯、废弃未交付结果。 */
+    {PC_COMMAND_PARA_START,        handle_reserved},          /* 仅保留，不执行IDD。 */
+    {PC_COMMAND_PARA_RESULT,       reject_response_command},  /* MCU→PC，拒收。 */
+    {PC_COMMAND_SLT_START,         handle_slt_start},         /* 电源/Boot准备，不等待RK。 */
+    {PC_COMMAND_SLT_RESULT,        handle_slt_result},        /* PC报告SLT实际结束。 */
     {PC_COMMAND_POWER_ON,          handle_power_on},          /* 非阻塞上电请求。 */
-    {PC_COMMAND_POWER_OFF,         handle_power_off},         /* 等待RK安全关机。 */
+    {PC_COMMAND_POWER_OFF,         handle_power_off},         /* 直接关电，仍须通过在途互斥。 */
     {PC_COMMAND_QUERY_POWER_STATUS, handle_query_power_status}, /* PC -> MCU，只读。 */
     {PC_COMMAND_POWER_STATUS_RESP, reject_response_command},  /* MCU -> PC，拒收。 */
-    {PC_COMMAND_RESET_RK,          handle_reset_rk},          /* 等待安全关机闭环。 */
+    {PC_COMMAND_RESET_RK,          handle_reset_rk},          /* 冷重启并等待普通心跳。 */
     {PC_COMMAND_SET_BOOT_MODE,     handle_set_boot_mode},     /* OFF状态写Boot DAC。 */
     {PC_COMMAND_QUERY_BOOT_MODE,   handle_query_boot_mode},   /* 查询已配置模式。 */
     {PC_COMMAND_BOOT_MODE_RESP,    reject_response_command},  /* MCU -> PC，拒收。 */
     {PC_COMMAND_SET_DDR_CONFIG, handle_set_ddr_config},       /* 选择类型/三轨拉偏。 */
     {PC_COMMAND_QUERY_POWER_MONITOR, handle_query_power_monitor}, /* 读取缓存快照。 */
     {PC_COMMAND_POWER_MONITOR_RESP, reject_response_command}, /* MCU -> PC，拒收。 */
-    {PC_COMMAND_SET_RESULT_INDICATOR, handle_set_result_indicator}, /* 设置结果灯。 */
-    {PC_COMMAND_QUERY_INDICATOR_STATUS, handle_query_indicator_status}, /* 查询结果灯。 */
-    {PC_COMMAND_INDICATOR_STATUS_RESP, reject_response_command}, /* MCU -> PC，拒收。 */
     {PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, pc_ota_handle},            /* PC -> MCU，固件升级动作表。 */
     {PC_COMMAND_FIRMWARE_UPGRADE_RESP, reject_response_command},     /* MCU -> PC，拒收。 */
     {PC_COMMAND_FIRMWARE_UPGRADE_COMPLETE, reject_response_command}, /* MCU -> PC，拒收。 */

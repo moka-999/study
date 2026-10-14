@@ -12,6 +12,24 @@ static pc_power_rk_adapter_t s_rk;
 static pc_power_diagnostic_t s_diag;
 static pc_power_target_t s_target, s_ready_target;
 static uint8_t s_configured, s_ready_valid;
+static pc_power_action_t s_ready_action; /* 成功配置的用途，SLT完成不等价于FUNC就绪。 */
+
+static int prepares_test(pc_power_action_t action)
+{
+    return action == PC_POWER_PREPARE_TEST || action == PC_POWER_PREPARE_SLT;
+}
+
+static int needs_rk_ready(void)
+{
+    return s_diag.action == PC_POWER_RESTART || s_diag.action == PC_POWER_PREPARE_TEST;
+}
+
+static void remember_target(void)
+{
+    s_ready_target = s_target;
+    s_ready_action = s_diag.action;
+    s_ready_valid = 1U;
+}
 
 static int valid_mv(ddr_memory_type_t type, const uint16_t mv[DDR_RAIL_COUNT])
 {
@@ -103,8 +121,8 @@ static int arm_rk(void)
 const char *pc_power_service_start(pc_power_action_t action,
                                   const pc_power_target_t *target, uint8_t reboot)
 {
-    if ((unsigned)action > PC_POWER_PREPARE_TEST || reboot > 1U ||
-        ((action == PC_POWER_PREPARE_TEST) != (target != NULL))) return "invalidArgument";
+    if ((unsigned)action > PC_POWER_PREPARE_SLT || reboot > 1U ||
+        (prepares_test(action) != (target != NULL))) return "invalidArgument";
     if (pc_power_service_busy()) return "busy";
     if (!s_configured) return "notConfigured";
     pwr_ctrl_state_t state = pwr_ctrl_get_state();
@@ -125,6 +143,7 @@ const char *pc_power_service_start(pc_power_action_t action,
         if (!pwr_ctrl_is_configured()) return "notConfigured";
     }
     int reuse = target && !reboot && state == PWR_CTRL_STATE_ON && s_ready_valid &&
+                s_ready_action == action &&
                 same_target(target, &s_ready_target);
     if (!reuse && (action == PC_POWER_RESTART || action == PC_POWER_PREPARE_TEST) &&
         (!s_rk.begin || !s_rk.poll)) return "notReady";
@@ -166,7 +185,7 @@ static void off_hold(void)
 {
     if (pwr_ctrl_get_state() != PWR_CTRL_STATE_OFF) { complete("invalidState"); return; }
     if (!elapsed(s_config.off_hold_ms)) return;
-    if (s_diag.action == PC_POWER_PREPARE_TEST) {
+    if (prepares_test(s_diag.action)) {
         monitor_boot_result_t result = monitor_set_boot_mode(s_target.boot_mode);
         if (result != MONITOR_BOOT_OK) {
             complete(result == MONITOR_BOOT_ERR_BUSY ? "busy" : "executionFailed");
@@ -180,7 +199,7 @@ static void boot_settle(void)
 {
     if (pwr_ctrl_get_state() != PWR_CTRL_STATE_OFF) { complete("invalidState"); return; }
     if (!elapsed(s_config.boot_settle_ms)) return;
-    if (s_diag.action != PC_POWER_ON && !arm_rk()) {
+    if (needs_rk_ready() && !arm_rk()) {
         complete("notReady"); return;
     }
     const char *error = power_error(monitor_request_training_power_on(
@@ -194,8 +213,11 @@ static void wait_on(void)
     pwr_ctrl_state_t state = pwr_ctrl_get_state();
     if (state == PWR_CTRL_STATE_FAULT) complete("executionFailed");
     else if (state == PWR_CTRL_STATE_ON) {
-        if (s_diag.action == PC_POWER_ON) complete(NULL);
-        else enter(PC_POWER_WAIT_RK_READY);
+        if (needs_rk_ready()) enter(PC_POWER_WAIT_RK_READY);
+        else {
+            if (s_diag.action == PC_POWER_PREPARE_SLT) remember_target();
+            complete(NULL);
+        }
     } else if (state == PWR_CTRL_STATE_OFF) complete("powerOff");
     else if (elapsed(s_config.transition_timeout_ms)) complete("timeout");
 }
@@ -207,8 +229,7 @@ static void wait_ready(void)
     int result = s_rk.poll(s_diag.rk_token);
     if (result == 1) {
         if (s_diag.action == PC_POWER_PREPARE_TEST) {
-            s_ready_target = s_target;
-            s_ready_valid = 1U;
+            remember_target();
         }
         complete(NULL);
     } else if (result < 0) complete("notReady");

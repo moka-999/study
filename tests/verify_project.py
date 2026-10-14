@@ -438,15 +438,19 @@ def main() -> int:
                 "PC_COMMAND_SET_BOOT_MODE       0x0506U",
                 "PC_COMMAND_QUERY_BOOT_MODE     0x0507U",
                 "PC_COMMAND_BOOT_MODE_RESP      0x0508U",
-                "PC_COMMAND_SET_RESULT_INDICATOR    0x0701U",
-                "PC_COMMAND_QUERY_INDICATOR_STATUS  0x0702U",
-                "PC_COMMAND_INDICATOR_STATUS_RESP   0x0703U")) and
+                "PC_COMMAND_ROUND_BEGIN",
+                "PC_COMMAND_ROUND_END",
+                "PC_COMMAND_SLT_START", "PC_COMMAND_SLT_RESULT")) and
             all(handler in pc_dispatch for handler in (
                 "handle_set_ddr_config", "handle_query_power_monitor",
                 "handle_power_on", "handle_power_off", "handle_reset_rk",
                 "handle_set_boot_mode", "handle_query_boot_mode",
-                "handle_set_result_indicator", "handle_query_indicator_status")),
+                "handle_round_begin", "handle_round_end", "handle_slt_start", "handle_slt_result")),
             "PC DDR配置、采样查询或结果灯业务未完整接入命令表")
+    require(not re.search(r"0x070[123]U", pc_command) and
+            "handle_set_result_indicator" not in pc_dispatch and
+            "handle_query_indicator_status" not in pc_dispatch,
+            "070x旧结果灯命令必须从固件删除")
     require("fru_info_load" in pc_info and "fru_info_load_legacy_v1" in pc_info and
             "board_mac_address()" in pc_info and "pc_tester_info_load" in pc_dispatch and
             "firmware_version_current(" not in pc_dispatch,

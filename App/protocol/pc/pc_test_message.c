@@ -133,8 +133,9 @@ pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type
     return PC_TEST_JSON_OK;
 }
 
-pc_test_json_result_t pc_test_start_parse(const cJSON *root,
-                                          pc_test_start_view_t *view)
+/* 两类开始请求共用电压/Boot规则；仅SLT允许null index且禁止外部已启动模式。 */
+static pc_test_json_result_t parse_start(const cJSON *root,
+                                        pc_test_start_view_t *view, int slt)
 {
     static const char *const fields[] = {
         "algorithmType", "algorithmName", "algorithmIndex", "power", "reboot", "bootMode",
@@ -146,6 +147,7 @@ pc_test_json_result_t pc_test_start_parse(const cJSON *root,
         return PC_TEST_JSON_ERROR_ARGUMENT;
     }
     const cJSON *timeout = cJSON_GetObjectItemCaseSensitive(root, "timeoutMs");
+    if (slt && timeout) return PC_TEST_JSON_ERROR_FIELDS;
     const size_t field_count = sizeof(fields) / sizeof(fields[0]) - (timeout ? 0U : 1U);
     if (!has_exact_fields(root, fields, field_count))
         return PC_TEST_JSON_ERROR_FIELDS;
@@ -156,7 +158,11 @@ pc_test_json_result_t pc_test_start_parse(const cJSON *root,
         return PC_TEST_JSON_ERROR_FIELD_TYPE;
     }
 
-    pc_test_json_result_t result = pc_test_start_read_index(root, &candidate.algorithm_index);
+    pc_test_json_result_t result = PC_TEST_JSON_OK;
+    if (slt) {
+        if (!cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(root, "algorithmIndex")))
+            return PC_TEST_JSON_ERROR_FIELD_TYPE;
+    } else result = pc_test_start_read_index(root, &candidate.algorithm_index);
     if (result != PC_TEST_JSON_OK) return result;
     if (timeout) {
         result = read_required_u32(root, "timeoutMs", &candidate.timeout_ms);
@@ -172,10 +178,13 @@ pc_test_json_result_t pc_test_start_parse(const cJSON *root,
     candidate.algorithm_type = read_name(root, "algorithmType", algorithm_types,
                                          sizeof(algorithm_types) / sizeof(algorithm_types[0]));
     if (!candidate.algorithm_type) return PC_TEST_JSON_ERROR_FIELDS;
+    if (slt && (strcmp(candidate.algorithm_type, "slt") != 0 ||
+                strcmp(candidate.algorithm_name, "memtest86") != 0))
+        return PC_TEST_JSON_ERROR_FIELDS;
     candidate.reboot = cJSON_IsTrue(reboot) ? 1U : 0U;
     if (cJSON_IsNull(power) || cJSON_IsNull(boot)) {
         /* null明确表示不接管电源/启动介质，不能与单独调压或重启请求混用。 */
-        if (!cJSON_IsNull(power) || !cJSON_IsNull(boot) || candidate.reboot)
+        if (slt || !cJSON_IsNull(power) || !cJSON_IsNull(boot) || candidate.reboot)
             return PC_TEST_JSON_ERROR_FIELDS;
         candidate.external_ready = 1U;
         *view = candidate;
@@ -187,6 +196,82 @@ pc_test_json_result_t pc_test_start_parse(const cJSON *root,
     result = pc_power_parse(power, &candidate.memory_type, candidate.power_steps, candidate.target_mv);
     if (result != PC_TEST_JSON_OK) return result;
     *view = candidate;
+    return PC_TEST_JSON_OK;
+}
+
+pc_test_json_result_t pc_test_start_parse(const cJSON *root, pc_test_start_view_t *view)
+{
+    return parse_start(root, view, 0);
+}
+
+pc_test_json_result_t pc_slt_start_parse(const cJSON *root, pc_test_start_view_t *view)
+{
+    return parse_start(root, view, 1);
+}
+
+pc_test_json_result_t pc_round_end_parse(const cJSON *root, uint8_t mirror_count,
+                                         uint32_t *failed_mask)
+{
+    static const char *const fields[] = {"errorchip"};
+    static const char *const chip_fields[] = {"physicalAddr", "mirrorIndex"};
+    if (!failed_mask || mirror_count == 0U || mirror_count > 32U)
+        return PC_TEST_JSON_ERROR_ARGUMENT;
+    if (!has_exact_fields(root, fields, 1U)) return PC_TEST_JSON_ERROR_FIELDS;
+    const cJSON *chips = cJSON_GetObjectItemCaseSensitive(root, "errorchip");
+    if (!cJSON_IsArray(chips)) return PC_TEST_JSON_ERROR_FIELD_TYPE;
+    uint32_t mask = 0U;
+    const cJSON *chip;
+    cJSON_ArrayForEach(chip, chips) {
+        uint32_t mirror;
+        if (!has_exact_fields(chip, chip_fields, 2U) ||
+            read_required_u32(chip, "mirrorIndex", &mirror) != PC_TEST_JSON_OK ||
+            mirror >= mirror_count ||
+            !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(chip, "physicalAddr")))
+            return PC_TEST_JSON_ERROR_FIELDS;
+        mask |= UINT32_C(1) << mirror;
+    }
+    *failed_mask = mask;
+    return PC_TEST_JSON_OK;
+}
+
+pc_test_json_result_t pc_slt_result_parse(const cJSON *root, pc_slt_result_view_t *view)
+{
+    static const char *const fields[] = {"siteId", "algorithmType", "algorithmName",
+        "algorithmIndex", "testTimeMs", "testResults", "measurementData"};
+    static const char *const chip_fields[] = {"mirrorIndex", "testStatus", "resultDesc", "physicalAddr"};
+    if (!view) return PC_TEST_JSON_ERROR_ARGUMENT;
+    if (!has_exact_fields(root, fields, sizeof(fields) / sizeof(fields[0])))
+        return PC_TEST_JSON_ERROR_FIELDS;
+    const cJSON *site = cJSON_GetObjectItemCaseSensitive(root, "siteId");
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "algorithmName");
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "algorithmType");
+    const cJSON *time = cJSON_GetObjectItemCaseSensitive(root, "testTimeMs");
+    const cJSON *chips = cJSON_GetObjectItemCaseSensitive(root, "testResults");
+    if (!cJSON_IsString(site) || !cJSON_IsString(name) || !cJSON_IsString(type) ||
+        strcmp(type->valuestring, "slt") != 0 ||
+        !cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(root, "algorithmIndex")) ||
+        !cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(root, "measurementData")) ||
+        !cJSON_IsArray(chips) || cJSON_GetArraySize(chips) != PC_FUNCTIONAL_DIE_COUNT)
+        return PC_TEST_JSON_ERROR_FIELDS;
+    if (!cJSON_IsNull(time) && (!cJSON_IsNumber(time) || !isfinite(time->valuedouble) ||
+        time->valuedouble < 0.0 || time->valuedouble >= 18446744073709551616.0 ||
+        floor(time->valuedouble) != time->valuedouble))
+        return PC_TEST_JSON_ERROR_INTEGER_RANGE;
+    uint32_t seen = 0U;
+    const cJSON *chip;
+    cJSON_ArrayForEach(chip, chips) {
+        uint32_t mirror, status;
+        const cJSON *physical = cJSON_GetObjectItemCaseSensitive(chip, "physicalAddr");
+        if (!has_exact_fields(chip, chip_fields, 4U) ||
+            read_required_u32(chip, "mirrorIndex", &mirror) != PC_TEST_JSON_OK ||
+            mirror >= PC_FUNCTIONAL_DIE_COUNT || (seen & (1U << mirror)) ||
+            read_required_u32(chip, "testStatus", &status) != PC_TEST_JSON_OK || status > 1U ||
+            !cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(chip, "resultDesc")) ||
+            !cJSON_IsString(physical) || physical->valuestring[0] != '\0')
+            return PC_TEST_JSON_ERROR_FIELDS;
+        seen |= 1U << mirror;
+    }
+    *view = (pc_slt_result_view_t){site->valuestring, name->valuestring};
     return PC_TEST_JSON_OK;
 }
 

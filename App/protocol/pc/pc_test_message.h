@@ -45,7 +45,7 @@ int pc_boot_mode_parse(const char *name, boot_mode_t *mode);
 /* MCU准备上报给PC的一条芯片测试结果；本结构不拥有字符串，组包时复制。 */
 typedef struct {
     const char *site_id;       /* 辅助函数接受空串；业务有效性尚待冻结。 */
-    uint32_t mirror_index;     /* DDR标志：0为第一颗、1为第二颗；RK原值不作偏移。 */
+    uint32_t mirror_index;     /* 镜像索引；当前每镜像一颗DDR，RK原值不作偏移。 */
     int32_t test_status;       /* PC测试结论：0=FAIL、1=PASS；不能直接填RK的FAIL位。 */
     const char *result_desc;   /* 结果描述，UTF-8字符串；NULL或空串均上报""。 */
 } pc_chip_test_result_t;
@@ -87,6 +87,32 @@ pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type
  */
 pc_test_json_result_t pc_test_start_parse(const cJSON *root,
                                           pc_test_start_view_t *view);
+
+/** 010A专用解析：严格匹配slt/memtest86，index为null，power/bootMode非null。
+ * 复用三轨字符串mV、Boot与reboot校验；不接受timeoutMs，不检查RK软件状态。
+ * view仍借用root，algorithm_index置0但不得在线上回填0（SLT必须回null）。
+ */
+pc_test_json_result_t pc_slt_start_parse(const cJSON *root, pc_test_start_view_t *view);
+
+/** 完整校验0107的errorchip数组后返回镜像失败位图；失败保持*failed_mask不变。
+ * mirror_count由当前板级灯映射提供，范围1..32；physicalAddr须为字符串。
+ * 同一镜像可列多颗芯片，重复项幂等；空数组输出0，未知镜像整包拒绝。
+ * 不另建链表/复制芯片清单，遍历上限由4096字节完整PDU限制。
+ */
+pc_test_json_result_t pc_round_end_parse(const cJSON *root, uint8_t mirror_count,
+                                         uint32_t *failed_mask);
+
+/* 010B只借用身份字段；结论由PC提供，不转发给RK或再次上传0105。 */
+typedef struct {
+    const char *site_id;
+    const char *algorithm_name;
+} pc_slt_result_view_t;
+
+/** 校验010B完整结构：slt、null index、两个0/1镜像结果、null保留字段。
+ * 返回OK后才可按site/name和活动SLT归属匹配；失败不修改view或任何业务状态。
+ * 耗时仅验证非负整数/null，不存储或经double重新转发PC给出的耗时。
+ */
+pc_test_json_result_t pc_slt_result_parse(const cJSON *root, pc_slt_result_view_t *view);
 
 /**
  * @brief 创建算法结果JSON对象，并复制各字符串到对象树。

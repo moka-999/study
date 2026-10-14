@@ -138,6 +138,26 @@ HAL_StatusTypeDef result_led_get_all(
     return HAL_OK;
 }
 
+HAL_StatusTypeDef result_led_set_all(const result_led_state_t states[RESULT_LED_TARGET_COUNT])
+{
+    if (s_board_map == NULL || states == NULL) return HAL_ERROR;
+    for (uint32_t i = 0U; i < RESULT_LED_TARGET_COUNT; ++i)
+        if ((uint32_t)states[i] > RESULT_LED_TEST_HOT) return HAL_ERROR;
+    taskENTER_CRITICAL();
+    uint8_t start_blink = 0U;
+    for (uint32_t i = 0U; i < RESULT_LED_TARGET_COUNT; ++i) {
+        if (s_states[i] != states[i] && result_led_is_blinking(states[i])) start_blink = 1U;
+        s_states[i] = states[i];
+    }
+    if (start_blink) {
+        s_blink_on = 1U;
+        s_last_blink_ms = HAL_GetTick();
+    }
+    result_led_apply_all();
+    taskEXIT_CRITICAL();
+    return HAL_OK;
+}
+
 void result_led_process(uint32_t now_ms)
 {
     uint32_t elapsed;
