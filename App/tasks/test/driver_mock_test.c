@@ -362,13 +362,13 @@ static void test_tps62868(void)
 static void test_mcp4725(void)
 {
     static const uint8_t expected[BOOT_MODE_COUNT][2] = {
-        {0x00U, 0x00U}, /* USB/Maskrom: 0mV, code=0 */
-        {0x01U, 0x74U}, /* SD:          300mV, code=372 */
-        {0x02U, 0xE9U}, /* eMMC:        600mV, code=745 */
-        {0x04U, 0x5DU}, /* FSPI M0:     900mV, code=1117 */
-        {0x05U, 0xD1U}, /* FSPI M1:    1200mV, code=1489 */
-        {0x07U, 0x45U}, /* FSPI M2:    1500mV, code=1861 */
-        {0x08U, 0xBAU}, /* eMMC-SD:    1800mV, code=2234 */
+        {0x00U, 0x00U}, /* USB/Maskrom：0mV，DAC码0。 */
+        {0x01U, 0x74U}, /* SD：300mV，DAC码372。 */
+        {0x02U, 0xE9U}, /* eMMC：600mV，DAC码745。 */
+        {0x04U, 0x5DU}, /* FSPI M0：900mV，DAC码1117。 */
+        {0x05U, 0xD1U}, /* FSPI M1：1200mV，DAC码1489。 */
+        {0x07U, 0x46U}, /* FSPI M2：1500mV，1500×4096/3300四舍五入为1862。 */
+        {0x08U, 0xBAU}, /* eMMC-SD：1800mV，DAC码2234。 */
     };
     mock_i2c_t mock;
     uint16_t code = 0U;

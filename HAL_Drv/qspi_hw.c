@@ -10,7 +10,7 @@
  *   控: 单线 (JEDEC ID, SR, Write Enable 等控制命令)
  *
  * 时钟: QSPI_CLK = D1HCLK / (Prescaler+1)
- * 实际 CLK = 240MHz / 4 ≈ 60MHz
+ * 当前V2: 200MHz / (4+1) = 40MHz，不超过13h单线读的50MHz上限。
  * ===================================================================
  */
 #include "quadspi.h"
@@ -287,7 +287,7 @@ int qspi_write_page(uint32_t addr, const uint8_t *data, uint16_t len)
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * 读取数据 — Quad I/O Fast Read (1-4-4)
+ * 读取数据 — 非对齐前缀用13h单线读，其余用Quad I/O Fast Read (1-4-4)
  * 指令=1线(IO0), 地址=4线, Mode=4线, Dummy=4, 数据=4线
  *
  * 时序 (0xEB):
@@ -310,9 +310,25 @@ int qspi_read_data(uint32_t addr, uint8_t *buf, uint32_t len)
         (status & W25Q_SR2_SUS) != 0U) return IF_ERR;
     QSPI_CommandTypeDef c = {0};
     c.InstructionMode   = QSPI_INSTRUCTION_1_LINE;   /* 0xEB 指令只在 IO0 上发! */
+    c.AddressSize       = QSPI_ADDRESS_32_BITS;
+    /* FV/JV手册要求Quad读起始地址按4字节对齐；先精确读完最多3字节前缀。 */
+    if ((addr & 3U) != 0U) {
+        uint32_t prefix = 4U - (addr & 3U);
+        if (prefix > len) prefix = len;
+        c.Instruction = W25Q_CMD_READ_DATA_4B;
+        c.AddressMode = QSPI_ADDRESS_1_LINE;
+        c.Address = addr;
+        c.DataMode = QSPI_DATA_1_LINE;
+        c.NbData = prefix;
+        if (HAL_QSPI_Command(&hqspi, &c, QSPI_TO) != HAL_OK ||
+            HAL_QSPI_Receive(&hqspi, buf, QSPI_TO) != HAL_OK) return IF_ERR;
+        addr += prefix;
+        buf += prefix;
+        len -= prefix;
+        if (len == 0U) return IF_OK;
+    }
     c.Instruction       = W25Q_CMD_QUAD_READ;        /* 0xEB */
     c.AddressMode       = QSPI_ADDRESS_4_LINES;
-    c.AddressSize       = QSPI_ADDRESS_32_BITS;
     c.Address           = addr;
     c.AlternateByteMode = QSPI_ALTERNATE_BYTES_4_LINES;
     c.AlternateBytesSize = QSPI_ALTERNATE_BYTES_8_BITS;

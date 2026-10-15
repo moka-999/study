@@ -20,6 +20,9 @@ static jmp_buf task_exit;
 static unsigned task_iterations, delay_calls, health_calls, rx_calls, rx_batch_calls;
 static unsigned resume_power_after;
 static int rx_mode;
+/* 仅用于把CRC正确但TLV非法的完整线帧注入真实RK任务循环。 */
+static uint8_t rx_wire[32];
+static unsigned rx_wire_length;
 static void message(const char *text)
 {
     register uint32_t r0 __asm__("r0") = 4U;
@@ -64,6 +67,11 @@ int uart_poll_rx(int id, uint8_t *buffer, uint16_t length)
     /* 配额失效时立即失败，不让真实无限任务卡死整个QEMU回归。 */
     CHECK(++rx_batch_calls <= 8U);
     if (rx_mode == 2) return UART_RX_GAP;
+    if (rx_mode == 3) {
+        CHECK(rx_wire_length <= length);
+        memcpy(buffer, rx_wire, rx_wire_length);
+        return (int)rx_wire_length;
+    }
     memset(buffer, 0, length);
     return length;
 }
@@ -553,6 +561,7 @@ static void test_transaction(void)
 static void reset_task_test(void)
 {
     memset(&s_pending, 0, sizeof(s_pending));
+    s_rx_diagnostics = (rk_rx_diagnostics_t){0};
     requests.count = responses.count = 0U;
     tick = sent = tx_attempts = 0U;
     tx_failure = 0;
@@ -560,6 +569,87 @@ static void reset_task_test(void)
     task_iterations = delay_calls = health_calls = rx_calls = rx_batch_calls = 0U;
     resume_power_after = 0U;
     rx_mode = 0;
+    rx_wire_length = 0U;
+}
+
+/* 拒绝记录只增加可观测性；合法帧、窗口及最终结果交付必须维持原合同。 */
+static void test_rx_diagnostics(void)
+{
+    reset_task_test();
+    rk_rx_diagnostics_t diag;
+    CHECK(rk_link_get_rx_diagnostics(NULL) == -1);
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.rejected_total == 0U);
+    CHECK(diag.last_reason == RK_RX_REJECT_NONE);
+    tlv_frame_t frame;
+    frame_init(&frame); frame.sequence = UINT64_MAX;
+    accept_frame(NULL); accept_frame(&frame);
+    CHECK(tlv_pack(&frame, TLV_TYPE_HEARTBEAT, NULL, 0U) == 0);
+    accept_frame(&frame);
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.rejected_total == 0U);
+
+    frame = task_result_frame(42U, 17U, 0U);
+    accept_frame(&frame);
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.rejected_total == 1U);
+    CHECK(diag.last_reason == RK_RX_REJECT_NO_PENDING && !diag.waiting);
+    CHECK(diag.frame_valid && diag.received_sequence == 42U && diag.tlv_count == 3U);
+    CHECK(diag.command_sequence == 0U && diag.last_tx_sequence == 0U && diag.expected_command == 0U);
+
+    rk_request_t request = {17U, 730U, 0U};
+    CHECK(rk_link_request(&request) == 0); process_request();
+    uint64_t sequence = s_pending.sequence;
+    rk_pending_t pending = s_pending;
+    frame_init(&frame); frame.sequence = sequence - 1U;
+    accept_frame(&frame); /* 有在途时，窗口外普通心跳同样不算业务拒绝。 */
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.rejected_total == 1U);
+
+    tick = 123U;
+    frame = task_result_frame(sequence - 1U, 17U, 0U);
+    accept_frame(&frame);
+    frame.sequence = sequence + 1U;
+    accept_frame(&frame);
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.rejected_total == 3U);
+    CHECK(diag.counts[RK_RX_REJECT_SEQUENCE] == 2U && diag.last_reason == RK_RX_REJECT_SEQUENCE);
+    CHECK(diag.last_tick == 123U && diag.received_sequence == sequence + 1U);
+    CHECK(diag.waiting && diag.command_sequence == sequence && diag.last_tx_sequence == sequence);
+    CHECK(diag.expected_command == 17U && diag.received_command == 0U);
+    CHECK(memcmp(&s_pending, &pending, sizeof(pending)) == 0);
+
+    frame = task_result_frame(sequence, 18U, 0U); accept_frame(&frame);
+    frame = progress_frame(sequence, 18U, 50U); accept_frame(&frame);
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.rejected_total == 5U);
+    CHECK(diag.counts[RK_RX_REJECT_ALGORITHM] == 2U && diag.received_command == 18U);
+    CHECK(diag.last_reason == RK_RX_REJECT_ALGORITHM && !s_pending.progress_valid);
+
+    frame = scalar_frame(sequence, TLV_TYPE_PROGRESS, 50U); accept_frame(&frame);
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.last_reason == RK_RX_REJECT_PROGRESS);
+    CHECK(diag.counts[RK_RX_REJECT_PROGRESS] == 1U && diag.tlv_count == 1U);
+    frame = task_result_frame(sequence, 17U, 0U); --frame.count; accept_frame(&frame);
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.last_reason == RK_RX_REJECT_RESULT);
+    CHECK(diag.counts[RK_RX_REJECT_RESULT] == 1U && diag.rejected_total == 7U);
+    CHECK(memcmp(&s_pending, &pending, sizeof(pending)) == 0);
+
+    /* 合法进度与最终包不抹掉最近一次拒绝，也不能因诊断改成重复交付。 */
+    frame = progress_frame(sequence, 17U, 50U); accept_frame(&frame);
+    CHECK(s_pending.progress_valid && s_pending.progress_percent == 50U);
+    frame = task_result_frame(sequence, 17U, 0U); accept_frame(&frame); process_request();
+    rk_response_t response;
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.rejected_total == 7U);
+    CHECK(diag.last_reason == RK_RX_REJECT_RESULT);
+    accept_frame(&frame); process_request();
+    CHECK(rk_link_receive(&response) == 0);
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.rejected_total == 8U);
+    CHECK(diag.last_reason == RK_RX_REJECT_NO_PENDING && diag.counts[RK_RX_REJECT_NO_PENDING] == 2U);
+
+    /* 仅测试桩预置饱和边界，生产接口不提供清零或改写能力。 */
+    CHECK(rk_link_request(&request) == 0); process_request();
+    s_rx_diagnostics.rejected_total = UINT32_MAX;
+    s_rx_diagnostics.counts[RK_RX_REJECT_SEQUENCE] = UINT32_MAX;
+    frame = task_result_frame(s_pending.sequence - 1U, 17U, 0U); accept_frame(&frame);
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.rejected_total == UINT32_MAX);
+    CHECK(diag.counts[RK_RX_REJECT_SEQUENCE] == UINT32_MAX && diag.last_reason == RK_RX_REJECT_SEQUENCE);
+    CHECK(diag.counts[RK_RX_REJECT_NONE] == 0U && s_pending.waiting);
+    reset_task_test();
 }
 
 /* 进度必须匹配本次算法及Seq窗口，不改变最终结果缓存或测试生命周期。 */
@@ -990,6 +1080,25 @@ static void run_task_iterations(void)
     if (setjmp(task_exit) == 0) StartRkTask(NULL);
 }
 
+/* 真实任务处理CRC正确但进度越界的线帧：记录TLV拒绝，不虚构已解包的Seq。 */
+static void test_rx_tlv_diagnostics(void)
+{
+    reset_task_test();
+    memset(rx_wire, 0, sizeof(rx_wire));
+    rx_wire[13] = 0x30U; rx_wire[14] = 0x16U;
+    rx_wire[15] = 0U; rx_wire[16] = 1U; rx_wire[17] = 101U;
+    rx_wire_length = seal(rx_wire, 5U);
+    rx_mode = 3;
+    task_iterations = 1U;
+    run_task_iterations();
+    rk_rx_diagnostics_t diag;
+    CHECK(rk_link_get_rx_diagnostics(&diag) == 0 && diag.rejected_total == 8U);
+    CHECK(diag.counts[RK_RX_REJECT_TLV] == 8U && diag.last_reason == RK_RX_REJECT_TLV);
+    CHECK(!diag.frame_valid && !diag.waiting && diag.received_sequence == 0U && diag.tlv_count == 0U);
+    CHECK(!s_pending.waiting && responses.count == 0U);
+    reset_task_test();
+}
+
 static void test_task_fairness(void)
 {
     const unsigned interval = RK_HEARTBEAT_INTERVAL_MS;
@@ -1200,6 +1309,8 @@ static void test_dual_die_final_rules(void)
 
 void test_main(void)
 {
+    test_rx_diagnostics(); test_rx_tlv_diagnostics();
+    message("PASS: RK receive rejection diagnostics; matching rules unchanged\n");
     test_dual_die_final_golden(); test_dual_die_final_rules();
     message("PASS: dual-die 3/5/7-TLV final decoder\n");
     test_empty_heartbeat();

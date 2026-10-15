@@ -17,10 +17,16 @@ static int power_fixture, boot_failure;
 static pwr_ctrl_result_t power_failure;
 static unsigned power_on_calls, power_off_calls, boot_calls;
 static uint32_t boot_io_ms;
+/* 仅故障回归注入同步设置返回值，正式电源编排及配置复用判定仍执行实际C代码。 */
+static int config_result_override;
+static monitor_boot_result_t config_boot_result;
+static pwr_ctrl_result_t config_ddr_result;
+static unsigned config_set_calls;
 #if defined(B1_RK_UART)
 static idd_stats_t measured_stats;
 static monitor_snapshot_t measured_latest;
 static int measurement_start_error;
+static unsigned measurement_finish_calls;
 /* 只替代采样任务的端口，不替代统计算法；下面显式注入的测量值不是硬件实测。 */
 int monitor_idd_start(uint32_t duration, uint32_t minimum)
 {
@@ -28,7 +34,7 @@ int monitor_idd_start(uint32_t duration, uint32_t minimum)
     return idd_stats_begin(&measured_stats, mock_tick, duration, minimum);
 }
 void monitor_idd_cancel(void) { idd_stats_cancel(&measured_stats); }
-void monitor_idd_finish(void) { idd_stats_finish(&measured_stats); }
+void monitor_idd_finish(void) { ++measurement_finish_calls; idd_stats_finish(&measured_stats); }
 int monitor_idd_get(idd_stats_t *out)
 {
     if (!out) return 0;
@@ -158,6 +164,11 @@ pwr_ctrl_result_t monitor_request_power_off(uint32_t now)
 }
 monitor_boot_result_t monitor_set_boot_mode(boot_mode_t mode)
 {
+    if (config_result_override) {
+        CHECK(power_fixture && (unsigned)mode < BOOT_MODE_COUNT);
+        ++config_set_calls;
+        return config_boot_result;
+    }
     CHECK(power_fixture && mock_power_state == PWR_CTRL_STATE_OFF && (unsigned)mode < BOOT_MODE_COUNT);
     ++boot_calls;
     mock_tick += boot_io_ms;
@@ -166,11 +177,23 @@ monitor_boot_result_t monitor_set_boot_mode(boot_mode_t mode)
 monitor_boot_result_t monitor_get_boot_mode(boot_mode_t *mode, uint16_t *mv)
 { (void)mode; (void)mv; fail("FAIL Boot query\n"); }
 pwr_ctrl_result_t monitor_apply_ddr_config(ddr_memory_type_t type, const int16_t steps[3])
-{ (void)type; (void)steps; fail("FAIL DDR write\n"); }
+{
+    if (config_result_override) {
+        CHECK(power_fixture && (unsigned)type <= DDR_MEMORY_LPDDR4X && steps);
+        ++config_set_calls;
+        return config_ddr_result;
+    }
+    (void)type; (void)steps; fail("FAIL DDR write\n");
+}
 int monitor_get_latest(monitor_snapshot_t *out)
 {
 #if defined(B1_RK_UART)
     *out = measured_latest;
+    return 1;
+#elif defined(PC_POWER_SEQUENCE_TEST)
+    /* V2真实编排夹具只提供无有效样本快照，验证SLT忙时仍可查询，不访问器件。 */
+    CHECK(power_fixture && out);
+    memset(out, 0, sizeof(*out));
     return 1;
 #else
     (void)out; fail("FAIL monitor access\n");
@@ -341,6 +364,98 @@ static void result_is(uint64_t address, const char *expected_address, const char
 }
 static void *no_memory(size_t bytes) { (void)bytes; return NULL; }
 
+/* 逐次注入组包分配失败，覆盖根对象、颗粒明细和测量字段的每个分配点。 */
+static unsigned delivery_allocations, delivery_fail_at;
+#if defined(B1_RK_UART)
+static void b1_sample(uint8_t valid, int32_t mv, uint32_t ma);
+#endif
+static void *delivery_allocator(size_t bytes)
+{
+    unsigned position = delivery_allocations++;
+    return position == delivery_fail_at ? NULL : malloc(bytes);
+}
+
+static void delivery_retry_check(void)
+{
+    pc_dispatch_response_t response;
+    start_expect(START_JSON, NULL);
+#if defined(B1_RK_UART)
+    b1_sample(3U, 1800, 300U);
+#endif
+    inject_mask(RK_RESPONSE_COMPLETE, 3U, 0x1234U, 0xABCDU);
+    delivery_allocations = 0U;
+    delivery_fail_at = UINT32_MAX;
+    pc_json_configure_allocator(delivery_allocator, free);
+    CHECK(pc_dispatch_next_response(30U, &response) == PC_DISPATCH_RESPONSE_READY);
+    unsigned allocation_count = delivery_allocations;
+    pc_json_configure_allocator(NULL, NULL);
+    CHECK(allocation_count > 0U && !pc_test_service_busy());
+
+    for (unsigned failure = 0U; failure < allocation_count; ++failure) {
+        start_expect(START_JSON, NULL);
+#if defined(B1_RK_UART)
+        b1_sample(3U, 1800, 300U);
+        unsigned finishes = measurement_finish_calls;
+#endif
+        unsigned submitted = queue_calls;
+        inject_mask(RK_RESPONSE_COMPLETE, 3U, 0x1234U, 0xABCDU);
+        delivery_allocations = 0U;
+        delivery_fail_at = failure;
+        pc_json_configure_allocator(delivery_allocator, free);
+        CHECK(pc_dispatch_next_response(31U, &response) == 0);
+        CHECK(pc_test_service_busy() && !response_ready && queue_calls == submitted);
+        pc_json_configure_allocator(no_memory, free);
+        CHECK(pc_dispatch_next_response(32U, &response) == 0);
+        CHECK(pc_test_service_busy() && queue_calls == submitted);
+#if defined(B1_RK_UART)
+        CHECK(measurement_finish_calls == finishes + 1U);
+#endif
+        pc_json_configure_allocator(NULL, NULL);
+        CHECK(pc_dispatch_next_response(33U, &response) == PC_DISPATCH_RESPONSE_READY);
+        cJSON *body = decode(&response, PC_COMMAND_TEST_RESULT_REPORT, 33U);
+        number_is(body, "algorithmIndex", 37U);
+        number_is(body, "testTimeMs", 42000U);
+#if defined(B1_RK_UART)
+        CHECK(measurement_finish_calls == finishes + 1U);
+        number_is(cJSON_GetObjectItemCaseSensitive(body, "measurementData"), "Idd1Ave", 300U);
+#endif
+        const cJSON *chips = cJSON_GetObjectItemCaseSensitive(body, "testResults");
+        const cJSON *chip = cJSON_GetArrayItem(chips, 1);
+        number_is(chip, "testStatus", 0U);
+        string_is(cJSON_GetObjectItemCaseSensitive(chip, "resultDesc"),
+                  "firstErrorAddress", "0x000000000000ABCD");
+        cJSON_Delete(body);
+        CHECK(!pc_test_service_busy() && queue_calls == submitted);
+        CHECK(pc_dispatch_next_response(34U, &response) == 0);
+    }
+
+    /* 待组包结果仍受连接归属和0107废弃规则限制，不跨连接补报。 */
+    for (unsigned disconnect = 0U; disconnect < 2U; ++disconnect) {
+        start_expect(START_JSON, NULL);
+        inject(RK_RESPONSE_COMPLETE, 0U);
+        pc_json_configure_allocator(no_memory, free);
+        CHECK(pc_dispatch_next_response(35U, &response) == 0 && pc_test_service_busy());
+        pc_json_configure_allocator(NULL, NULL);
+        if (disconnect) pc_dispatch_disconnected();
+        else CHECK(pc_test_round_end(0U, 36U, &response) == PC_DISPATCH_RESPONSE_READY);
+        CHECK(pc_dispatch_next_response(37U, &response) == 0 && !pc_test_service_busy());
+    }
+
+    /* TIMEOUT组包失败时不能先消费后到的RECOVERED，避免错误地漏报超时。 */
+    start_expect(START_JSON, NULL);
+    inject(RK_RESPONSE_TIMEOUT, 0U);
+    pc_json_configure_allocator(no_memory, free);
+    CHECK(pc_dispatch_next_response(38U, &response) == 0 && pc_test_service_busy());
+    inject(RK_RESPONSE_RECOVERED, 0U);
+    CHECK(pc_dispatch_next_response(39U, &response) == 0 && response_ready);
+    pc_json_configure_allocator(NULL, NULL);
+    CHECK(pc_dispatch_next_response(40U, &response) == PC_DISPATCH_RESPONSE_READY);
+    status_is(&response, "timeout", 40U);
+    CHECK(pc_test_service_busy() && response_ready);
+    CHECK(pc_dispatch_next_response(41U, &response) == 0 && !pc_test_service_busy());
+    message("PASS: result allocation retry, single delivery, disconnect/discard and timeout ordering\n");
+}
+
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
 #define POWER_START "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\"}"
 #define CHANGED_START "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1810\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\"}"
@@ -465,6 +580,11 @@ static void power_simulation_check(void)
     cJSON_Delete(body);
 
     cycles = v2_power_sim_cycles();
+    /* 开机时改Boot或切换内存类型均拒绝，原模拟训练配置仍须可复用。 */
+    control(PC_COMMAND_SET_BOOT_MODE, "{\"bootMode\":\"emmc\"}", "failed", "invalidState");
+    control(PC_COMMAND_SET_DDR_CONFIG,
+        "{\"memoryType\":\"LPDDR4\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"1100\"}",
+        "failed", "invalidState");
     start_expect(POWER_START, NULL); /* 相同训练配置且reboot=false不增加虚拟冷重启。 */
     CHECK(v2_power_sim_cycles() == cycles);
     result_is(0U, NULL, "");
@@ -745,6 +865,75 @@ static void direct_off_to_hold(void)
     CHECK(pc_power_service_diagnostic()->phase == PC_POWER_OFF_HOLD);
 }
 
+static void config_cache_check(void)
+{
+    static const struct {
+        uint16_t command;
+        int driver_result;
+        const char *error;
+        uint8_t preserves_ready;
+    } cases[] = {
+        {PC_COMMAND_SET_BOOT_MODE, MONITOR_BOOT_ERR_STATE, "invalidState", 1U},
+        {PC_COMMAND_SET_BOOT_MODE, MONITOR_BOOT_ERR_BUSY, "busy", 1U},
+        {PC_COMMAND_SET_BOOT_MODE, MONITOR_BOOT_ERR_PARAM, "invalidArgument", 1U},
+        {PC_COMMAND_SET_BOOT_MODE, MONITOR_BOOT_OK, NULL, 0U},
+        {PC_COMMAND_SET_BOOT_MODE, MONITOR_BOOT_ERR_IO, "executionFailed", 0U},
+        {PC_COMMAND_SET_BOOT_MODE, MONITOR_BOOT_ERR_NOT_SET, "executionFailed", 0U},
+        {PC_COMMAND_SET_DDR_CONFIG, PWR_CTRL_ERR_PARAM, "invalidArgument", 1U},
+        {PC_COMMAND_SET_DDR_CONFIG, PWR_CTRL_ERR_NOT_CONFIGURED, "executionFailed", 1U},
+        {PC_COMMAND_SET_DDR_CONFIG, PWR_CTRL_ERR_BUSY, "invalidState", 1U},
+        {PC_COMMAND_SET_DDR_CONFIG, PWR_CTRL_ERR_RESOURCE_BUSY, "busy", 1U},
+        {PC_COMMAND_SET_DDR_CONFIG, PWR_CTRL_OK, NULL, 0U},
+        {PC_COMMAND_SET_DDR_CONFIG, PWR_CTRL_ERR_FAULT, "executionFailed", 0U},
+    };
+    const char *boot_json = "{\"bootMode\":\"emmc\"}";
+    const char *ddr_json = "{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"}";
+    pc_dispatch_response_t response;
+    configure_power();
+    start_expect(COLD_START, NULL); cold_to_ready(); ready_starts_algorithm();
+    result_is(0U, NULL, "SITE-7");
+
+    for (unsigned i = 0U; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        unsigned on = power_on_calls, off = power_off_calls, boots = boot_calls;
+        unsigned arms = rk_arms, queued = queue_calls, calls = config_set_calls;
+        config_result_override = 1;
+        config_boot_result = (monitor_boot_result_t)cases[i].driver_result;
+        config_ddr_result = (pwr_ctrl_result_t)cases[i].driver_result;
+        CHECK(dispatch(cases[i].command,
+            cases[i].command == PC_COMMAND_SET_BOOT_MODE ? boot_json : ddr_json,
+            106U, &response) == PC_DISPATCH_RESPONSE_READY);
+        config_result_override = 0;
+        CHECK(config_set_calls == calls + 1U);
+        cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 106U);
+        number_is(body, "requestCommandId", cases[i].command);
+        string_is(body, "status", cases[i].error ? "failed" : "completed");
+        if (cases[i].error) string_is(body, "errorCode", cases[i].error);
+        else CHECK(!cJSON_GetObjectItemCaseSensitive(body, "errorCode"));
+        cJSON_Delete(body);
+
+        /* 拒绝或写入结果不自动重启；下一次0103才决定复用还是重新准备。 */
+        CHECK(power_on_calls == on && power_off_calls == off && boot_calls == boots);
+        CHECK(rk_arms == arms && queue_calls == queued);
+        start_expect(COLD_START, NULL);
+        if (cases[i].preserves_ready) {
+            CHECK(pc_power_service_diagnostic()->phase == PC_POWER_DONE);
+            CHECK(pc_dispatch_next_response(107U, &response) == PC_DISPATCH_RESPONSE_READY);
+            body = decode(&response, PC_COMMAND_COMMAND_RESP, 107U);
+            string_is(body, "status", "completed"); cJSON_Delete(body);
+            CHECK(power_on_calls == on && power_off_calls == off && boot_calls == boots);
+            CHECK(rk_arms == arms && queue_calls == queued + 1U);
+        } else {
+            /* 成功写入、IO故障或未约定错误均不能继续信任旧成功标记。 */
+            CHECK(pc_power_service_diagnostic()->phase == PC_POWER_REQUEST_OFF);
+            direct_off_to_hold(); cold_to_ready(); ready_starts_algorithm();
+            CHECK(power_on_calls == on + 1U && power_off_calls == off + 1U);
+            CHECK(boot_calls == boots + 1U && rk_arms == arms + 1U);
+        }
+        result_is(0U, NULL, "SITE-7");
+    }
+    message("PASS: PC RK service 0506/0509 reject-preserves-ready; success/uncertain-write invalidates; same-target 0103 reuse\n");
+}
+
 static void power_sequence_check(void)
 {
     pc_dispatch_response_t response;
@@ -908,6 +1097,7 @@ static void power_sequence_check(void)
     pc_dispatch_disconnected(); step_power(10U); step_power(5U);
     mock_power_state = PWR_CTRL_STATE_ON; step_power(1U);
     CHECK(!pc_power_service_busy() && pc_dispatch_next_response(1U, &response) == 0);
+    config_cache_check();
     message("PASS: PC RK service real power sequence: cold start/reuse/change/reboot, direct off, heartbeat ready, PC voltage range, guards, failures, deadlines, disconnects\n");
 }
 #endif
@@ -1098,7 +1288,30 @@ static void slt_flow_check(void)
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "completed", NULL);
     CHECK(!pc_test_service_busy());
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
-    /* 相同SLT配置且false复用；0107提前结束不伪造SLT结束，迟到010B仅回收占用。 */
+    /* 每次新SLT都须重新启动；true/false均只执行一次，忙时重复请求不得再启动。 */
+    for (unsigned reboot = 0U; reboot < 2U; ++reboot) {
+#if defined(PC_POWER_SEQUENCE_TEST)
+        unsigned previous_on = power_on_calls, previous_off = power_off_calls, previous_boot = boot_calls;
+#else
+        uint32_t previous_cycles = v2_power_sim_cycles();
+#endif
+        cJSON *start = cJSON_Parse(SLT_START); CHECK(start);
+        CHECK(cJSON_ReplaceItemInObjectCaseSensitive(start, "reboot", cJSON_CreateBool(reboot)));
+        char *json = cJSON_PrintUnformatted(start); CHECK(json);
+        round_command(PC_COMMAND_SLT_START, json, "accepted", NULL);
+        round_command(PC_COMMAND_SLT_START, json, "failed", "busy");
+        cJSON_free(json); cJSON_Delete(start);
+        slt_complete(0);
+#if defined(PC_POWER_SEQUENCE_TEST)
+        CHECK(power_on_calls == previous_on + 1U && power_off_calls == previous_off + 1U);
+        CHECK(boot_calls == previous_boot + 1U && rk_arms == arms);
+#else
+        CHECK(v2_power_sim_cycles() == previous_cycles + 1U);
+#endif
+        round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "completed", NULL);
+        CHECK(!pc_test_service_busy());
+    }
+    /* 0107提前结束不伪造SLT结束，也不取消已受理的启动；迟到010B仅回收占用。 */
 #if defined(PC_POWER_SEQUENCE_TEST)
     unsigned on = power_on_calls, off = power_off_calls, boot = boot_calls;
 #else
@@ -1108,9 +1321,9 @@ static void slt_flow_check(void)
     round_end(); unsigned writes = led_writes;
     slt_complete(1);
 #if defined(PC_POWER_SEQUENCE_TEST)
-    CHECK(power_on_calls == on && power_off_calls == off && boot_calls == boot);
+    CHECK(power_on_calls == on + 1U && power_off_calls == off + 1U && boot_calls == boot + 1U);
 #else
-    CHECK(v2_power_sim_cycles() == cycles);
+    CHECK(v2_power_sim_cycles() == cycles + 1U);
 #endif
     round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "busy");
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "completed", NULL);
@@ -1152,7 +1365,7 @@ static void slt_flow_check(void)
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
     round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "busy");
     CHECK(pc_test_service_busy());
-    message("PASS: PC RK service SLT exact name/null index, no RK ready, PC completion, discard and reconnect ownership\n");
+    message("PASS: PC RK service SLT always cold-starts even with same target/reboot=false; busy does not restart; no RK ready; PC completion and ownership\n");
 }
 #endif
 #endif
@@ -1172,6 +1385,7 @@ void test_main(void)
 #endif
 #if defined(ENABLE_V2_MATS_FAIL_TEST) && ENABLE_V2_MATS_FAIL_TEST
     mats_fail_scope_check();
+    delivery_retry_check();
     finish(0U);
 #endif
     pc_dispatch_response_t response;
@@ -1333,5 +1547,6 @@ void test_main(void)
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     power_simulation_check();
 #endif
+    delivery_retry_check();
     finish(0U);
 }

@@ -8,7 +8,7 @@
 typedef enum {
     PC_POWER_ON = 0, PC_POWER_OFF, PC_POWER_RESTART,
     PC_POWER_PREPARE_TEST, /* FUNC：电源/Boot完成后还须本轮RK普通心跳。 */
-    PC_POWER_PREPARE_SLT   /* SLT：只准备电源/Boot，绝不检查RK软件状态。 */
+    PC_POWER_PREPARE_SLT   /* SLT：每次冷启动并准备电源/Boot，不检查RK软件状态。 */
 } pc_power_action_t;
 
 typedef enum {
@@ -62,8 +62,9 @@ typedef struct {
 int pc_power_service_configure(const pc_power_config_t *config,
                                const pc_power_rk_adapter_t *adapter);
 /** 唯一TCP任务调用。NULL=已受理（含立即完成），否则静态业务错误名。
- * PREPARE_TEST/PREPARE_SLT必须给target；其它动作target必须NULL。reboot仅对这两项
- * 有效：为0仍会在训练/Boot配置变化、状态未知时强制冷启动。受理时复制target。
+ * PREPARE_TEST/PREPARE_SLT必须给target；其它动作target必须NULL，受理时复制target。
+ * reboot须为0/1：FUNC为1强制冷启动，为0仍会在配置变化或失效时冷启动；
+ * SLT无论reboot值、配置是否相同，每次都冷启动，让RK重新走服务器下载流程。
  * 预检查不访问GPIO/I2C；实际驱动在poll推进。完成结果未消费前仍为busy。
  * SLT的DONE仅表示本地准备完成；其成功缓存不能当成FUNC初始化就绪。
  */
@@ -74,7 +75,7 @@ void pc_power_service_poll(void);
 /** 仅动作匹配且DONE时返回1并消费结果；*error=NULL成功，否则业务失败。 */
 int pc_power_service_take(pc_power_action_t action, const char **error);
 int pc_power_service_busy(void);
-/** 0506/0509等独立改配置前调用，防止把旧的训练成功缓存当成新配置已就绪。 */
+/** 0506/0509设置成功或硬件可能已变时调用；写入前明确拒绝须保留原标记。 */
 void pc_power_service_invalidate(void);
 /** 只在唯一TCP任务/暂停后的调试器读取，不能用该快照代替实测电压。 */
 const pc_power_diagnostic_t *pc_power_service_diagnostic(void);

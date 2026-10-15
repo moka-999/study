@@ -36,6 +36,56 @@ typedef struct {
     uint8_t progress_percent; /* 0..100，仅参考，不代表DDR-ready或测试结束。 */
 } rk_pending_t;
 static rk_pending_t s_pending;
+/* 仅RK任务写；volatile保留调试器可读的s_rx_diagnostics符号，不逐帧打印日志。 */
+static volatile rk_rx_diagnostics_t s_rx_diagnostics;
+
+int rk_link_get_rx_diagnostics(rk_rx_diagnostics_t *out)
+{
+    if (out == NULL) {
+        return -1;
+    }
+    taskENTER_CRITICAL();
+    *out = s_rx_diagnostics;
+    taskEXIT_CRITICAL();
+    return 0;
+}
+
+/* 记录拒绝时的窗口及原因；只读取pending，不改变结果匹配或队列交付。 */
+static void note_rx_reject(rk_rx_reject_reason_t reason, const tlv_frame_t *frame,
+                           uint16_t received_command)
+{
+    taskENTER_CRITICAL();
+    if (s_rx_diagnostics.rejected_total != UINT32_MAX) {
+        ++s_rx_diagnostics.rejected_total;
+    }
+    if (s_rx_diagnostics.counts[reason] != UINT32_MAX) {
+        ++s_rx_diagnostics.counts[reason];
+    }
+    s_rx_diagnostics.last_reason = reason;
+    s_rx_diagnostics.last_tick = xTaskGetTickCount();
+    s_rx_diagnostics.frame_valid = frame != NULL;
+    s_rx_diagnostics.received_sequence = frame != NULL ? frame->sequence : 0U;
+    s_rx_diagnostics.tlv_count = frame != NULL ? frame->count : 0U;
+    s_rx_diagnostics.waiting = s_pending.waiting;
+    s_rx_diagnostics.command_sequence = s_pending.waiting ? s_pending.sequence : 0U;
+    s_rx_diagnostics.last_tx_sequence = s_pending.waiting ? s_pending.last_tx_sequence : 0U;
+    s_rx_diagnostics.expected_command = s_pending.waiting ? s_pending.request.command_id : 0U;
+    s_rx_diagnostics.received_command = received_command;
+    taskEXIT_CRITICAL();
+}
+
+/* 格式不完整时按是否含进度字段分类；不把缺字段的最终结果误记成进度。 */
+static void note_rx_format_reject(const tlv_frame_t *frame)
+{
+    rk_rx_reject_reason_t reason = RK_RX_REJECT_RESULT;
+    for (unsigned i = 0U; i < frame->count && i < TLV_MAX_PER_FRAME; ++i) {
+        if (frame->units[i].type == TLV_TYPE_PROGRESS) {
+            reason = RK_RX_REJECT_PROGRESS;
+            break;
+        }
+    }
+    note_rx_reject(reason, frame, 0U);
+}
 
 /* 填写本地结果，实际入队由deliver_result完成；失败状态的算法结果保持清零。 */
 static void finish_request(rk_response_status_t status)
@@ -81,14 +131,26 @@ static void accept_frame(const tlv_frame_t *frame)
 {
     /* 普通心跳无需有在途算法；启动编排等待它之后才会投递测试请求。 */
     rk_link_ready_note_rx(frame);
-    if (!s_pending.waiting || frame == NULL ||
-        (uint64_t)(frame->sequence - s_pending.sequence) >
-        (uint64_t)(s_pending.last_tx_sequence - s_pending.sequence)) return;
+    if (frame == NULL || frame->count == 0U ||
+        (frame->count == 1U && frame->units[0].type == TLV_TYPE_HEARTBEAT &&
+         frame->units[0].data_len == 0U)) return;
+    if (!s_pending.waiting) {
+        note_rx_reject(RK_RX_REJECT_NO_PENDING, frame, 0U);
+        return;
+    }
+    if ((uint64_t)(frame->sequence - s_pending.sequence) >
+        (uint64_t)(s_pending.last_tx_sequence - s_pending.sequence)) {
+        note_rx_reject(RK_RX_REJECT_SEQUENCE, frame, 0U);
+        return;
+    }
     /* 进度只接受5001+3016双TLV；旧版详情/独立FAIL不参与新结果拼接。 */
     if (frame->count == 2U) {
         rk_report_t report;
-        if (rk_report_decode(frame, &report) == 0 && report.fields == RK_REPORT_PROGRESS &&
-            report.result.command_id == s_pending.request.command_id) {
+        if (rk_report_decode(frame, &report) != 0 || report.fields != RK_REPORT_PROGRESS) {
+            note_rx_format_reject(frame);
+        } else if (report.result.command_id != s_pending.request.command_id) {
+            note_rx_reject(RK_RX_REJECT_ALGORITHM, frame, report.result.command_id);
+        } else {
             s_pending.progress_percent = report.progress_percent;
             s_pending.progress_sequence = frame->sequence;
             s_pending.progress_valid = 1U;
@@ -96,8 +158,14 @@ static void accept_frame(const tlv_frame_t *frame)
         return;
     }
     rk_final_result_t result;
-    if (rk_final_result_decode(frame, &result) != 0 ||
-        result.command_id != s_pending.request.command_id) return;
+    if (rk_final_result_decode(frame, &result) != 0) {
+        note_rx_format_reject(frame);
+        return;
+    }
+    if (result.command_id != s_pending.request.command_id) {
+        note_rx_reject(RK_RX_REJECT_ALGORITHM, frame, result.command_id);
+        return;
+    }
     if (result_wait_expired()) {
         s_pending.timed_out = 1U;
         finish_request(RK_RESPONSE_TIMEOUT);
@@ -221,7 +289,10 @@ void StartRkTask(void *argument)
             for (int i = 0; i < length; ++i) {
                 if (tlv_sm_feed(&stream, buffer[i]) == 1) {
                     tlv_frame_t frame;
-                    if (tlv_sm_get_frame(&stream, &frame) < 0) continue;
+                    if (tlv_sm_get_frame(&stream, &frame) < 0) {
+                        note_rx_reject(RK_RX_REJECT_TLV, NULL, 0U);
+                        continue;
+                    }
                     accept_frame(&frame);
                 }
             }

@@ -117,8 +117,8 @@ static void prepare_target(const pc_test_start_view_t *start)
                       memcmp(s_training_mv, start->target_mv, sizeof(s_mv)) != 0 ||
                       s_type != type || !s_boot_valid || s_boot != mode ||
                       memcmp(s_mv, start->target_mv, sizeof(s_mv)) != 0;
-        /* 配置改变时即使PC给reboot=false也计一次虚拟冷重启；完全不复位真实RK。 */
-        if (s_state != PWR_CTRL_STATE_ON || start->reboot || changed) ++s_cycles;
+        /* SLT每次计一次虚拟冷启动；FUNC仍按配置/reboot判断，均不复位真实RK。 */
+        if (slt || s_state != PWR_CTRL_STATE_ON || start->reboot || changed) ++s_cycles;
         s_training_type = s_type = type;
         s_training_boot = s_boot = mode;
         s_boot_valid = s_training_valid = 1U;

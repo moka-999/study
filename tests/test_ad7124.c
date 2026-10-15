@@ -16,6 +16,8 @@ static GPIO_TypeDef gpio;
 static int selected;
 static uint32_t last_release_wait, error_reads, cal_delay, por_reads;
 static uint8_t ignore_diagnostics;
+static uint32_t ignored_busy_writes;
+static uint8_t fail_cal_status, ignore_restore_idle;
 
 /* QEMU半主机输出复用项目现有测试约定；不依赖目标板串口。 */
 static void message(const char *text)
@@ -74,8 +76,18 @@ static int send_bytes(spi_if_t *bus, uint8_t *data, uint16_t length)
     uint32_t value = 0U;
     for (uint16_t i = 1U; i < length; ++i) value = (value << 8) | data[i];
     CHECK(reg < 0x39U);
-    if (!(reg == AD7124_REG_ERROR_EN && ignore_diagnostics)) regs[reg] = value;
     ++writes;
+    /* Rev.E：校准忙时寄存器写被忽略，SPI移位仍可返回成功。 */
+    if (cal_mode == AD7124_MODE_CAL_INT_F || cal_mode == AD7124_MODE_CAL_INT_Z) {
+        ++ignored_busy_writes;
+        regs[AD7124_REG_ERROR] |= AD7124_ERR_SPI_IGNORE;
+        status_bits |= AD7124_STATUS_ERROR_FLAG;
+        return failed ? IF_ERR : IF_OK;
+    }
+    /* 模拟恢复IDLE写未生效：中功耗保持不变，须由控制寄存器回读识别。 */
+    if (ignore_restore_idle && zero_count != 0U && reg == AD7124_REG_ADC_CTRL &&
+        ((value >> 2) & 15U) == AD7124_MODE_IDLE) return failed ? IF_ERR : IF_OK;
+    if (!(reg == AD7124_REG_ERROR_EN && ignore_diagnostics)) regs[reg] = value;
     if (reg == AD7124_REG_ADC_CTRL) {
         cal_mode = (value >> 2) & 15U;
         if (cal_mode == AD7124_MODE_CAL_INT_F || cal_mode == AD7124_MODE_CAL_INT_Z) {
@@ -107,6 +119,10 @@ static int transfer_bytes(spi_if_t *bus, uint8_t *tx, uint8_t *rx, uint16_t leng
     if (io_failed()) return IF_ERR;
     uint8_t reg = tx[0] & 0x3FU;
     CHECK(reg < 0x39U && (tx[0] & 0x40U) && length >= 2U && length <= 5U);
+    if (reg == AD7124_REG_STATUS && fail_cal_status != 0U && cal_mode == fail_cal_status) {
+        fail_cal_status = 0U;
+        return IF_ERR;
+    }
     memset(rx, 0, length);
     uint32_t value = regs[reg];
     if (reg == AD7124_REG_STATUS) {
@@ -161,6 +177,7 @@ static ad7124_t reset_case(void)
     selected = 0;
     last_release_wait = UINT32_MAX;
     error_reads = cal_delay = por_reads = ignore_diagnostics = 0U;
+    ignored_busy_writes = fail_cal_status = ignore_restore_idle = 0U;
     regs[AD7124_REG_ID] = AD7124_ID_AD7124_4_REV_E;
     stream_len = 3U;
     stream[0] = 2U; stream[1] = 0U; stream[2] = 1U;
@@ -298,12 +315,12 @@ static void test_calibration(void)
     for (uint8_t mode = AD7124_MODE_CAL_INT_Z; mode <= AD7124_MODE_CAL_INT_F; ++mode) {
         adc = reset_case(); regs[AD7124_REG_CFG0] |= 1U; stuck_mode = mode;
         CHECK(ad7124_calibrate(&adc, 0U) == IF_TIMEOUT && waits >= 20000U && waits < 20100U);
-        CHECK(regs[AD7124_REG_GAIN0] == before[AD7124_REG_GAIN0]);
-        CHECK(regs[AD7124_REG_OFFSET0] == before[AD7124_REG_OFFSET0]);
-        check_restored();
+        CHECK(adc.num_ch == 0U && adc.adc_mode == AD7124_MODE_UNKNOWN);
+        CHECK(cal_mode == mode && ignored_busy_writes == 0U && !selected);
     }
     adc = reset_case(); cal_error = 1U;
-    CHECK(ad7124_calibrate(&adc, 0U) == IF_ERR); check_restored();
+    CHECK(ad7124_calibrate(&adc, 0U) == IF_ERR);
+    CHECK(adc.num_ch == 0U && adc.adc_mode == AD7124_MODE_UNKNOWN && ignored_busy_writes == 0U);
     adc = reset_case(); fail_from = 22U;
     CHECK(ad7124_calibrate(&adc, 0U) == IF_ERR && adc.num_ch == 0U && adc.adc_mode == 0xFFU);
     adc = reset_case();
@@ -311,6 +328,36 @@ static void test_calibration(void)
     CHECK(ad7124_calibrate(&adc, 16U) == IF_ERR && calls == 0U);
     regs[AD7124_REG_ADC_CTRL] |= AD7124_ADC_MODE(AD7124_MODE_CAL_INT_F);
     CHECK(ad7124_calibrate(&adc, 0U) == IF_ERR && writes == 0U);
+}
+
+static void test_calibration_busy_recovery(void)
+{
+    /* 先验证模型确实忽略忙时写入，不能再把总线成功当成器件恢复成功。 */
+    ad7124_t adc = reset_case();
+    uint8_t idle[] = {0U, AD7124_ADC_MODE(AD7124_MODE_IDLE)};
+    cal_mode = AD7124_MODE_CAL_INT_Z;
+    CHECK(ad7124_write_reg(&adc, AD7124_REG_ADC_CTRL, idle, sizeof(idle)) == IF_OK);
+    CHECK(ignored_busy_writes == 1U && cal_mode == AD7124_MODE_CAL_INT_Z);
+    CHECK(regs[AD7124_REG_ADC_CTRL] == before[AD7124_REG_ADC_CTRL]);
+
+    /* 两种校准中途只丢一次STATUS读取；就绪状态不可信即失效，禁止继续写。 */
+    for (uint8_t mode = AD7124_MODE_CAL_INT_Z; mode <= AD7124_MODE_CAL_INT_F; ++mode) {
+        adc = reset_case(); regs[AD7124_REG_CFG0] |= 1U; fail_cal_status = mode;
+        CHECK(ad7124_calibrate(&adc, 0U) == IF_ERR && fail_cal_status == 0U);
+        CHECK(adc.num_ch == 0U && adc.adc_mode == AD7124_MODE_UNKNOWN);
+        CHECK(cal_mode == mode && ignored_busy_writes == 0U && !selected);
+        uint32_t saved_calls = calls;
+        int32_t value = 777;
+        CHECK(ad7124_read_ch(&adc, 0U, &value) == IF_ERR && value == 777 && calls == saved_calls);
+        CHECK(ad7124_init(&adc) == IF_OK && adc.num_ch == 3U && adc.adc_mode == AD7124_MODE_CONT);
+    }
+
+    /* 校准结束也不能只检查写入返回码；IDLE配置回读不符时必须失效。 */
+    adc = reset_case(); regs[AD7124_REG_CFG0] |= 1U; ignore_restore_idle = 1U;
+    CHECK(ad7124_calibrate(&adc, 0U) == IF_ERR);
+    CHECK(adc.num_ch == 0U && adc.adc_mode == AD7124_MODE_UNKNOWN);
+    CHECK(((regs[AD7124_REG_ADC_CTRL] >> 6) & 3U) == AD7124_PWR_MID);
+    CHECK((regs[AD7124_REG_CH0 + 1U] & AD7124_CH_ENABLE) == 0U);
 }
 
 static void test_filter(void)
@@ -415,7 +462,8 @@ static void test_initialization_and_diagnostics(void)
 
 void test_main(void)
 {
-    test_samples(); test_calibration(); test_filter(); test_monitor();
+    test_samples(); test_calibration(); test_calibration_busy_recovery();
+    test_filter(); test_monitor();
     test_initialization_and_diagnostics();
     message("PASS: actual AD7124 snapshots, calibration fault sweep, filter and monitor\n");
     finish(0U);

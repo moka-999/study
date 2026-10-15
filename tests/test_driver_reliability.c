@@ -44,12 +44,13 @@ void iic_send_byte(uint8_t value)
 }
 uint8_t iic_read_byte(uint8_t ack) { CHECK(ack == 0U); return pcf_latch & pcf_external; }
 
-/* NOR模型保留一块数据，其余地址视为已擦除；400秒等待在虚拟时基中推进。 */
+/* NOR模型以64KiB环形存储覆盖器件边界地址；400秒等待在虚拟时基中推进。 */
 QSPI_HandleTypeDef hqspi;
 static QSPI_CommandTypeDef nor;
 static uint8_t flash[65536], sr2, sr3, wel, busy_forever, suspended;
 static uint8_t ignore_wren, ignore_mutation, wrong_id, ignore_ads;
 static uint32_t nor_calls, nor_fail_at, busy_begin, busy_duration, resets, programs, erases;
+static uint32_t single_reads, quad_reads;
 static uint8_t busy(void) { return busy_forever || (uint32_t)(ticks - busy_begin) < busy_duration; }
 static void nor_reset_case(void)
 {
@@ -58,6 +59,7 @@ static void nor_reset_case(void)
     sr2 = W25Q_SR2_QE; sr3 = 1U;
     wel = busy_forever = suspended = ignore_wren = ignore_mutation = wrong_id = ignore_ads = 0U;
     nor_calls = nor_fail_at = busy_duration = resets = programs = erases = 0U;
+    single_reads = quad_reads = 0U;
     ticks = busy_begin = 0U;
     kernel_state = osKernelRunning;
 }
@@ -71,9 +73,26 @@ HAL_StatusTypeDef HAL_QSPI_Command(QSPI_HandleTypeDef *h, QSPI_CommandTypeDef *c
     if (c->Instruction == 0x04U) wel = 0U;
     if (c->Instruction == 0x06U && !ignore_wren && !busy() && !suspended) wel = 1U;
     if (c->Instruction == W25Q_CMD_QUAD_READ) {
+        CHECK((c->Address & 3U) == 0U);
+        CHECK(c->InstructionMode == QSPI_INSTRUCTION_1_LINE);
+        CHECK(c->AddressMode == QSPI_ADDRESS_4_LINES && c->DataMode == QSPI_DATA_4_LINES);
         CHECK(c->AlternateByteMode == QSPI_ALTERNATE_BYTES_4_LINES);
         CHECK(c->AlternateBytesSize == QSPI_ALTERNATE_BYTES_8_BITS && c->AlternateBytes == 0xFFU);
         CHECK(c->DummyCycles == 4U && c->AddressSize == QSPI_ADDRESS_32_BITS);
+        ++quad_reads;
+    }
+    if (c->Instruction == W25Q_CMD_READ_DATA_4B) {
+        CHECK(c->InstructionMode == QSPI_INSTRUCTION_1_LINE);
+        CHECK(c->AddressMode == QSPI_ADDRESS_1_LINE && c->DataMode == QSPI_DATA_1_LINE);
+        CHECK(c->AddressSize == QSPI_ADDRESS_32_BITS && c->DummyCycles == 0U);
+        CHECK(c->AlternateByteMode == QSPI_ALTERNATE_BYTES_NONE);
+        CHECK(c->NbData > 0U && c->NbData <= 3U && (c->Address & 3U) != 0U);
+        CHECK(c->NbData <= 4U - (c->Address & 3U));
+        ++single_reads;
+    }
+    if (c->Instruction == W25Q_CMD_QUAD_READ || c->Instruction == W25Q_CMD_READ_DATA_4B) {
+        CHECK(c->Address < W25Q_CAPACITY && c->NbData > 0U);
+        CHECK(c->NbData <= W25Q_CAPACITY - c->Address);
     }
     uint32_t size = c->Instruction == W25Q_CMD_SECTOR_ERASE ? W25Q_SECTOR_SIZE :
                     c->Instruction == W25Q_CMD_BLOCK_ERASE32 ? W25Q_BLOCK32_SIZE :
@@ -121,11 +140,81 @@ HAL_StatusTypeDef HAL_QSPI_Receive(QSPI_HandleTypeDef *h, uint8_t *data, uint32_
     else if (nor.Instruction == W25Q_CMD_READ_JEDEC_ID) {
         data[0] = wrong_id ? 0xFFU : 0xEFU; data[1] = 0x40U; data[2] = 0x19U;
     } else {
-        CHECK(nor.Instruction == W25Q_CMD_QUAD_READ && !busy() && !suspended);
+        CHECK((nor.Instruction == W25Q_CMD_QUAD_READ || nor.Instruction == W25Q_CMD_READ_DATA_4B) &&
+              !busy() && !suspended);
         for (uint32_t i = 0U; i < nor.NbData; ++i)
             data[i] = flash[(nor.Address + i) % sizeof(flash)];
     }
     return HAL_OK;
+}
+
+/* 覆盖短前缀、对齐后续段、容量末尾及每个HAL失败点；不允许Quad模型吞掉地址错误。 */
+static void test_nor_byte_reads(void)
+{
+    static const uint32_t addresses[] = {
+        0U, 1U, 2U, 3U, 4U, 119U, 2999U,
+        W25Q_CAPACITY - 9U, W25Q_CAPACITY - 3U, W25Q_CAPACITY - 2U, W25Q_CAPACITY - 1U
+    };
+    uint8_t value[18];
+    nor_reset_case();
+    for (uint32_t i = 0U; i < sizeof(flash); ++i) flash[i] = (uint8_t)(i * 37U + i / 256U);
+    for (uint32_t i = 0U; i < sizeof(addresses) / sizeof(addresses[0]); ++i) {
+        uint32_t address = addresses[i];
+        for (uint32_t size = 1U; size <= 16U && size <= W25Q_CAPACITY - address; ++size) {
+            memset(value, 0xA5, sizeof(value));
+            single_reads = quad_reads = 0U;
+            CHECK(qspi_read_data(address, value + 1U, size) == IF_OK);
+            for (uint32_t n = 0U; n < size; ++n)
+                CHECK(value[n + 1U] == flash[(address + n) % sizeof(flash)]);
+            CHECK(value[0] == 0xA5U && value[size + 1U] == 0xA5U);
+            uint32_t prefix = (address & 3U) != 0U ? 4U - (address & 3U) : 0U;
+            CHECK(single_reads == (prefix != 0U ? 1U : 0U));
+            CHECK(quad_reads == (size > prefix ? 1U : 0U));
+        }
+    }
+    uint32_t count = nor_calls;
+    CHECK(qspi_read_data(UINT32_MAX, value, 1U) == IF_ERR);
+    CHECK(qspi_read_data(W25Q_CAPACITY, value, 1U) == IF_ERR);
+    CHECK(qspi_read_data(W25Q_CAPACITY - 1U, value, 2U) == IF_ERR);
+    CHECK(qspi_read_data(1U, value, UINT32_MAX) == IF_ERR);
+    CHECK(qspi_read_data(1U, NULL, 1U) == IF_ERR);
+    CHECK(qspi_read_data(UINT32_MAX, NULL, 0U) == IF_OK && nor_calls == count);
+
+    nor_reset_case();
+    CHECK(qspi_read_data(119U, value, 9U) == IF_OK);
+    count = nor_calls;
+    for (uint32_t i = 1U; i <= count; ++i) {
+        nor_reset_case(); nor_fail_at = i;
+        CHECK(qspi_read_data(119U, value, 9U) != IF_OK && nor_calls == i);
+    }
+    message("PASS NOR byte reads: unaligned prefixes, exact bounds, capacity end and HAL faults\n");
+}
+
+/* 复用下载路径的字节分块/页内写入方式，验证119/2999字节块及逐字节重试读回。 */
+static void test_nor_download_chunks(uint32_t block_bytes)
+{
+    static uint8_t source[6137], received[3000];
+    const uint32_t base = 0x00010000U;
+    nor_reset_case();
+    for (uint32_t i = 0U; i < sizeof(source); ++i) source[i] = (uint8_t)(i * 29U + i / 251U);
+    for (uint32_t offset = 0U; offset < sizeof(source); ) {
+        uint32_t bytes = sizeof(source) - offset;
+        if (bytes > block_bytes) bytes = block_bytes;
+        for (uint32_t cursor = 0U; cursor < bytes; ) {
+            uint32_t address = base + offset + cursor;
+            uint32_t n = W25Q_PAGE_SIZE - (address % W25Q_PAGE_SIZE);
+            if (n > bytes - cursor) n = bytes - cursor;
+            if ((address % W25Q_SECTOR_SIZE) == 0U) CHECK(qspi_erase_sector(address) == IF_OK);
+            CHECK(qspi_write_page(address, source + offset + cursor, (uint16_t)n) == IF_OK);
+            cursor += n;
+        }
+        uint32_t writes = programs;
+        CHECK(qspi_read_data(base + offset, received, bytes) == IF_OK);
+        CHECK(memcmp(received, source + offset, bytes) == 0 && programs == writes);
+        offset += bytes;
+    }
+    CHECK(memcmp(flash, source, sizeof(source)) == 0);
+    CHECK(single_reads != 0U && quad_reads != 0U);
 }
 
 static void test_nor(void)
@@ -173,7 +262,14 @@ static void test_nor(void)
     CHECK(qspi_erase_sector(1U) == IF_ERR);
     CHECK(qspi_read_data(W25Q_CAPACITY - 1U, value, 2U) == IF_ERR);
     CHECK(qspi_write_page(W25Q_CAPACITY - 256U, zero, 256U) == IF_OK);
+    nor_reset_case();
+    CHECK(qspi_write_page(W25Q_CAPACITY - 3U, zero, 3U) == IF_OK);
+    CHECK(single_reads == 1U && quad_reads == 0U && flash[sizeof(flash) - 4U] == 0x5AU);
     message("PASS NOR: init/write fault sweep, WEL/protection/readback, mode byte, 400s erase and tick wrap\n");
+    test_nor_byte_reads();
+    test_nor_download_chunks(119U);
+    test_nor_download_chunks(2999U);
+    message("PASS NOR byte chunks: 119/2999-byte blocks, page writes and retry readback\n");
 }
 
 /* PHY仅模拟MDIO返回值，模式解码运行正式函数。 */

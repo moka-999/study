@@ -369,15 +369,16 @@ int  ad7124_config_setup(ad7124_t *d, uint8_t setup,
                          uint32_t filter, uint16_t fs);
 
 /**
- * @brief 按增益执行内部校准，结束后恢复原通道选择与ADC_CTRL。
+ * @brief 按增益执行内部校准，成功后恢复原通道选择与ADC_CTRL。
  * @param[in,out] d 非NULL、已配置的句柄，SPI/CS须有效。
  * @param[in] ch 逻辑通道0..15，从CHx读取其setup；期间仅此通道使能。
- * @return IF_OK校准及恢复均成功；IF_TIMEOUT就绪等待耗尽且恢复成功；
+ * @return IF_OK校准及恢复均成功；IF_TIMEOUT校准就绪等待耗尽，句柄失效；
  *         IF_ERR参数、器件错误或IO/恢复失败。读备份失败不会写寄存器。
  * @note 增益1保留工厂增益，只校零位；增益>1先重置OFFSET，在低/中功耗
  *       校满量程再校零位。每阶段最多20000次轮询，事务间至少1ms；覆盖
- *       内部时钟各功耗档和FS=2047的校准，SPI/调度耗时另计。失败尽力恢复旧系数。
- *       恢复失败令adc_mode=UNKNOWN、num_ch=0，调用方必须重新初始化。
+ *       内部时钟各功耗档和FS=2047的校准，SPI/调度耗时另计。
+ *       校准尚未启动时失败才尽力恢复；尝试启动后的任何错误或恢复失败均令
+ *       adc_mode=UNKNOWN、num_ch=0，调用方必须重新初始化，不自动复位器件。
  *       不支持正在校准、掉电或CONT_READ模式；仅由维护调用，不在init自动执行。
  */
 int  ad7124_calibrate(ad7124_t *d, uint8_t ch);

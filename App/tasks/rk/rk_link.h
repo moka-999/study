@@ -56,6 +56,44 @@ extern QueueHandle_t rkResponseQueue;
 int rk_link_request(const rk_request_t *request);
 /* 非阻塞领取一个结果；1成功，0无结果/参数无效。仅一个业务消费者调用。 */
 int rk_link_receive(rk_response_t *response);
+/* 仅内部诊断，不是线上错误码；同一帧只记录实际拒绝路径的第一个原因。
+ * NO_PENDING也包括完成后的重复结果，表示未交付业务，不等于RK协议错误。
+ */
+typedef enum {
+    RK_RX_REJECT_NONE = 0,       /* 启动后尚无拒绝；counts[0]始终为0。 */
+    RK_RX_REJECT_NO_PENDING,     /* 非普通心跳到达时没有在途算法。 */
+    RK_RX_REJECT_SEQUENCE,       /* Seq早于本次命令或超出最近成功发送上界。 */
+    RK_RX_REJECT_ALGORITHM,      /* 结构合法，但算法号不是当前在途算法。 */
+    RK_RX_REJECT_PROGRESS,       /* 含3016但不是有效的5001+3016双TLV进度。 */
+    RK_RX_REJECT_RESULT,         /* 最终包不满足3/5/7 TLV完整结果合同。 */
+    RK_RX_REJECT_TLV,            /* 帧边界/CRC通过，但TLV层无法完整解包。 */
+    RK_RX_REJECT_COUNT
+} rk_rx_reject_reason_t;
+
+/* MCU复位后从0累计，计数饱和于UINT32_MAX；新测试不会清除历史诊断。
+ * 只统计完整帧的拒绝，不统计串口文字、CRC坏帧及字节间超时；这些不进业务解析。
+ * 普通心跳不计拒绝。最近记录只在拒绝时更新，合法帧不会擦除诊断证据。
+ * 已在TLV解包阶段发现的字段宽度/取值错误归TLV，其余按业务拒绝路径分类。
+ */
+typedef struct {
+    uint32_t rejected_total;
+    uint32_t counts[RK_RX_REJECT_COUNT];
+    rk_rx_reject_reason_t last_reason;
+    uint32_t last_tick;          /* RTOS tick，不是毫秒；用于与本机日志对时。 */
+    uint64_t received_sequence;  /* frame_valid=1时有效。 */
+    uint64_t command_sequence;   /* waiting=1时为本次算法Seq窗口下界。 */
+    uint64_t last_tx_sequence;   /* waiting=1时为最近成功入UART队列的窗口上界。 */
+    uint16_t expected_command;   /* waiting=0时为0，不能当成有效算法编号。 */
+    uint16_t received_command;   /* 仅算法不匹配时有效，其余为0，未强行解读坏载荷。 */
+    uint8_t tlv_count;           /* frame_valid=1时有效。 */
+    uint8_t frame_valid;         /* 1表示已通过TLV解包，不代表符合最终业务格式。 */
+    uint8_t waiting;             /* 拒绝当时是否有算法在途，包括超时后的未知状态。 */
+} rk_rx_diagnostics_t;
+
+/* 任务上下文只读快照：out非NULL返回0，NULL返回-1；短临界区保护64位字段。
+ * 不清计数、不打印、不发PC帧、不改变RK状态；不用于ISR或控制接收门禁。
+ */
+int rk_link_get_rx_diagnostics(rk_rx_diagnostics_t *out);
 /* 新命令/心跳独立u64序号，启动从0递增，临界区保护；失败允许序号间隙。 */
 uint64_t rk_link_next_sequence(void);
 
