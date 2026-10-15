@@ -142,7 +142,9 @@ const char *pc_power_service_start(pc_power_action_t action,
             (target && (unsigned)target->boot_mode >= BOOT_MODE_COUNT)) return "invalidArgument";
         if (!pwr_ctrl_is_configured()) return "notConfigured";
     }
-    int reuse = target && !reboot && state == PWR_CTRL_STATE_ON && s_ready_valid &&
+    /* SLT须重新走服务器下载启动流程；只有FUNC可以复用相同的成功配置。 */
+    int reuse = action == PC_POWER_PREPARE_TEST && target && !reboot &&
+                state == PWR_CTRL_STATE_ON && s_ready_valid &&
                 s_ready_action == action &&
                 same_target(target, &s_ready_target);
     if (!reuse && (action == PC_POWER_RESTART || action == PC_POWER_PREPARE_TEST) &&

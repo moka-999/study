@@ -38,14 +38,16 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
 pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *result,
     uint32_t sequence, pc_dispatch_response_t *response);
 
-/* 非阻塞领取异步响应；1=有完整PDU，0=无，-1=组包失败，应关闭连接。
- * response=NULL仅用于无连接时回收旧测试结果；不会丢弃当前连接的响应。
+/* 非阻塞领取异步响应；1=有完整PDU，0=无响应或RK结果等待组包重试。
+ * RK结果只保留一份，组包失败不重发算法、不解除busy、不主动断线；准备阶段
+ * 的其他致命错误仍可返回-1。返回1只代表组包成功，不保证TCP已交付PC。
+ * response=NULL仅用于无连接时回收旧测试结果；不丢弃当前连接的待组包结果。
  */
 int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response);
 
 /* 断线结束连接所属整轮并废弃结果，不取消RK、不清除在途/超时未知/SLT占用。 */
 void pc_test_service_disconnected(void);
-/* 1=正在准备电源、测试已入队、执行中或超时后状态未知；0=无本服务在途请求。 */
+/* 1=准备电源、执行中、结果待组包或超时后状态未知；0=无本服务在途请求。 */
 int pc_test_service_busy(void);
 
 #endif

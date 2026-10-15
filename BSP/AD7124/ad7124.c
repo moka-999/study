@@ -348,14 +348,15 @@ int ad7124_init(ad7124_t *d)
  * 内部校准（Rev.E第53页）：增益1只做零位，保留工厂增益；其它增益
  * 先将OFFSET置0x800000，再在低/中功耗下校满量程，最后校零位。
  * 保存全部16个通道、ADC_CTRL和本setup系数，禁止从未读成功的备份恢复。
- * 校准失败时尽力恢复旧系数；恢复失败则使句柄失效，要求重新初始化。
+ * 校准启动后的错误使句柄失效；不在器件仍忙时写恢复值，调用方须重新初始化。
  * ═══════════════════════════════════════════════════════════════════ */
 
 int ad7124_calibrate(ad7124_t *d, uint8_t ch)
 {
-    uint16_t channels[AD7124_CHANNEL_COUNT], control, config;
+    uint16_t channels[AD7124_CHANNEL_COUNT], control, config, idle_readback;
     uint8_t saved_offset[3], saved_gain[3];
     int result, restore_failed = 0;
+    uint8_t calibration_started = 0U;
     if (!d || !d->cs_port || !d->spi || !d->spi->send || !d->spi->transfer ||
         ch >= AD7124_CHANNEL_COUNT) return IF_ERR;
 
@@ -395,20 +396,27 @@ int ad7124_calibrate(ad7124_t *d, uint8_t ch)
     if ((config & 7U) != 0U) {
         result = _wr24(d, AD7124_REG_OFFSET0 + setup, 0x800000UL);
         if (result != IF_OK) goto restore;
+        /* SPI报错时器件也可能已启动，之后任何异常都不能盲写恢复寄存器。 */
+        calibration_started = 1U;
         result = _wr16(d, AD7124_REG_ADC_CTRL,
                        cal_base | AD7124_ADC_MODE(AD7124_MODE_CAL_INT_F));
         if (result != IF_OK) goto restore;
         result = wait_ready(d, AD7124_CAL_POLLS);
         if (result != IF_OK) goto restore;
     }
+    calibration_started = 1U;
     result = _wr16(d, AD7124_REG_ADC_CTRL,
                    cal_base | AD7124_ADC_MODE(AD7124_MODE_CAL_INT_Z));
     if (result == IF_OK) result = wait_ready(d, AD7124_CAL_POLLS);
 
 restore:
-    /* 先退出可能仍在进行的校准；无法确认退出时不能再写OFFSET/GAIN。 */
+    /* 校准忙时寄存器访问受限；失败后保持未知，不以SPI写成功冒充退出校准。 */
+    if (calibration_started && result != IF_OK) goto invalid;
+    /* 只在校准已正常结束或尚未启动时恢复，并确认IDLE配置确实生效。 */
     if (_wr16(d, AD7124_REG_ADC_CTRL,
-              base | AD7124_ADC_MODE(AD7124_MODE_IDLE)) != IF_OK) goto invalid;
+              base | AD7124_ADC_MODE(AD7124_MODE_IDLE)) != IF_OK ||
+        _rd16(d, AD7124_REG_ADC_CTRL, &idle_readback) != IF_OK ||
+        idle_readback != (base | AD7124_ADC_MODE(AD7124_MODE_IDLE))) goto invalid;
     if (result != IF_OK) {
         if (ad7124_write_reg(d, AD7124_REG_OFFSET0 + setup, saved_offset, 3U) != IF_OK)
             restore_failed = 1;
@@ -426,7 +434,7 @@ restore:
 invalid:
     d->adc_mode = AD7124_MODE_UNKNOWN;
     d->num_ch = 0U;
-    return IF_ERR;
+    return result == IF_TIMEOUT ? IF_TIMEOUT : IF_ERR;
 }
 
 /* ═══════════════════════════════════════════════════════════════════

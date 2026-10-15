@@ -591,8 +591,11 @@ static pc_dispatch_result_t handle_set_boot_mode(
                                      "invalidArgument", response);
     }
 
-    pc_power_service_invalidate();
     result = pc_boot_set((boot_mode_t)mode);
+    /* 参数/状态/锁忙拒绝未写DAC；成功或不确定的写失败才使旧启动配置失效。 */
+    if (result != MONITOR_BOOT_ERR_PARAM && result != MONITOR_BOOT_ERR_STATE &&
+        result != MONITOR_BOOT_ERR_BUSY)
+        pc_power_service_invalidate();
     if (result == MONITOR_BOOT_OK)
         return build_command_success(request, mcu_tx_sequence, response);
     if (result == MONITOR_BOOT_ERR_STATE)
@@ -675,8 +678,11 @@ static pc_dispatch_result_t handle_set_ddr_config(
     }
 
     ddr_memory_type_t type = strcmp(memory_type, "LPDDR4") == 0 ? DDR_MEMORY_LPDDR4 : DDR_MEMORY_LPDDR4X;
-    pc_power_service_invalidate();
     result = pc_ddr_set(type, steps);
+    /* 明确未执行的拒绝保留标记；成功、故障及未知返回可能已改变供电条件。 */
+    if (result != PWR_CTRL_ERR_PARAM && result != PWR_CTRL_ERR_NOT_CONFIGURED &&
+        result != PWR_CTRL_ERR_BUSY && result != PWR_CTRL_ERR_RESOURCE_BUSY)
+        pc_power_service_invalidate();
     if (result == PWR_CTRL_OK)
         return build_command_success(request, mcu_tx_sequence, response);
     if (result == PWR_CTRL_ERR_PARAM)

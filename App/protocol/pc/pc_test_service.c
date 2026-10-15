@@ -24,6 +24,8 @@ static struct {
     uint8_t slt;                /* 1=PC负责执行/结果的SLT，不消费RK算法结果队列。 */
     uint8_t discarded;          /* 0107/断线后不再交付结果；不代表实际测试已停止。 */
     rk_request_t pending;       /* 只保存值，不借用已释放的JSON字符串。 */
+    uint8_t delivery_pending;   /* 1=已领取结果，等待当前连接成功组包；不重复执行RK。 */
+    rk_response_t delivery;    /* 固定一份结果副本；内存不足时不再消费后续恢复事件。 */
 } s_test;
 static uint8_t s_round_active; /* 仅属于当前TCP连接；算法占用与轮次是否收尾分开记录。 */
 
@@ -295,6 +297,16 @@ static int poll_slt(uint32_t sequence, pc_dispatch_response_t *response)
     return slt_status_response(sequence, error ? "failed" : "completed", error, response);
 }
 
+/* 组包完成或原连接明确放弃后才释放；TIMEOUT仍须等待RK恢复事件。 */
+static void release_delivery(void)
+{
+    if (s_test.delivery.status != RK_RESPONSE_TIMEOUT) {
+        s_test.active = 0U;
+        s_test.owner_connected = 0U;
+    }
+    s_test.delivery_pending = 0U;
+}
+
 int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
 {
     if (s_test.owner_connected && response == NULL) return 0;
@@ -323,27 +335,32 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
         return PC_DISPATCH_RESPONSE_READY;
     }
     rk_response_t result;
-    while (rk_link_receive(&result)) {
-        if (!s_test.active || result.cookie != s_test.cookie) continue;
-        if (result.status == RK_RESPONSE_RECOVERED) {
-            s_test.active = 0U;
-            s_test.owner_connected = 0U;
-            continue; /* 迟到结果只解除未知状态，不补报第二个“测试成功”。 */
-        }
-        int deliver = s_test.owner_connected && !s_test.discarded && response != NULL;
+    for (;;) {
+        if (!s_test.delivery_pending) {
+            if (!rk_link_receive(&result)) return 0;
+            if (!s_test.active || result.cookie != s_test.cookie) continue;
+            if (result.status == RK_RESPONSE_RECOVERED) {
+                s_test.active = 0U;
+                s_test.owner_connected = 0U;
+                continue; /* 迟到结果只解除未知状态，不补报第二个“测试成功”。 */
+            }
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
-        /* 即使发起连接已断开也要冻结本次统计；新连接不能获得旧0105。 */
-        v2_power_sim_test_end(!s_test.discarded && result.status == RK_RESPONSE_COMPLETE);
+            /* 只在首次领取时冻结统计；组包重试不能改变本次测量窗口。 */
+            v2_power_sim_test_end(!s_test.discarded && result.status == RK_RESPONSE_COMPLETE);
 #elif defined(B1_RK_UART)
-        /* 统计在MCU领取结果时冻结；不是RK或JEDEC定义的同步IDD测量窗口。 */
-        if (!s_test.discarded && result.status == RK_RESPONSE_COMPLETE) monitor_idd_finish();
-        else monitor_idd_cancel();
+            /* 统计在首次领取时冻结；不是RK或JEDEC定义的同步IDD测量窗口。 */
+            if (!s_test.discarded && result.status == RK_RESPONSE_COMPLETE) monitor_idd_finish();
+            else monitor_idd_cancel();
 #endif
-        if (result.status != RK_RESPONSE_TIMEOUT) {
-            s_test.active = 0U;
-            s_test.owner_connected = 0U;
+            s_test.delivery = result;
+            s_test.delivery_pending = 1U;
         }
-        if (!deliver) continue;
+        result = s_test.delivery;
+        if (!s_test.owner_connected || s_test.discarded) {
+            release_delivery();
+            continue;
+        }
+        int ready;
         if (result.status == RK_RESPONSE_COMPLETE) {
             /* 完整结果已经由RK任务校验：未列出的颗粒才可判PASS；先按编号归位。 */
             pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT] = {{0U, "", 0U}, {0U, "", 0U}};
@@ -359,31 +376,34 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
             if (!body || !v2_power_sim_add_measurement(body)) {
                 cJSON_Delete(body);
-                return PC_DISPATCH_ERROR;
+                return 0; /* 暂留副本，下轮轮询重试；不因一次分配失败主动断线。 */
             }
 #elif defined(B1_RK_UART)
             idd_stats_t stats;
             if (!body || !monitor_idd_get(&stats) || !pc_test_add_measurement(body, &stats)) {
                 cJSON_Delete(body);
-                return PC_DISPATCH_ERROR;
+                return 0; /* 读取冻结统计或组包失败均不丢失已领取的结果。 */
             }
 #endif
-            int ready = pack(PC_COMMAND_TEST_RESULT_REPORT, sequence, body, response);
+            ready = pack(PC_COMMAND_TEST_RESULT_REPORT, sequence, body, response);
             cJSON_Delete(body);
-            return ready;
+        } else {
+            /* 用表区分通信异常，不能把发送失败、超时或掉电写成芯片FAIL。 */
+            static const char *const errors[] = {
+                [RK_RESPONSE_TIMEOUT] = "timeout",
+                [RK_RESPONSE_TX_FAILED] = "txFailed",
+                [RK_RESPONSE_INVALID] = "invalidArgument",
+                [RK_RESPONSE_POWER_OFF] = "powerOff",
+            };
+            const char *error = (unsigned)result.status < sizeof(errors) / sizeof(errors[0])
+                                ? errors[result.status] : NULL;
+            ready = status_response(sequence, s_test.index, error ? error : "executionFailed", response);
         }
-        /* 用表区分通信异常，不能把发送失败、超时或掉电写成芯片FAIL。 */
-        static const char *const errors[] = {
-            [RK_RESPONSE_TIMEOUT] = "timeout",
-            [RK_RESPONSE_TX_FAILED] = "txFailed",
-            [RK_RESPONSE_INVALID] = "invalidArgument",
-            [RK_RESPONSE_POWER_OFF] = "powerOff",
-        };
-        const char *error = (unsigned)result.status < sizeof(errors) / sizeof(errors[0])
-                            ? errors[result.status] : NULL;
-        return status_response(sequence, s_test.index, error ? error : "executionFailed", response);
+        if (ready != PC_DISPATCH_RESPONSE_READY) return 0;
+        /* 只承诺组包成功；TCP发送失败仍按断线规则处理，不跨连接重发旧结果。 */
+        release_delivery();
+        return ready;
     }
-    return 0;
 }
 
 void pc_test_service_disconnected(void)

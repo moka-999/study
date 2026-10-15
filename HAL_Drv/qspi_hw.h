@@ -25,6 +25,7 @@
 #define W25Q_CMD_BLOCK_ERASE32 0x52
 #define W25Q_CMD_BLOCK_ERASE64 0xD8
 #define W25Q_CMD_CHIP_ERASE    0xC7
+#define W25Q_CMD_READ_DATA_4B  0x13   /* 单线四字节地址读取，用于非对齐前缀 */
 #define W25Q_CMD_QUAD_READ     0xEB   /* 1-4-4: 指令1线 IO0 */
 #define W25Q_CMD_QUAD_WRITE    0x32   /* 1-1-4: 指令1线 + 地址1线 + 数据4线 */
 
@@ -138,12 +139,14 @@ int qspi_erase_chip(void);
 int qspi_write_page(uint32_t addr, const uint8_t *data, uint16_t len);
 
 /**
- * @brief 四线读取W25Q256指定范围到调用方缓冲。
+ * @brief 读取W25Q256任意字节范围；非对齐前缀走单线，其余走四线。
  * @param[in] addr Flash字节地址，整个范围不得超过32MiB。
  * @param[out] buf 至少len字节；len为0时允许NULL。
  * @param[in] len 字节数，0时直接成功，不检查地址。
  * @return 0成功；-1参数或HAL错误，失败时输出内容不保证完整。
  * @note 须先完成QE/四字节模式初始化；同步独占访问，返回后缓冲可复用。
+ *       Quad读起始地址须4字节对齐；最多先用13h读取1..3字节，不扩大请求范围。
+ *       QSPI时钟须不高于13h读取的50MHz上限；当前板级配置为40MHz。
  */
 int qspi_read_data(uint32_t addr, uint8_t *buf, uint32_t len);
 
