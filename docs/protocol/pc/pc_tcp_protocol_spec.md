@@ -188,6 +188,19 @@ PC→MCU，每次提交一个FUNC算法。
   "algorithmType": "functional",
   "algorithmName": "mats",
   "algorithmIndex": 1,
+  "TimingParameters": {
+    "Freq": "",
+    "CASLatency": "",
+    "tRC": "",
+    "tRCD": "",
+    "tRFC": "",
+    "tRP": "",
+    "tRAS": "",
+    "tRRD": "",
+    "BurstLength": "",
+    "ODT": "",
+    "tREFI": ""
+  },
   "power": {
     "memoryType": "LPDDR4X",
     "vdd1": "1800",
@@ -210,8 +223,25 @@ PC→MCU，每次提交一个FUNC算法。
 | reboot | boolean | true要求冷重启；false不能绕过配置变化所需重启 |
 | bootMode | string/null | 启动介质，取值见4.21；外部已启动模式为null |
 | timeoutMs | integer 可选 | 省略或0不限算法等待；非零1..86400000ms；不是启动等待时限 |
+| TimingParameters | object/null 可选 | 时序参数，可只提供下表中的部分项；当前仅解析保存，不应用到RK |
 
-六个根字段必填，timeoutMs可省略；不接受未知字段。power对象含类型与三路电压，不以缺省字段继承上次值。
+原六个根字段必填，TimingParameters和timeoutMs可省略；不接受未知字段。power对象含类型与三路电压，不以缺省字段继承上次值。
+
+TimingParameters子字段均为可选字符串；可传空对象或空字符串。未填项不补默认值、不继承上一请求。单位、有效取值及RK下发方式待双方确认；accepted/completed不表示时序已生效。
+
+| 子字段 | 类型 | 含义 |
+|---|---|---|
+| Freq | string | 目标频率 |
+| CASLatency | string | CAS读写延迟，读写区分方式待确认 |
+| tRC | string | 同一bank相邻Activate的最小间隔 |
+| tRCD | string | Activate到Read/Write的最小间隔 |
+| tRFC | string | 刷新恢复时间 |
+| tRP | string | Precharge到Activate的最小间隔 |
+| tRAS | string | Activate到Precharge的最小间隔 |
+| tRRD | string | 不同bank的Activate最小间隔 |
+| BurstLength | string | 突发长度，取值待RK确认 |
+| ODT | string | 终端匹配配置，保留 |
+| tREFI | string | 刷新间隔 |
 
 #### 电压与重启规则
 
@@ -384,6 +414,7 @@ PC→MCU。启动整次SLT，MCU准备电源和EDK启动介质；具体算法及
   "algorithmType": "slt",
   "algorithmName": "memtest86",
   "algorithmIndex": null,
+  "TimingParameters": {},
   "power": {
     "memoryType": "LPDDR4X",
     "vdd1": "1800",
@@ -403,8 +434,9 @@ PC→MCU。启动整次SLT，MCU准备电源和EDK启动介质；具体算法及
 | power | object | 沿用4.7的memoryType及三轨字符串mV，非null |
 | reboot | boolean | 沿用4.7重启规则，false不能绕过配置变化所需重启 |
 | bootMode | string | 实际EDK启动介质；取值见4.21，非空且非null |
+| TimingParameters | object 可选 | 子字段同4.7；可只填部分项或空对象，提供时不能为null；当前仅解析保存 |
 
-- 六个根字段必填；不带timeoutMs。电压范围、步进和安全责任沿用4.7。
+- 原六个根字段必填，TimingParameters可省略；不带timeoutMs。电压范围、步进和安全责任沿用4.7。
 - 应答：0006 accepted → completed，requestCommandId=266、algorithmIndex=null；completed仅表示电源/Boot准备完成，不是SLT测试完成。
 - MCU不等待RK心跳、不下发串口算法，也不检查EDK或报告服务是否启动。
 - PC确认实际启动、取得SLT报告后发送010B；示例emmc须与实际EDK部署位置一致。

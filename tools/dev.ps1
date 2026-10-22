@@ -1,8 +1,13 @@
 ﻿param(
-    [ValidateSet('build', 'rebuild', 'check')]
+    [ValidateSet('build', 'rebuild', 'check', 'ota-build', 'ota-swd')]
     [string]$Task = 'build',
     [ValidateSet('MCU', 'RK')]
-    [string]$LogSource
+    [string]$LogSource,
+    [string]$Version = '',
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Release',
+    [string]$Serial = '',
+    [ValidateSet('NO', 'YES')][string]$ConfirmIdle = 'NO'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -68,6 +73,35 @@ if ($Task -eq 'check') {
 
 $ninja = Find-BundledExe 'ninja' 'ninja.exe' 'CMAKE_MAKE_PROGRAM'
 $cmake = Find-BundledExe 'cmake' 'cmake.exe' 'CMAKE_COMMAND'
+
+if ($Task -eq 'ota-swd') {
+    # 固定B1板型，不接受V2模拟；快捷键传YES即代表操作者已确认停测及允许复位。
+    if ($ConfirmIdle -ne 'YES') { throw '请先停止RK/温控并断开PC，确认后加-ConfirmIdle YES。' }
+    if ($LogSource) { throw 'ota-swd日志默认来源沿用B1工程配置，不接收-LogSource。' }
+    if (-not $Version) { $Version = 'auto' }
+    $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe' 'CMAKE_C_COMPILER'
+    $server = Find-BundledExe 'stlink-gdbserver' 'ST-LINK_gdbserver.exe' 'OTA_STLINK_SERVER'
+    $programmer = Find-BundledExe 'programmer' 'STM32_Programmer_CLI.exe' 'OTA_PROGRAMMER'
+    $shared = Join-Path (Split-Path -Parent $repo) 'test\tools\ota_dev.py'
+    if (-not (Test-Path -LiteralPath $shared)) { throw 'B1开发侧一键下载需要同级test工程。' }
+    $arguments = @('-B', '-X', 'utf8', $shared, 'swd', '--board', 'b1', '--app-root', $repo,
+        '--version', $Version, '--configuration', $Configuration, '--confirm-idle',
+        '--cmake', $cmake, '--ninja', $ninja, '--compiler', $compiler,
+        '--server', $server, '--programmer', $programmer)
+    if ($Serial) { $arguments += @('--serial', $Serial) }
+    & $python @arguments
+    exit $LASTEXITCODE
+}
+
+if ($Task -eq 'ota-build') {
+    # 只构建B1发布包及独立网络工具，不烧录；实际升级须操作者另行执行。
+    if (-not $Version) { throw 'ota-build需要-Version，例如0.1.37；须高于板上版本。' }
+    if ($LogSource) { throw 'ota-build不接收-LogSource；日志默认来源沿用B1工程配置。' }
+    $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe' 'CMAKE_C_COMPILER'
+    & $python -B -X utf8 (Join-Path $repo 'tools\ota_build.py') --version $Version `
+        --configuration $Configuration --cmake $cmake --ninja $ninja --compiler $compiler
+    exit $LASTEXITCODE
+}
 
 # 每次构建先轻量reconfigure，刷新UTC构建时间和76字节版本载荷。
 # 这不是clean；Ninja仍只重编译受影响源码，工具链与已有缓存保持一致。

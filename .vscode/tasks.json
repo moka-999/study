@@ -1,0 +1,69 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "⚡ B1 一键编译烧录（ST-Link，会复位）",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                "${workspaceFolder}/tools/dev.ps1", "ota-swd",
+                "-Configuration", "Debug", "-ConfirmIdle", "YES"
+            ],
+            "group": { "kind": "build", "isDefault": true },
+            "runOptions": { "instanceLimit": 1 },
+            "problemMatcher": [],
+            "detail": "按下即确认RK/温控空闲、电源OFF且PC已断开：自动选唯一ST-Link、板上版本+1并下载；仅B1真实驱动，不需网线；MCU复位会关闭RK/DDR。空板另用first_flash。"
+        },
+        {
+            "label": "🆕 B1 空白板 Boot+App 首烧（ST-Link）",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                "${workspaceFolder}/tools/first_flash.ps1", "-Action", "deploy",
+                "-Version", "${input:firstFlashVersion}", "-Configuration", "Debug",
+                "-Serial", "${input:firstFlashSerial}",
+                "-ConfirmIdle", "${input:firstFlashConfirm}",
+                "-ConfirmBlank", "${input:firstFlashConfirm}"
+            ],
+            "group": "build",
+            "runOptions": { "instanceLimit": 1 },
+            "problemMatcher": [],
+            "detail": "仅空板：固定B1真实驱动/UART4，编译完整B/A1、备份检查全空、初始化W25恢复包和日志、回读及健康确认；无模拟/假FAIL，不自动擦除旧板。MCU复位会关闭RK/DDR。"
+        },
+        {
+            "label": "🔨 B1 OTA 编译打包（不下载）",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                "${workspaceFolder}/tools/dev.ps1", "ota-build", "-Version", "${input:otaVersion}"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "仅生成B1 .ota及独立网络工具ZIP，不接触ST-Link"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "firstFlashVersion", "type": "promptString",
+            "description": "空白板首版固件版本（三段数字，不从空板自动推算）",
+            "default": "0.1.37"
+        },
+        {
+            "id": "firstFlashSerial", "type": "promptString",
+            "description": "本次连接B1的ST-Link序列号（24位十六进制，确认板型后填写）"
+        },
+        {
+            "id": "firstFlashConfirm", "type": "pickString",
+            "description": "确认空板、RK/温控空闲、PC已断开，允许烧写Boot+App并复位？NO取消",
+            "options": ["NO", "YES"], "default": "NO"
+        },
+        {
+            "id": "otaVersion", "type": "promptString",
+            "description": "待发布版本，必须高于板上版本；一键SWD无须填写",
+            "default": "0.1.37"
+        }
+    ]
+}

@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet('build', 'flash', 'verify')][string]$Action = 'build',
+    [ValidateSet('build', 'deploy', 'flash', 'verify')][string]$Action = 'build',
     [string]$Version = '',
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
     [ValidateSet(4)][int]$RkUart = 4,

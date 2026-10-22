@@ -17,6 +17,8 @@
 #include "flash_bsp.h"
 #include "log_console.h"
 #include "board_identity.h"
+#include "b2_service.h"
+#include "b2_task.h"
 #include <stdio.h>
 
 /* 链接脚本为固定LwIP堆预留32KiB，其中需包含分配器元数据和对齐空间。 */
@@ -78,6 +80,7 @@ void MX_FREERTOS_Init(void)
     pc_json_configure_allocator(pvPortMalloc, vPortFree);
     if (flash_transaction_prepare() != 0) Error_Handler();
     ota_app_prepare();
+    if (!b2_service_prepare()) Error_Handler();
 
     rkRequestQueue = xQueueCreate(8, sizeof(rk_request_t));
     rkResponseQueue = xQueueCreate(8, sizeof(rk_response_t));
@@ -96,12 +99,14 @@ void MX_FREERTOS_Init(void)
     if (osThreadNew(StartDefaultTask, NULL, &s_default_task_attributes) == NULL) {
         Error_Handler();
     }
-    /* 栈单位为StackType_t，以下分别16/32/2KiB；RK任务统一收发命令和心跳。 */
+    /* 栈单位为StackType_t，TCP/RK/监测分别16/32/2KiB；RK只处理自己的串口链路。 */
     if (xTaskCreate(StartTcpServerTask, "tcp", 4096, NULL, 5, NULL) != pdPASS ||
         xTaskCreate(StartRkTask, "rk", 8192, NULL, 3, NULL) != pdPASS ||
         xTaskCreate(StartMonitorTask, "monitor", 512, NULL, 2, NULL) != pdPASS) {
         Error_Handler();
     }
+    /* B2独立SPI任务使用4KiB栈，不进入RK的队列、流水号或结果处理。 */
+    if (xTaskCreate(StartB2Task, "b2", 1024, NULL, 4, NULL) != pdPASS) Error_Handler();
 #if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
     if (xTaskCreate(StartOtaWatchdogTask, "otaWatchdog", 1024, NULL, 25, NULL) != pdPASS)
         Error_Handler();

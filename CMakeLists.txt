@@ -111,13 +111,20 @@ add_executable(b1
     App/protocol/pc/pc_test_message.c
     App/protocol/pc/pc_test_service.c
     App/protocol/pc/pc_power_service.c
-    App/protocol/rk/crc.c
+    App/protocol/common/crc.c
     App/protocol/rk/frame.c
     App/protocol/rk/state_machine.c
     App/tasks/pc/tcp_task.c
     App/tasks/rk/rk_task.c
     App/tasks/rk/rk_link.c
     App/tasks/common/monitor_task.c
+    App/protocol/b2/b2_protocol.c
+    App/protocol/b2/b2_state_machine.c
+    App/tasks/b2/b2_service.c
+    App/tasks/b2/b2_task.c
+    HAL_Drv/b2_spi.c
+    HAL_Drv/b2_board.c
+    HAL_Drv/network_config.c
     BSP/AD7124/ad7124.c
     BSP/TPS62868/tps62868.c
     BSP/PAC1934/pac1934.c
@@ -161,6 +168,9 @@ target_include_directories(b1 PRIVATE
     App/tasks
     App/tasks/rk
     App/tasks/common
+    App/protocol/b2
+    App/protocol/common
+    App/tasks/b2
     Middlewares/Third_Party/cJSON
     LWIP/App
     LWIP/Target

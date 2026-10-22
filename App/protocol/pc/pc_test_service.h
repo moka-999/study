@@ -8,15 +8,22 @@
 /* 仅TCP任务调用，须先受理0106。外部已启动模式不设置电压/Boot；B1还要求真实电源ON。
  * 完整配置由正式电源编排准备，READY后才启动统计并投递算法；accepted表示
  * 请求受理，不保证算法已下发。缺少板级配置/RK适配器仍拒绝，不伪造确认。
- * start中的字符串只借用至返回；在途上下文保存静态算法目录及必要字段副本。
+ * start中的字符串/JSON只借用至返回；在途上下文保存静态算法目录及必要字段副本。
+ * 时序参数仅复制到RAM，尚不下发RK；accepted/completed不表示时序已经应用。
  */
 pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response);
 
 /** 0106只建立当前连接的整轮；已有整轮/测试/维护操作时拒绝。
- * 默认常温闪烁仅为显示初值，不是B2温度状态或可触碰确认；不操作实际加热。
+ * 使用B2已知模式显示；尚未知的镜像灭灯，不推断为常温；不操作实际加热。
  */
 pc_dispatch_result_t pc_test_round_begin(uint32_t sequence, pc_dispatch_response_t *response);
+
+/** 仅TCP上下文处理B2模式通知时调用：mask位0..2，modes为对应0常温/1高温。
+ * 有效整轮内更新被通知的灯；轮外只由B2服务保存缓存，保留0107最终灯。
+ * 1成功（含轮外无操作），0输入非法/灯驱动未就绪；不控温、不修改算法状态。
+ */
+int pc_test_round_update_modes(uint8_t mask, const uint8_t modes[3]);
 
 /** 0107在完整JSON校验之后调用；位0/1/2分别为两组LPDDR及eMCP的FAIL。
  * 原子更新三灯后关闭整轮；未入RK队列的FUNC不再投递，已入队的请求仍须等待
@@ -49,5 +56,13 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response);
 void pc_test_service_disconnected(void);
 /* 1=准备电源、执行中、结果待组包或超时后状态未知；0=无本服务在途请求。 */
 int pc_test_service_busy(void);
+
+/** 读取最近一次已受理FUNC/SLT的时序对象，只供TCP任务本地诊断。
+ * 返回只读借用指针：NULL=尚未保存或该请求未提供/null；{}与空字符串原样保留。
+ * 不包含硬件生效状态，不写W25、不生成新响应字段、不合并上一请求的参数。
+ * 下一次成功受理开始请求会替换并释放旧对象；拒绝、结果结束或断线不覆盖副本。
+ * 调用者不得修改/释放或跨下一次受理保留该指针，也不得从其他任务无锁读取。
+ */
+const cJSON *pc_test_service_timing_parameters(void);
 
 #endif

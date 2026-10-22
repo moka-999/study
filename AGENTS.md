@@ -13,7 +13,7 @@
 - RK字节间超时与V2统一为100ms；仅丢弃超时半帧，不改变算法等待或Seq窗口。B1构建拒绝ENABLE_V2_MATS_FAIL_TEST、电源模拟及旧网关联调开关。
 - 通用同步及离线复跑入口见`../test/doc/v2_b1_sync_20261010.md`；板型差异不靠整目录覆盖消除。
 - B1结果灯不作RK通信指示，PC温控边界不变。代码/离线/构建与B1实板验收分开记录，见`docs/rk_protocol_migration_20260923.md`。
-- 整轮先0106 `{}`；轮内FUNC用0103/0105，SLT用010A/010B，最后0107提交errorchip数组。镜像0/1/2分别映射LPDDR0/LPDDR1/eMCP，其他编号整包拒绝；070x已删除，合法旧请求回notSupported。0108预留、0109只允许MCU方向。0107不取消RK或提前释放占用，只阻止尚未入队的FUNC及废弃未交付结果。SLT只匹配slt/memtest86，index=null，按参数准备电源/Boot，不等RK心跳或检查EDK；原连接010B确认实际结束，断线后不自动认领旧SLT。B2灯态/加热状态尚未有报文合同，默认常温闪只作显示初值。
+- 整轮先0106 `{}`；轮内FUNC用0103/0105，SLT用010A/010B，最后0107提交errorchip数组。镜像0/1/2分别映射LPDDR0/LPDDR1/eMCP，其他编号整包拒绝；070x已删除，合法旧请求回notSupported。0108预留、0109只允许MCU方向。0107不取消RK或提前释放占用，只阻止尚未入队的FUNC及废弃未交付结果。SLT只匹配slt/memtest86，index=null，按参数准备电源/Boot，不等RK心跳或检查EDK；原连接010B确认实际结束，断线后不自动认领旧SLT。0106按B2已知镜像模式显示常温/高温闪，未知灭；轮内局部模式更新显示，0107后仅缓存，不覆盖最终PASS/FAIL。
 
 ## 20260920-2134原理图适配边界
 
@@ -26,7 +26,11 @@
 
 ## OTA增量约束
 
-- 空白板首部署用`tools/first_flash.ps1 -Action build -Version <版本> -RkUart 4`，UART4已固定为协议口，不再允许2，输出固定B1包；共用独立Boot首烧工具，先备份/全空检查，B+A1与恢复包回读通过后才提交日志，无force、不覆盖FRU。B1禁止使用V2包/模拟配置，新首烧编排仍待实板验收；见`../bootloader/README.md`。
+- 已首烧完整OTA后，VS Code Ctrl+Shift+B默认运行B1一键ST-Link下载：自动唯一探针、W25已确认版本patch+1、Debug双槽构建及完整B安装，不用网线或手选.ota。按下即确认RK/温控空闲、电源OFF且PC已断开；B1复位会关闭RK/DDR。CLI为`tools/dev.ps1 ota-swd -ConfirmIdle YES`，默认Release，可指定Debug；可选-Version/-Serial，禁止V2模拟与假FAIL。开发侧依赖同级test/bootloader，不能用于空白板；当前仅脚本/构建验证，真板待验收。见`../test/doc/ota_daily_download.md`。
+
+- 日常网络升级入口为`tools/b1_ota.py`/`tools/start_b1_ota.cmd`，只接受b1-h743包。`tools/dev.ps1 ota-build -Version <新版本> -Configuration Release`只构建及输出独立工具ZIP，不访问设备；复用同级test的地址修正验证/公共客户端及bootloader打包器。交付ZIP运行只需Python 3.10+，不需源码/编译器。升级要求人工停测试/温控、PC断开、健康及OFF，不自动关电/清busy/复位；提交不确定时只读查询，无跨连接续传。见`../test/doc/ota_standalone_tools_20261015.md`。
+
+- 空白板首部署选择VS Code非默认“🆕 B1 空白板 Boot+App 首烧”，对应`tools/first_flash.ps1 -Action deploy -Version <版本> -Serial <24位序列号> -ConfirmIdle YES -ConfirmBlank YES`；只生成交付包用`-Action build`。UART4固定，拒绝V2模拟/假FAIL。先确认、构建本次精确包，再备份/全空检查，B+A1与恢复包回读通过后才提交日志；无force、不覆盖FRU。J5为1=GND、2=SWCLK、3=SWDIO、4=3V3_MCU参考，不带NRST；实际1.25mm/DNP装配和首烧仍待板验收。见`../bootloader/README.md`，不能将日常Ctrl+Shift+B用于空白板。
 
 - 普通构建保持OTA关闭；`ENABLE_OTA_BOOT=ON`必须同时启用槽限/修正表构建，A1/A2共同上限896KiB，向量使用`g_pfnVectors`符号随镜像修正。
 - 完整B在独立bootloader分支用`BOOT_BOARD=b1`生成，板型固定b1-h743；复位在RAM初始化前关PC6/PC7/PG11。禁止使用V2的B/包或普通最小跳转B覆盖已部署OTA的板卡。
@@ -49,11 +53,8 @@
   watchdog, software or debugger) must shut down RK/DDR. `boot/boot.s` therefore
   drives PG11, PC6 and PC7 push-pull low before App validation; an invalid App
   remains powered off, and PC must explicitly run the normal power-on sequence.
-- SPI2 is the B1 slave on B2's shared master bus: mode 0, 8-bit MSB and hardware
-  NSS low. B2 selects eight B1 slots with independent CS GPIOs and initially
-  clocks at 1 MHz. This link is keepalive-only: never add temperature-control
-  forwarding or other business commands. Keepalive payload, cadence and timeout
-  remain deferred to the B2 joint review. SPI4 is the AD7124 mode-3 master.
+- SPI2为B1从机，PB12～15使用硬件NSS低有效、Mode0、8位MSB；B2共享主机总线及8个独立CS，初始1MHz。0004统一状态交换包含可选testerId/镜像显示模式，周期约1秒、3秒离线诊断；不控制或转发加热。SPI4仍是AD7124 Mode3主机。
+- `App/tasks/b2/`独立任务及业务队列，`App/protocol/b2/`独立解析/FSM；不得混入RK任务、队列或Seq。仅共用`App/protocol/common/crc.[ch]`纯算法。TCP上下文应用IP/整轮灯态，lwIP线程真正设置地址；SPI DMA1 Stream3/4、`.b2_dma`位于AXI SRAM，不使用UART的Stream0～2。
 - B1 has no temperature-control role. PC communicates directly with the B2 MCU;
   the B2 firmware owns heating and all other backplane-level control.
 - PH4/PH5 are the schematic's logical I2C4 bus and must remain open-drain GPIOs
@@ -163,8 +164,6 @@
 - B1 result LEDs are not TCP/RK debug indicators; never borrow PG0-PG6 for V2
   connection/heartbeat toggles. Exclude the old TLV GPIO reboot dispatcher.
 - See docs/integration_20260831.md for migrated scope and remaining acceptance.
-- PB3/PB4/PB5按20260920-2134版原理图及已确认贴装表配置为GPIO输入、GPIO_NOPULL；B1各有4.7kΩ上拉，B2贴0Ω接地为0、不贴为1，不允许MCU输出高。`board_slot_code()`一次读取GPIOB，返回PB5:PB4:PB3的原始0..7码，PB3最低位，111也有效；独立的SLOT_ONLINE#才是B2在位检测。仅启动日志和内部读取使用，不据此改PC siteId、FRU、IP或SPI协议。实际八槽贴装及接插件对应仍需真板验收。
-  正式B1 IP已于2026-09-22确认为由B2 MCU告知，不以本地固定地址或FRU配置IP作为正式来源。
-  当前测试继续使用本地配置192.168.1.201；本次仅记录，保留网络代码和FRU布局。
-  B2侧分配方式、通知链路（是否SPI）/协议/时机、异常处理及是否持久化仍待双方确定，不擅自新增SPI命令。
+- PB3/PB4/PB5为GPIO输入、GPIO_NOPULL；B1各有4.7kΩ上拉，B2贴0Ω接地为0、不贴为1，不允许MCU输出高。`board_slot_code()`返回PB5:PB4:PB3的0..7码，加1为siteId；111有效，独立的SLOT_ONLINE#才是B2在位检测。每次0004重新读取槽位，实际八槽贴装/片选仍待验收。
+- B2通过0004通知testerId=1～21，成功配置后IP为`192.168.210.(10*testerId+siteId)`，PC结果siteId使用同一槽位字符串。不同编号/槽位动态切换，但已有PC连接或测试/电源/OTA在途则整包busy；同IP不重配。掩码255.255.255.0、网关0.0.0.0，RAM保存、不写FRU；首次配置前保留本地192.168.1.201，正式多板上线仍须处理默认IP冲突隔离。见`../test/doc/b2_spi_integration_20261020.md`；本轮仅离线/构建通过，未实板验收。
 - Build with `.\tools\dev.ps1 build`; run `.\tools\dev.ps1 check` before commit.

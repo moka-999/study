@@ -262,7 +262,15 @@ SECTIONS
     . = ALIGN(8);
   } >RAM
 
-  /* UART DMA可访问AXI，不能放DTCM；与128KiB RTOS堆顺序分配且不重叠。
+  /* B2 SPI DMA缓冲放AXI SRAM，由链路启动函数显式初始化。 */
+  .b2_dma (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.b2_dma)
+    . = ALIGN(32);
+  } >RAM
+
+  /* UART DMA可访问AXI，不能放DTCM；与RTOS堆/B2缓冲顺序分配。
    * 不紧贴D2 ETH接收池放置，以免覆盖固定在0x30005000的LwIP堆。 */
   .uart_dma (NOLOAD) :
   {

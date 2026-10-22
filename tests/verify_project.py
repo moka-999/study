@@ -476,7 +476,7 @@ def main() -> int:
         "App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_state_machine.c",
         "App/protocol/pc/pc_tester_info.c", "App/protocol/pc/pc_test_service.c",
         "App/protocol/rk/frame.c",
-        "App/protocol/rk/state_machine.c", "App/protocol/rk/crc.c",
+        "App/protocol/rk/state_machine.c", "App/protocol/common/crc.c",
     )
     require(all(path in cmake for path in task_paths), "正式任务/协议源码未全部加入B1构建")
     pc_service = (ROOT / "App/protocol/pc/pc_test_service.c").read_text(encoding="utf-8")
