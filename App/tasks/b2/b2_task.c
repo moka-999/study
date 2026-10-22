@@ -19,9 +19,13 @@ static size_t s_response_length;
 
 static void handle_packet(void)
 {
+
     b2_request_t request;
+    //重置状态机
     b2_sm_begin(&s_parser);
+    //将收到的每个字节喂入状态机
     for (size_t i = 0U; i < s_packet.length; ++i) b2_sm_feed(&s_parser, s_packet.data[i]);
+    //状态机结束后尝试解码请求，如果失败则增加诊断计数器并返回
     if (!b2_sm_end(&s_parser, &request)) {
         taskENTER_CRITICAL(); ++s_diagnostics.invalid_frames; taskEXIT_CRITICAL();
         return;
@@ -31,10 +35,12 @@ static void handle_packet(void)
     s_diagnostics.last_valid_ms = HAL_GetTick();
     s_diagnostics.online = 1U;
     taskEXIT_CRITICAL();
+    //如果收到的请求与上一请求相同，则直接返回上一应答；否则调用业务处理函数
     if (s_previous_length && request.sequence == s_previous_sequence) {
         if (s_previous_length == s_packet.length &&
             memcmp(s_previous, s_packet.data, s_packet.length) == 0) {
             taskENTER_CRITICAL(); ++s_diagnostics.duplicate_requests; taskEXIT_CRITICAL();
+            //同一请求的重复帧直接返回上一应答，避免副作用重复执行
             (void)b2_spi_publish(s_packet.token, s_response, s_response_length);
         } else {
             /* 同Seq换内容不是重试：拒绝且保留上一份缓存，不重新执行副作用。 */
@@ -44,6 +50,7 @@ static void handle_packet(void)
         }
         return;
     }
+    //新请求，调用业务处理函数
     b2_service_reply_t reply;
     b2_service_exchange(&request, &reply);
     s_response_length = b2_response_build(&request, reply.status, reply.tester_id,
@@ -51,6 +58,7 @@ static void handle_packet(void)
     memcpy(s_previous, s_packet.data, s_packet.length);
     s_previous_length = s_packet.length;
     s_previous_sequence = request.sequence;
+    //将应答发布到SPI链路，等待主机读取
     (void)b2_spi_publish(s_packet.token, s_response, s_response_length);
 }
 
@@ -61,6 +69,7 @@ void StartB2Task(void *argument)
     for (;;) {
         if (b2_spi_receive(&s_packet)) handle_packet();
         taskENTER_CRITICAL();
+        // 3秒没有结构完整、命令可识别的帧则离线
         if ((uint32_t)(HAL_GetTick() - s_diagnostics.last_valid_ms) >= 3000U)
             s_diagnostics.online = 0U;
         taskEXIT_CRITICAL();

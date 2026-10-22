@@ -11,10 +11,10 @@ typedef enum {
 } b2_rx_state_t;
 
 typedef struct {
-    b2_rx_state_t state;
-    size_t used;
-    size_t expected;
-    uint8_t frame[B2_MAX_FRAME];
+    b2_rx_state_t state;        //接收状态机状态
+    size_t used;                //已接收字节数
+    size_t expected;            //期望接收字节数
+    uint8_t frame[B2_MAX_FRAME];//接收缓冲区，包含头、数据、尾
 } b2_state_machine_t;
 
 /** 每次CS拉低开始一个全新事务，禁止把两次CS拼成一帧。 */
