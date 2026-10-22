@@ -23,10 +23,10 @@ typedef enum {
 
 typedef struct {
     uint64_t sequence;             /* 请求流水号；应答逐位回显，不接入RK/PC流水号。 */
-    uint16_t command;
-    b2_status_t status;             /* 解析后的业务校验结果；非OK不得执行任何字段。 */
-    uint8_t has_tester_id;
-    uint8_t tester_id;              /* 请求1..21；没有该字段时保持当前配置。 */
+    uint16_t command;               // 请求命令；目前仅支持0004。
+    b2_status_t status;             /* 请求里的字段是否合法、命令是否支持。 */
+    uint8_t has_tester_id;          /* 0=不携带测试机号，保持当前配置；1=携带测试机号。 */
+    uint8_t tester_id;              /* 本次携带的测试仪编号，1～21，没有该字段时保持当前配置。 */
     uint8_t thermal_mask;           /* 位0..2表示本次实际携带的镜像，未传的保持不变。 */
     uint8_t thermal_mode[B2_MIRROR_COUNT]; /* 0常温/1高温，只是模式，不是实测温度。 */
 } b2_request_t;
