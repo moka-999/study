@@ -133,13 +133,35 @@ pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type
     return PC_TEST_JSON_OK;
 }
 
+/* 时序字段全部可选，保留字符串原值；RK单位/编码尚未定义，不擅自转换为寄存器值。 */
+static pc_test_json_result_t parse_timing_parameters(const cJSON *timing, int slt)
+{
+    static const char *const fields[] = {
+        "Freq", "CASLatency", "tRC", "tRCD", "tRFC", "tRP", "tRAS", "tRRD",
+        "BurstLength", "ODT", "tREFI"
+    };
+    if (!timing || (!slt && cJSON_IsNull(timing))) return PC_TEST_JSON_OK;
+    if (!cJSON_IsObject(timing)) return PC_TEST_JSON_ERROR_FIELD_TYPE;
+    uint32_t seen = 0U;
+    for (const cJSON *item = timing->child; item; item = item->next) {
+        size_t field;
+        for (field = 0U; field < sizeof(fields) / sizeof(fields[0]); ++field) {
+            if (item->string && strcmp(item->string, fields[field]) == 0) break;
+        }
+        if (field == sizeof(fields) / sizeof(fields[0]) || (seen & (1U << field)))
+            return PC_TEST_JSON_ERROR_FIELDS;
+        if (!cJSON_IsString(item) || !item->valuestring) return PC_TEST_JSON_ERROR_FIELD_TYPE;
+        seen |= 1U << field;
+    }
+    return PC_TEST_JSON_OK;
+}
+
 /* 两类开始请求共用电压/Boot规则；仅SLT允许null index且禁止外部已启动模式。 */
 static pc_test_json_result_t parse_start(const cJSON *root,
                                         pc_test_start_view_t *view, int slt)
 {
-    static const char *const fields[] = {
-        "algorithmType", "algorithmName", "algorithmIndex", "power", "reboot", "bootMode",
-        "timeoutMs"
+    const char *fields[8] = {
+        "algorithmType", "algorithmName", "algorithmIndex", "power", "reboot", "bootMode"
     };
     static const char *const algorithm_types[] = {"functional", "slt", "parametric"};
     pc_test_start_view_t candidate = {0};
@@ -147,8 +169,11 @@ static pc_test_json_result_t parse_start(const cJSON *root,
         return PC_TEST_JSON_ERROR_ARGUMENT;
     }
     const cJSON *timeout = cJSON_GetObjectItemCaseSensitive(root, "timeoutMs");
+    const cJSON *timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters");
     if (slt && timeout) return PC_TEST_JSON_ERROR_FIELDS;
-    const size_t field_count = sizeof(fields) / sizeof(fields[0]) - (timeout ? 0U : 1U);
+    size_t field_count = 6U;
+    if (timeout) fields[field_count++] = "timeoutMs";
+    if (timing) fields[field_count++] = "TimingParameters";
     if (!has_exact_fields(root, fields, field_count))
         return PC_TEST_JSON_ERROR_FIELDS;
 
@@ -158,7 +183,9 @@ static pc_test_json_result_t parse_start(const cJSON *root,
         return PC_TEST_JSON_ERROR_FIELD_TYPE;
     }
 
-    pc_test_json_result_t result = PC_TEST_JSON_OK;
+    pc_test_json_result_t result = parse_timing_parameters(timing, slt);
+    if (result != PC_TEST_JSON_OK) return result;
+    candidate.timing_parameters = cJSON_IsObject(timing) ? timing : NULL;
     if (slt) {
         if (!cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(root, "algorithmIndex")))
             return PC_TEST_JSON_ERROR_FIELD_TYPE;

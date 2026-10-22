@@ -268,7 +268,15 @@ SECTIONS
     . = ALIGN(32);
   } >RAM_D2
 
-  /* USART1 DMA 接收缓冲 —— 放 RAM_D2 (DMA 可访问, DTCM 够不着) */
+  /* B2 SPI双向DMA缓冲独占AXI SRAM；NOLOAD由链路启动函数初始化。 */
+  .b2_dma (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.b2_dma)
+    . = ALIGN(32);
+  } >RAM
+
+  /* USART1 DMA接收缓冲放RAM_D2，DTCM不可被DMA访问。 */
   .uart_dma (NOLOAD) :
   {
     . = ALIGN(32);

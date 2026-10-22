@@ -5,10 +5,13 @@
 运行：python -B -X utf8 tests/test_first_flash.py。
 """
 from argparse import Namespace
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
+import io
 import json
 from pathlib import Path
 import struct
+import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -94,6 +97,16 @@ def check_validation():
                 manifest["power_simulation"] = True
                 save_manifest(directory, manifest)
                 rejected(lambda: first.validate_bundle(directory, board))
+            # 清单中的新开关保持向后兼容；非布尔、B1或非模拟假FAIL均拒绝。
+            manifest["power_simulation"] = False
+            for mats in ("false", 1, True):
+                manifest["mats_fail_test"] = mats
+                save_manifest(directory, manifest)
+                rejected(lambda: first.validate_bundle(directory, board))
+            manifest["power_simulation"] = True
+            if board == "apollo-v2":
+                save_manifest(directory, manifest)
+                first.validate_bundle(directory, board)
     internal = b"\xff" * 0x200000
     nor = bytearray(b"\xff" * first.NOR_BYTES)
     nor[0x2000:0x2004] = b"FRU!"
@@ -106,6 +119,121 @@ def check_validation():
     rejected(lambda: first.require_blank(b"x" + internal[1:], bytes(nor)))
     rejected(lambda: first.require_blank(internal[:-1], bytes(nor)))
     print("PASS：双板型、包CRC/修正/初始记录、文件散列及空板保护；FRU不克隆")
+
+
+def check_deploy_entry():
+    """执行真实CLI分流，替换构建/设备边界：只消费本次产物，失败不得烧旧包。"""
+    tools = ["--compiler", "offline-gcc", "--cmake", "offline-cmake", "--ninja", "offline-ninja",
+             "--app-root", "offline-app", "--server", "offline-server", "--programmer", "offline-cli"]
+    consent = ["--serial", "0" * 24, "--confirm-idle", "--confirm-blank"]
+    for board in first.TARGETS:
+        argv = ["first_flash.py", "deploy", "--board", board, "--version", "0.1.37", *tools, *consent]
+        if board == "apollo-v2":
+            argv += ["--power-simulation", "--mats-fail-test"]
+        built = Path("exact-new-bundle")
+        events = []
+
+        def build(args):
+            assert args.board == board and args.version == "0.1.37"
+            assert args.power_simulation == (board == "apollo-v2")
+            assert args.mats_fail_test == (board == "apollo-v2")
+            events.append("build")
+            return built
+
+        def flash(args):
+            assert args.bundle == built and events == ["build"]
+            assert args.board == board and args.confirm_idle and args.confirm_blank
+            events.append("flash")
+
+        with patch.object(sys, "argv", argv), patch.object(first, "build_bundle", build), \
+                patch.object(first, "flash_bundle", flash):
+            first.main()
+        assert events == ["build", "flash"]
+        with patch.object(sys, "argv", argv), patch.object(first, "build_bundle", side_effect=RuntimeError("构建失败")), \
+                patch.object(first, "flash_bundle") as flash_mock:
+            rejected(first.main)
+            flash_mock.assert_not_called()
+
+        # 不确认/无序列号/无工具时，在耗时构建前就停止，更不能连接探针。
+        for missing in ("--confirm-idle", "--confirm-blank", "--serial", "--server"):
+            bad = argv.copy()
+            index = bad.index(missing)
+            del bad[index:index + (1 if missing.startswith("--confirm") else 2)]
+            with patch.object(sys, "argv", bad), patch.object(first, "build_bundle") as build_mock, \
+                    patch.object(first, "flash_bundle") as flash_mock, redirect_stderr(io.StringIO()):
+                try:
+                    first.main()
+                except SystemExit as error:
+                    assert error.code == 2
+                else:
+                    raise AssertionError("首烧未确认/工具缺失却未拒绝")
+                build_mock.assert_not_called()
+                flash_mock.assert_not_called()
+
+    for extra in (["--power-simulation"], ["--mats-fail-test"], ["--rk-uart", "2"]):
+        argv = ["first_flash.py", "deploy", "--board", "b1", "--version", "0.1.37", *tools, *consent, *extra]
+        with patch.object(sys, "argv", argv), patch.object(first, "build_bundle") as build_mock, \
+                patch.object(first, "flash_bundle") as flash_mock, redirect_stderr(io.StringIO()):
+            try:
+                first.main()
+            except SystemExit as error:
+                assert error.code == 2
+            else:
+                raise AssertionError("B1非法配置未拒绝")
+            build_mock.assert_not_called()
+            flash_mock.assert_not_called()
+    print("PASS：双板deploy只烧本次构建、失败不烧、先确认再构建、B1配置隔离")
+
+
+def check_powershell_and_tasks():
+    """在PowerShell中捕获参数，不运行Python或烧录器；同时检查两个VS Code任务。"""
+    shell = shutil.which("powershell.exe")
+    if not shell:
+        print("SKIP：未安装Windows PowerShell，真实PS参数传递检查未执行")
+        return
+    script = r"""
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+function Capture-Python { ConvertTo-Json -InputObject @($args) -Compress; $global:LASTEXITCODE = 0 }
+& '__ENTRY__' -Action deploy -Board __BOARD__ -AppRoot 'offline-app' -Version 0.1.37 `
+    -Serial 000000000000000000000000 -ConfirmIdle YES -ConfirmBlank __CONFIRM__ `
+    -Python Capture-Python -Compiler offline-gcc -CMake offline-cmake -Ninja offline-ninja `
+    -Server offline-server -Programmer offline-cli __FLAGS__
+"""
+    for board, root in (("apollo-v2", BOOT.parent / "test"), ("b1", BOOT.parent / "b1")):
+        tasks = json.loads((root / ".vscode/tasks.json").read_text(encoding="utf-8-sig"))
+        entry = [task for task in tasks["tasks"] if "Boot+App" in task["label"]]
+        assert len(entry) == 1 and entry[0]["group"] == "build"
+        args = entry[0]["args"]
+        assert args[args.index("-Action") + 1] == "deploy"
+        assert args[args.index("-ConfirmIdle") + 1] == "${input:firstFlashConfirm}"
+        assert args[args.index("-ConfirmBlank") + 1] == "${input:firstFlashConfirm}"
+        assert args[args.index("-Serial") + 1] == "${input:firstFlashSerial}"
+        assert ("-PowerSimulation" in args) == (board == "apollo-v2")
+        assert ("-MatsFailTest" in args) == (board == "apollo-v2")
+        confirms = [item for item in tasks["inputs"] if item["id"] == "firstFlashConfirm"]
+        assert len(confirms) == 1 and confirms[0]["default"] == "NO"
+        defaults = [task for task in tasks["tasks"] if isinstance(task.get("group"), dict)
+                    and task["group"].get("isDefault")]
+        assert len(defaults) == 1 and "ota-swd" in defaults[0]["args"]
+        for confirm in ("NO", "YES"):
+            command = (script.replace("__ENTRY__", str(BOOT / "tools/flash.ps1").replace("'", "''"))
+                       .replace("__BOARD__", board).replace("__CONFIRM__", confirm)
+                       .replace("__FLAGS__", "-PowerSimulation -MatsFailTest" if board == "apollo-v2" else ""))
+            result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+                                    capture_output=True, text=True, encoding="utf-8", timeout=20)
+            if confirm == "NO":
+                assert result.returncode != 0 and not result.stdout.strip()
+                continue
+            assert result.returncode == 0, result.stderr
+            passed = json.loads(result.stdout)
+            assert passed[passed.index("--board") + 1] == board and "deploy" in passed
+            assert passed[passed.index("--version") + 1] == "0.1.37"
+            assert passed[passed.index("--serial") + 1] == "0" * 24
+            assert "--confirm-idle" in passed and "--confirm-blank" in passed
+            assert "--bundle" not in passed and passed.count("--compiler") == 1
+            assert ("--power-simulation" in passed) == (board == "apollo-v2")
+            assert ("--mats-fail-test" in passed) == (board == "apollo-v2")
+    print("PASS：双板真实PowerShell参数、取消保护、VS Code首烧独立且不改变日常默认任务")
 
 
 def check_flow(board_name, failure=None):
@@ -207,6 +335,8 @@ def check_flow(board_name, failure=None):
 
 if __name__ == "__main__":
     check_validation()
+    check_deploy_entry()
+    check_powershell_and_tasks()
     for target in first.TARGETS:
         for error in (None, "internal-backup", "backup", "not-blank", "install-internal", "bad-internal",
                       "write", "read", "fru-change", "record", "start-app", "extra-reset", "timeout"):

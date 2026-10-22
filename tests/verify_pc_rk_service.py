@@ -68,7 +68,8 @@ uint32_t HAL_GetTick(void);
     if args.power_simulation:
         sources += [root / path for path in ("App/tasks/test/v2_power_sim.c", "BSP/MCP4725/mcp4725.c")]
     includes = [build, *[root / path for path in (
-        "App/protocol/pc", "App/protocol/rk", "App/tasks/rk", "App/tasks/common", "App/tasks/test", "App/ota", "HAL_Drv",
+        "App/protocol/pc", "App/protocol/rk", "App/protocol/b2", "App/tasks/b2",
+        "App/tasks/rk", "App/tasks/common", "App/tasks/test", "App/ota", "HAL_Drv",
         "BSP/TPS62868", "BSP/PAC1934", "BSP/AD7124", "BSP/MCP4725", "BSP/Flash",
         "Middlewares/Third_Party/cJSON", "Core/Inc")]]
     boot = root.parent / "bootloader/tests"

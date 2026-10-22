@@ -50,10 +50,10 @@ uint32_t __get_IPSR(void);
 ''', encoding="utf-8")
     for name in ("main", "FreeRTOS", "task", "queue"):
         (build / f"{name}.h").write_text('#include "test_port.h"\n', encoding="utf-8")
-    includes = [build] + [root / p for p in ("HAL_Drv", "BSP/AD7124", "BSP/PAC1934", "App/protocol/rk")]
+    includes = [build] + [root / p for p in ("HAL_Drv", "BSP/AD7124", "BSP/PAC1934", "App/protocol/rk", "App/protocol/common")]
     sources = [Path(__file__).with_name("test_uart_idd.c")] + [root / p for p in (
         "HAL_Drv/uart_router.c", "HAL_Drv/idd_stats.c", "App/protocol/rk/frame.c",
-        "App/protocol/rk/crc.c", "App/protocol/rk/state_machine.c")] + [boot / "tests/qemu_start.s"]
+        "App/protocol/common/crc.c", "App/protocol/rk/state_machine.c")] + [boot / "tests/qemu_start.s"]
     if is_b1:
         sources.append(root / "Core/Src/log_console.c")
         includes.append(root / "Core/Inc")

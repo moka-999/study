@@ -7,6 +7,7 @@
 #include "ota_app.h"
 #include "rk_link.h"
 #include "pc_power_service.h"
+#include "b2_service.h"
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
 #include "v2_power_sim.h"
 #endif
@@ -56,6 +57,10 @@ static unsigned queue_calls, fru_calls, ota_calls;
 static result_led_state_t led_states[RESULT_LED_TARGET_COUNT];
 static unsigned led_writes;
 static int led_failure;
+static uint8_t b2_modes[3], b2_known = 7U, b2_site;
+uint8_t b2_service_thermal_modes(uint8_t modes[3])
+{ memcpy(modes, b2_modes, sizeof(b2_modes)); return b2_known; }
+uint8_t b2_service_site_id(void) { return b2_site; }
 static ota_download_state_t download_state;
 static char site_label[16] = "SITE-7";
 static rk_request_t queued_request;
@@ -202,7 +207,11 @@ int monitor_get_latest(monitor_snapshot_t *out)
 HAL_StatusTypeDef result_led_set(result_led_target_t target, result_led_state_t state)
 { (void)target; (void)state; fail("FAIL LED write\n"); }
 HAL_StatusTypeDef result_led_get_all(result_led_state_t states[3])
-{ (void)states; fail("FAIL LED query\n"); }
+{
+    if (led_failure) return HAL_ERROR;
+    memcpy(states, led_states, sizeof(led_states));
+    return HAL_OK;
+}
 HAL_StatusTypeDef result_led_set_all(const result_led_state_t states[RESULT_LED_TARGET_COUNT])
 {
     if (led_failure) return HAL_ERROR;
@@ -1204,7 +1213,97 @@ static void round_flow_check(void)
     round_begin(); pc_dispatch_disconnected();
     round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "invalidState");
     round_begin(); round_end();
+    /* B2模式独立于轮次保存：未知灭灯、局部更新，结束后不能覆盖PASS/FAIL。 */
+    b2_known = 1U; b2_modes[0] = 1U;
+    round_begin();
+    CHECK(led_states[0] == RESULT_LED_TEST_HOT && led_states[1] == RESULT_LED_OFF &&
+          led_states[2] == RESULT_LED_OFF);
+    const uint8_t update[] = {0U, 1U, 0U};
+    CHECK(pc_test_round_update_modes(2U, update));
+    CHECK(led_states[0] == RESULT_LED_TEST_HOT && led_states[1] == RESULT_LED_TEST_HOT &&
+          led_states[2] == RESULT_LED_OFF);
+    writes = led_writes;
+    CHECK(!pc_test_round_update_modes(8U, update) && led_writes == writes);
+    led_failure = 1;
+    CHECK(!pc_test_round_update_modes(4U, update) && led_writes == writes);
+    led_failure = 0;
+    round_end(); writes = led_writes;
+    CHECK(pc_test_round_update_modes(1U, update) && led_writes == writes);
+    CHECK(led_states[0] == RESULT_LED_PASS);
+    b2_known = 7U; memset(b2_modes, 0, sizeof(b2_modes));
     message("PASS: PC RK service round lifecycle, atomic list validation, late result discard, busy, removed 070x\n");
+    message("PASS: B2 partial thermal display, unknown OFF and final-result preservation\n");
+}
+
+static int timing_allocation_balance;
+static void *timing_allocator(size_t bytes)
+{
+    void *memory = delivery_allocator(bytes);
+    if (memory) ++timing_allocation_balance;
+    return memory;
+}
+static void timing_free(void *memory)
+{
+    if (memory) --timing_allocation_balance;
+    free(memory);
+}
+
+/* 输入JSON会在dispatch内释放；校验副本寿命、拒绝不覆盖以及逐分配点失败无副作用。 */
+static void timing_storage_check(void)
+{
+    pc_dispatch_response_t response;
+    cJSON *root = cJSON_Parse(START_JSON); CHECK(root);
+    cJSON *timing = cJSON_AddObjectToObject(root, "TimingParameters"); CHECK(timing);
+    CHECK(cJSON_AddStringToObject(timing, "Freq", "1600"));
+    CHECK(cJSON_AddStringToObject(timing, "tRCD", ""));
+    char *json = cJSON_PrintUnformatted(root); CHECK(json);
+    round_begin();
+    unsigned calls = queue_calls;
+    round_command(PC_COMMAND_START_TEST, json, "accepted", NULL);
+    CHECK(queue_calls == calls + 1U && queued_request.command_id == 17U);
+    const cJSON *saved = pc_test_service_timing_parameters();
+    CHECK(saved && saved != timing);
+    string_is(saved, "Freq", "1600"); string_is(saved, "tRCD", "");
+    CHECK(!cJSON_GetObjectItemCaseSensitive(saved, "tRC"));
+    round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "busy");
+    CHECK(pc_test_service_timing_parameters() == saved);
+    inject(RK_RESPONSE_COMPLETE, 0U);
+    CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
+    CHECK(pc_test_service_timing_parameters() == saved);
+
+    queue_full = 1;
+    round_command(PC_COMMAND_START_TEST, json, "failed", "busy");
+    queue_full = 0;
+    CHECK(pc_test_service_timing_parameters() == saved);
+    pc_test_start_view_t start;
+    CHECK(pc_test_start_parse(root, &start) == PC_TEST_JSON_OK);
+    calls = queue_calls;
+    unsigned failure;
+    for (failure = 0U; failure < 64U; ++failure) {
+        delivery_allocations = 0U; delivery_fail_at = failure;
+        timing_allocation_balance = 0;
+        pc_json_configure_allocator(timing_allocator, timing_free);
+        int result = pc_test_service_start(&start, 17U, &response);
+        pc_json_configure_allocator(NULL, NULL);
+        if (result == PC_DISPATCH_RESPONSE_READY) break;
+        CHECK(result == PC_DISPATCH_ERROR && !pc_test_service_busy());
+        CHECK(timing_allocation_balance == 0);
+        CHECK(queue_calls == calls && pc_test_service_timing_parameters() == saved);
+        string_is(saved, "Freq", "1600");
+    }
+    CHECK(failure < 64U && queue_calls == calls + 1U);
+    cJSON_free(json); cJSON_Delete(root);
+    string_is(pc_test_service_timing_parameters(), "Freq", "1600");
+    inject(RK_RESPONSE_COMPLETE, 0U);
+    CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
+
+    /* 新请求未填时序时不沿用上一次；保持RK原有无参数命令格式。 */
+    round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
+    CHECK(!pc_test_service_timing_parameters() && queued_request.command_id == 17U);
+    inject(RK_RESPONSE_COMPLETE, 0U);
+    CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
+    round_end();
+    message("PASS: timing RAM copy lifetime, partial values, rejection preservation, allocation faults, unchanged RK command\n");
 }
 
 #if defined(PC_POWER_SEQUENCE_TEST) || (defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION)
@@ -1265,7 +1364,28 @@ static void slt_flow_check(void)
     mutated_slt(PC_COMMAND_SLT_START, SLT_START, "reboot", cJSON_CreateString("true"), "invalidArgument");
     CHECK(!pc_test_service_busy());
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
-    round_command(PC_COMMAND_SLT_START, SLT_START, "accepted", NULL);
+    cJSON *timed = cJSON_Parse(SLT_START); CHECK(timed);
+    cJSON *timing = cJSON_AddObjectToObject(timed, "TimingParameters"); CHECK(timing);
+    CHECK(cJSON_AddStringToObject(timing, "CASLatency", "20"));
+    pc_test_start_view_t timed_start;
+    CHECK(pc_slt_start_parse(timed, &timed_start) == PC_TEST_JSON_OK);
+    unsigned previous_on = power_on_calls, previous_off = power_off_calls, previous_boot = boot_calls;
+    unsigned failure;
+    for (failure = 0U; failure < 64U; ++failure) {
+        delivery_allocations = 0U; delivery_fail_at = failure; timing_allocation_balance = 0;
+        pc_json_configure_allocator(timing_allocator, timing_free);
+        int result = pc_test_slt_start(&timed_start, 77U, &response);
+        pc_json_configure_allocator(NULL, NULL);
+        if (result == PC_DISPATCH_RESPONSE_READY) break;
+        CHECK(result == PC_DISPATCH_ERROR && timing_allocation_balance == 0);
+        CHECK(!pc_test_service_busy() && !pc_power_service_busy());
+        CHECK(power_on_calls == previous_on && power_off_calls == previous_off && boot_calls == previous_boot);
+        CHECK(!pc_test_service_timing_parameters());
+    }
+    CHECK(failure < 64U);
+    cJSON_Delete(timed);
+    string_is(pc_test_service_timing_parameters(), "CASLatency", "20");
+    CHECK(!cJSON_GetObjectItemCaseSensitive(pc_test_service_timing_parameters(), "Freq"));
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
     slt_complete(0);
 #if defined(PC_POWER_SEQUENCE_TEST)
@@ -1374,6 +1494,7 @@ void test_main(void)
 {
 #if defined(PC_TEST_ROUND_TEST)
     round_flow_check();
+    timing_storage_check();
 #if defined(PC_POWER_SEQUENCE_TEST) || (defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION)
     slt_flow_check();
 #endif
@@ -1512,6 +1633,10 @@ void test_main(void)
     start_expect(START_JSON, NULL);
     CHECK(queued_request.cookie != first_cookie);
     result_is(UINT64_C(0x123456789ABCDEF0), "0x123456789ABCDEF0", "SITE-7");
+    b2_site = 8U;
+    start_expect(START_JSON, NULL);
+    result_is(0U, NULL, "8");
+    b2_site = 0U;
     memset(site_label, 0, sizeof(site_label));
     start_expect(START_JSON, NULL);
     result_is(UINT64_MAX, "0xFFFFFFFFFFFFFFFF", "");

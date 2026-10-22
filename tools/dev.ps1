@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet('build', 'rebuild', 'style-test', 'protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build', 'ota-probe', 'ota-build', 'ota-swd', 'ota-net')]
+    [ValidateSet('build', 'rebuild', 'style-test', 'protocol-test', 'b2-protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build', 'ota-probe', 'ota-build', 'ota-swd', 'ota-net')]
     [string]$Task = 'build',
     [string]$Version = '',
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
@@ -77,6 +77,8 @@ if ($Task -in @('ota-build', 'ota-swd', 'ota-net')) {
         'ota-swd' { 'swd' }
         'ota-net' { 'network' }
     }
+    # 一键SWD先读取板上W25记录，再递增patch；构建/网络仍要求显式版本。
+    if ($action -eq 'swd' -and -not $Version) { $Version = 'auto' }
     $otaArgs = @(
         '-B', '-X', 'utf8', (Join-Path $repo 'tools\ota_dev.py'), $action,
         '--version', $Version, '--configuration', $Configuration,
@@ -91,8 +93,9 @@ if ($Task -in @('ota-build', 'ota-swd', 'ota-net')) {
         $otaArgs += '--confirm-idle'
     }
     if ($action -eq 'swd') {
-        $otaArgs += @('--serial', $Serial,
-            '--server', (Find-BundledExe 'stlink-gdbserver' 'ST-LINK_gdbserver.exe'),
+        # PowerShell 5调用原生程序会省略空字符串；未指定时不传--serial，由Python选唯一探针。
+        if ($Serial) { $otaArgs += @('--serial', $Serial) }
+        $otaArgs += @('--server', (Find-BundledExe 'stlink-gdbserver' 'ST-LINK_gdbserver.exe'),
             '--programmer', (Find-BundledExe 'programmer' 'STM32_Programmer_CLI.exe'))
     } elseif ($action -eq 'network') {
         $otaArgs += @('--host', $BoardIP, '--port', $Port)
@@ -125,18 +128,20 @@ if ($Task -eq 'style-test') {
     $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe'
     if (-not $compiler) { throw 'STM32Cube GCC not found.' }
     & $compiler -std=c11 -Wall -Wextra -Werror -fsyntax-only `
-        "-I$repo\HAL_Drv" "-I$repo\App\protocol\pc" `
+        "-I$repo\HAL_Drv" "-I$repo\App\protocol\pc" "-I$repo\App\protocol\b2" `
         (Join-Path $repo 'tests\c\portable_headers.c')
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Output 'Portable headers: GCC syntax check PASS (no HAL/RTOS/cJSON headers)'
     exit 0
 }
 
-if ($Task -eq 'protocol-test' -or $Task -eq 'pc-protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'lpddr-test' -or $Task -eq 'boot-test' -or
+if ($Task -eq 'protocol-test' -or $Task -eq 'b2-protocol-test' -or $Task -eq 'pc-protocol-test' -or $Task -eq 'pwr-test' -or $Task -eq 'lpddr-test' -or $Task -eq 'boot-test' -or
     $Task -eq 'led-test' -or $Task -eq 'flash-test') {
     $python = Find-Python
     $script = if ($Task -eq 'pc-protocol-test') {
         'tests\verify_pc_protocol.py'
+    } elseif ($Task -eq 'b2-protocol-test') {
+        'tests\verify_b2_protocol_c.py'
     } elseif ($Task -eq 'boot-test') {
         'tests\test_boot_mode.py'
     } elseif ($Task -eq 'lpddr-test') {

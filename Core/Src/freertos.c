@@ -43,6 +43,8 @@
 #include "result_led.h"
 #include "ota_app.h"
 #include "flash_bsp.h"
+#include "b2_service.h"
+#include "b2_task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -108,6 +110,7 @@ void MX_FREERTOS_Init(void) {
   pc_json_configure_allocator(pvPortMalloc, vPortFree);
   if (flash_transaction_prepare() != 0) Error_Handler();
   ota_app_prepare();
+  if (!b2_service_prepare()) Error_Handler();
 #if (!defined(ENABLE_FLASH_SELF_TEST) || !ENABLE_FLASH_SELF_TEST) && \
     (!defined(ENABLE_DRIVER_MOCK_TEST) || !ENABLE_DRIVER_MOCK_TEST) && \
     (!defined(ENABLE_AD7124_WAVE_TEST) || !ENABLE_AD7124_WAVE_TEST)
@@ -195,6 +198,8 @@ void MX_FREERTOS_Init(void) {
   monitorQueue = xQueueCreate(4, 128);
   /* RK任务栈保留32KiB，容纳RX块、状态机及命令/心跳组帧，统一推进收发。 */
   xTaskCreate(StartRkTask, "rk", 8192, NULL, 3, NULL);
+  /* B2 SPI收发独占一个4KiB任务；业务状态仍串行交给TCP任务，不另开保活任务。 */
+  if (xTaskCreate(StartB2Task, "b2", 1024, NULL, 4, NULL) != pdPASS) Error_Handler();
   rkRequestQueue = xQueueCreate(8, sizeof(rk_request_t));
   rkResponseQueue = xQueueCreate(8, sizeof(rk_response_t));
   if (rkRequestQueue == NULL || rkResponseQueue == NULL) Error_Handler();

@@ -62,6 +62,17 @@ def main() -> None:
     assert not (ROOT / "App/protocol/rk/dispatch.c").exists()
     passed += 1
 
+    # B2有自己的任务/事务/解析状态，不借用RK串口、Seq、队列或最终结果处理。
+    for base in ("App/tasks/b2", "App/protocol/b2"):
+        for path in (ROOT / base).glob("*.[ch]"):
+            source = code(str(path.relative_to(ROOT)))
+            assert not re.search(r'\brk\w*|rk/|tasks/rk', source), path
+    assert 'xTaskCreate(StartB2Task, "b2"' in code("Core/Src/freertos.c")
+    assert "StartB2Task" not in code("App/tasks/rk/rk_task.c")
+    assert (ROOT / "App/protocol/common/crc.c").exists()
+    assert not (ROOT / "App/protocol/rk/crc.c").exists()
+    passed += 1
+
     router = code("HAL_Drv/uart_router.c")
     hardware = code("HAL_Drv/uart_hw.c")
     assert router.index("uart_tx_mutex_init();") < router.index("uart_tx_isr_attach();")

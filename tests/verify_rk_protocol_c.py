@@ -51,10 +51,10 @@ int pwr_ctrl_get_state(void);
                '-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-ffunction-sections', '-fdata-sections']
     if root.name == 'b1' or args.b1_power_gate:
         command += ['-DB1_RK_UART=4']
-    command += ['-I' + str(p) for p in (build, root / 'App/protocol/rk', root / 'App/tasks/rk')]
+    command += ['-I' + str(p) for p in (build, root / 'App/protocol/rk', root / 'App/protocol/common', root / 'App/tasks/rk')]
     command += [str(Path(__file__).with_name('test_rk_protocol.c'))]
     command += [str(root / p) for p in ('App/protocol/rk/frame.c', 'App/protocol/rk/state_machine.c',
-                                       'App/protocol/rk/crc.c', 'App/tasks/rk/rk_link.c')]
+                                       'App/protocol/common/crc.c', 'App/tasks/rk/rk_link.c')]
     boot = root.parent / 'bootloader/tests'
     command += [str(boot / 'qemu_start.s'), '-nostartfiles', '--specs=nosys.specs',
                 '-T' + str(boot / 'qemu_test.ld'), '-Wl,--gc-sections', '-o', str(build / 'test.elf')]

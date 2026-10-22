@@ -1,0 +1,5 @@
+# 默认全文搜索聚焦当前源码和有效文档；追溯时显式指定路径或使用 --no-ignore。
+/tmp/
+/output/
+/doc/history/
+/docs/agent_handoff_history.md

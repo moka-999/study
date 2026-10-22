@@ -23,6 +23,7 @@
 #include "pc_dispatch.h"
 #include "pc_state_machine.h"
 #include "ota_app.h"
+#include "b2_service.h"
 #include <string.h>
 #include <errno.h>
 
@@ -131,12 +132,15 @@ void StartTcpServerTask(void *argument)
         /* 无PC连接也是正常状态；有界select让任务自己证明仍在工作。 */
         fd_set readers;
         FD_ZERO(&readers); FD_SET(listenfd, &readers);
-        struct timeval accept_wait = {0, 200000};
+        struct timeval accept_wait = {0, 20000};
         int available = select(listenfd + 1, &readers, NULL, NULL, &accept_wait);
         ota_app_progress(OTA_TASK_TCP);
         pc_dispatch_poll();
         if (available < 0) { close(listenfd); vTaskDelete(NULL); return; }
-        if (available == 0) continue;
+        if (available == 0) {
+            b2_service_poll(0);
+            continue;
+        }
         int connfd = accept(listenfd, NULL, NULL);
         if (connfd < 0) {
             vTaskDelay(pdMS_TO_TICKS(500));
@@ -146,12 +150,12 @@ void StartTcpServerTask(void *argument)
         led_on(LED_CONNECT);
 
         /*
-         * recv每100ms返回一次EWOULDBLOCK/EAGAIN，使任务有机会执行下面的
+         * recv每20ms返回一次EWOULDBLOCK/EAGAIN，使任务有机会推进B2状态及下面的
          * 500ms半帧超时检查；这不是PC心跳周期，也不会主动断开空闲连接。
          */
         struct timeval rxto;
         rxto.tv_sec  = 0;
-        rxto.tv_usec = 100000;
+        rxto.tv_usec = 20000;
         setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, &rxto, sizeof(rxto));
         struct timeval txto = {1, 0};
         setsockopt(connfd, SOL_SOCKET, SO_SNDTIMEO, &txto, sizeof(txto));
@@ -175,6 +179,7 @@ void StartTcpServerTask(void *argument)
         for (;;) {
             ota_app_progress(OTA_TASK_TCP);
             pc_dispatch_poll();
+            b2_service_poll(1);
             /* 正式异步结果由业务层组包，TCP只负责传输及本端Seq。 */
             pc_dispatch_response_t async_response;
             int ready = pc_dispatch_next_response(mcu_tx_sequence, &async_response);

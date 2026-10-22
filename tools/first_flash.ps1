@@ -1,8 +1,9 @@
 ﻿param(
-    [ValidateSet('build', 'flash', 'verify')][string]$Action = 'build',
+    [ValidateSet('build', 'deploy', 'flash', 'verify')][string]$Action = 'build',
     [string]$Version = '',
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
     [switch]$PowerSimulation,
+    [switch]$MatsFailTest,
     [string]$Bundle = '',
     [string]$Serial = '',
     [ValidateSet('NO', 'YES')][string]$ConfirmIdle = 'NO',
@@ -13,5 +14,5 @@ $ErrorActionPreference = 'Stop'
 $appRoot = Split-Path -Parent $PSScriptRoot
 $entry = Join-Path (Split-Path -Parent $appRoot) 'bootloader\tools\flash.ps1'
 & $entry -Board apollo-v2 -AppRoot $appRoot -Action $Action -Version $Version -Configuration $Configuration `
-    -PowerSimulation:$PowerSimulation -Bundle $Bundle -Serial $Serial -ConfirmIdle $ConfirmIdle -ConfirmBlank $ConfirmBlank
+    -PowerSimulation:$PowerSimulation -MatsFailTest:$MatsFailTest -Bundle $Bundle -Serial $Serial -ConfirmIdle $ConfirmIdle -ConfirmBlank $ConfirmBlank
 exit $LASTEXITCODE

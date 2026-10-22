@@ -3,6 +3,8 @@
 > 本文件是给 AI 编码助手的「接手说明书」，换任何 AI 打开仓库先读这里。
 > 当前进度统一维护在 [驱动任务清单](doc/driver_tasks.md#current-status)。历史记录见 [交接历史](docs/agent_handoff_history.md)，按任务需要读取。
 
+文档按[索引](doc/README.md)选读，不默认通读历史/临时目录。`.rgignore`只控制默认搜索，追溯时显式指定路径；过时资料的[清理归档](doc/history/cleanup_20261020/README.md)可恢复，不作为当前需求或操作指令。
+
 ---
 
 ## 一、项目是什么
@@ -14,10 +16,10 @@ STM32H743 **阿波罗 V2** 板，作为 **TCP server + 双协议网关**：PC–
 PC ──TCP:8888──► MCU(STM32H743) ──逻辑 RK 串口──► RK3588
                                        └─ 阿波罗 V2: USART1 / B1: UART4（固定RK UART0_M0）
 PC ──独立温控接口──► B2 MCU ──► 全部加热及其他底板级控制
-B2 MCU（共享SPI主机）──SCK/MOSI/MISO + CS0..7──► B1 MCU ×8（各自SPI2从机，保活及待实现的IP通知）
+B2 MCU（共享SPI主机）──SCK/MOSI/MISO + CS0..7──► B1 MCU ×8（各自SPI2从机，状态交换）
 ```
 
-B2 MCU由其他同事开发并由PC直接管理温控；B1不控制、代理或转发温控。B2以一组SPI主机共享SCK/MOSI/MISO，并用8个独立CS选择8块B1；SPI需求为保活及B2向B1通知网络配置，IP通知仅确认方向和地址规则，尚未定义报文或实现。B1暂按从机、Mode 0、8位MSB、硬件NSS低有效配置，B2初始时钟暂按1MHz；保活载荷、周期、超时及IP通知合同留待B2双方评审冻结。
+B2 MCU由其他同事开发；PC或B2本地屏幕管理温控，B1不控制、代理或转发加热。SPI以0004统一状态交换通知testerId及各镜像常温/高温显示模式，B2分别通知PC与B1。B2共享SCK/MOSI/MISO、每槽独立CS；B1 SPI2从机，V2联调使用SPI3，Mode 0、8位MSB、硬件NSS低有效、初始1MHz。协议及实现分别见[协议](doc/b1_b2_spi_protocol.md)、[接入记录](doc/b2_spi_integration_20261020.md)；离线验证不代表硬件联调通过。
 
 **软件栈**：FreeRTOS 10.6.2 + LWIP 2.2.1 + ETH (YT8512C, RMII) + PC–MCU JSON协议 + MCU–RK TLV协议。B1是同级独立工程 `../b1`，不在本V2源码树内混合构建。
 
@@ -38,7 +40,7 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 - 初版固定`Version=1`、`Flag=8`、`ServiceID=0`。非法头前缀逐字节丢弃并有界寻找下一头；两次完整帧消费之间累计丢弃超过4096字节才关闭连接。完整帧的UTF-8/JSON错误回`0006 failed/invalidArgument`并继续；认可长度后不扫描正文内部。仍无法收齐的半帧超过500ms字节间空闲则断连，正常空闲不受此限制。详见[TCP接收恢复](doc/pc_tcp_recovery_20260929.md)。
 - 每条连接中PC和MCU分别维护发送u32 Seq，每发一帧本端加1，不回显请求Seq；接收不改变本端发送计数，两个方向允许同号且可同时发送。Seq仅是发送流水号，业务关联另行定义；绝不能把内部RK Seq写入PC响应头。ServiceID保留2字节但固定0、不参与分发。首值、重连初始化和回绕边界仍待PC双方最终确认，暂定实现与验证状态见任务清单，测试通过不等于批准。
 - 心跳固定为PC主动发送`CMD_CLIENT_HEART_BEAT(0x0002)+{}`，MCU返回`CMD_SERVER_HEART_BEAT(0x0001)+{}`，新合同使用MCU本端递增Seq；心跳不承载其他状态。
-- 测试须先0106 `{}`建立当前连接的整轮，再串行0103/0105 FUNC或010A/010B SLT，最后0107提交errorchip失败数组。mirrorIndex 0/1/2映射两组LPDDR/eMCP灯，未知编号整包拒绝；0701/0702/0703已从固件删除，合法旧请求回0006/notSupported。0108 PARA预留，0109仅MCU方向。提前0107只废弃结果、不取消RK或提前解除busy；未入RK队列的FUNC不再投递。SLT固定slt/memtest86、index=null，只准备电源/Boot，不等RK心跳或检查EDK；同连接010B回收占用，断线不自动认领或释放SLT。B2温度/灯态合同仍未定义，0106常温闪仅为显示初值。
+- 测试须先0106 `{}`建立当前连接的整轮，再串行0103/0105 FUNC或010A/010B SLT，最后0107提交errorchip失败数组。mirrorIndex 0/1/2映射两组LPDDR/eMCP灯，未知编号整包拒绝；0701/0702/0703已从固件删除，合法旧请求回0006/notSupported。0108 PARA预留，0109仅MCU方向。提前0107只废弃结果、不取消RK或提前解除busy；未入RK队列的FUNC不再投递。SLT固定slt/memtest86、index=null，只准备电源/Boot，不等RK心跳或检查EDK；同连接010B回收占用，断线不自动认领或释放SLT。0106按B2已知模式显示常温/高温闪，未知镜像灭；轮内允许B2部分更新，0107后只缓存模式、不覆盖最终结果。
 - TCP解析必须支持半包、粘包和连续多包；第一组测试JSON已确认，其余命令与字段分批冻结。
 - 已固定引入cJSON v1.7.19，使用FreeRTOS堆、递归深度16；完整PDU上限4096字节。
 - 固件升级沿用0x0901–0x0903，MCU动作统一`mcu_begin/mcu_write/mcu_finish/mcu_query/mcu_cancel`；对应五个`rk_*`仅保留并回notSupported，不访问Flash/RK。W25Q256为RK预留0x00410000和0x00C10000起始的两块8MiB，不定义RK包体。旧版首次迁移须显式旧动作选项，见`doc/ota_daily_download.md`。
@@ -68,9 +70,12 @@ V2可显式启用`ENABLE_V2_POWER_SIMULATION`：沿用上述正式任务及真�
 | 目录 | 内容 |
 |------|------|
 | `App/protocol/pc/` | PC–MCU独立字节流状态机、JSON/命令分发、固定头响应组帧和PC业务JSON辅助层 |
-| `App/protocol/rk/` | RK线格式组帧/CRC/TLV状态机，详情、进度和FAIL报告解码 |
+| `App/protocol/rk/` | RK线格式组帧/TLV状态机，详情、进度和FAIL报告解码 |
+| `App/protocol/b2/` | B2独立帧/TLV校验、CS事务状态机和应答编码，不依赖RK模块 |
+| `App/protocol/common/` | 无状态通用CRC算法；不含任何链路的Seq或业务 |
 | `App/tasks/pc/` | PC侧TCP server任务；负责socket生命周期和传输编排，业务由PC命令表分发 |
 | `App/tasks/rk/` | 单个RK任务统一推进串口、请求/最终结果和每1秒心跳；不自动重发测试 |
+| `App/tasks/b2/` | 独立B2任务及请求/应答队列；IP和整轮灯态由TCP上下文顺序应用，不混入RK任务 |
 | `App/tasks/common/` | LED、采样监控等不隶属单一通信对象的正式任务 |
 | `App/tasks/test/` | Mock、自检和逻辑分析仪波形任务；不代表生产业务 |
 | `BSP/` | 板级驱动：AD7124 / Flash / IIC / LED / PCF8574 / WDT |
@@ -95,9 +100,11 @@ powershell -ExecutionPolicy Bypass -File tools/dev.ps1 build
 
 ### 烧录（SWD）— 下列仅适用于非OTA旧布局
 
-空白板首部署使用`tools/first_flash.ps1 -Action build -Version <版本>`生成固定交付包，再用包内`flash.ps1`选择板型/指定ST-Link烧写。B1有同名独立入口，共用`../bootloader/tools/first_flash.py`；备份、全空检查、B/A1/恢复包回读通过后才由C接口提交初始日志。不提供force或自动清空旧板；新入口仍待空板实测，详见[首烧说明](../bootloader/README.md#空白板首次部署v2--b1)。
+空白板首部署选择VS Code非默认“🆕 V2/B1 空白板 Boot+App 首烧”任务，或`tools/first_flash.ps1 -Action deploy -Version <版本> -Serial <序列号> -ConfirmIdle YES -ConfirmBlank YES`：先构建精确包再烧写；仅构建交付仍用`-Action build`及包内`flash.ps1`。V2任务保留电源模拟/MATS第一颗假FAIL，B1真实且固定UART4；共用`../bootloader/tools/first_flash.py`。备份、全空检查、B/A1/恢复包回读通过后才由C接口提交初始日志，不提供force或自动清空旧板。与日常Ctrl+Shift+B分开，空板实测仍待；见[首烧及J5接线说明](../bootloader/README.md#空白板首次部署v2--b1)。
 
-日常修改V2 App请用 `tools/dev.ps1 ota-build -Version <新版本>`，或 `ota-swd -Version <新版本> -Serial <ST-Link序列号> -ConfirmIdle YES`；网络入口为 `ota-net`。VS Code默认Ctrl+Shift+B已指向安全SWD入口；操作与验证边界见[日常下载说明](doc/ota_daily_download.md)。这些入口复用完整B安装，不能用于空片首部署或B1。
+日常修改App，两板各自VS Code默认Ctrl+Shift+B均为一键ST-Link下载：固定各自板型、自动选择唯一烧录器、读取W25已确认版本后patch+1，自动构建/打包/备份/下载并由完整B安装。按快捷键即确认RK/温控空闲、电源OFF且PC断开；V2默认保留电源模拟/MATS第一颗假FAIL，B1使用真实驱动。CLI为`ota-swd -ConfirmIdle YES`，可选`-Version`/`-Serial`，V2模拟选项仍须显式传入。只构建用`ota-build -Version <新版本>`，V2网络入口`ota-net`保持不变。B1复用同级test/bootloader脚本，不用于空板首部署；新SWD编排尚待真板验收。操作、故障记录与边界见[日常下载说明](doc/ota_daily_download.md)。
+
+独立电脑端工具：V2用`tools/v2_ota.py`/`start_v2_ota.cmd`，B1用其工程的`tools/b1_ota.py`/`start_b1_ota.cmd`；复用`tools/ota_client.py`，分别固定板型。两工程各自的`ota-build`生成含公共实现与.ota的独立ZIP，运行只需Python 3.10+。查询只读；升级需人工确认空闲、健康及OFF，不自动关电/清busy/重试finish，无跨连接续传。源码侧B1复用同级test工具，交付ZIP不依赖源码树；不能用V2包升级B1。见[独立工具说明](doc/ota_standalone_tools_20261015.md)。
 
 > 已部署完整OTA的板卡禁止用下面的`build_debug/boot.elf`覆盖B，或绕过启动日志直接覆盖App。OTA使用同级`../bootloader`完整B及`ENABLE_OTA_BOOT=ON`的槽限App；构建、备份、安装与当前板卡状态见[OTA网络验证](doc/ota_network_validation_20260916.md)。
 ```bash
@@ -116,7 +123,7 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 ### 串口 / 网络
 - 串口：2026-09-23实测COM5 = CH340 → USART1（阿波罗阶段接PC模拟RK3588）；每次先枚举确认，不硬编码旧COM3。
 - 当前测试MCU IP：`192.168.1.201:8888`，继续使用本地配置。
-- 正式B1 IP由B2 MCU告知，不以本地固定地址或FRU配置IP作为正式来源。已确认PC配置B2、B2经SPI通知各B1，PC随后直接连接B1；仅以产线Excel第一张`IP rule`为准：PC=`192.168.210.9`，B2末段=`10*T`，B1末段=`10*T+S`（T=1～21，S=1～8）。10号/18号整机B2分别为`.100`/`.180`，不沿用原表两处笔误。报文、时机、掩码/网关、首次发现、异常与持久化待定；当前只记录，不改变测试配置、FRU布局或新增SPI命令。详见[需求基线§1.1](doc/requirements_baseline.md)。
+- 正式B1 IP由B2 MCU通知testerId，再与槽位码加1组合：PC=`192.168.210.9`，B2末段=`10*T`，B1末段=`10*T+S`（T=1～21，S=1～8）。10号/18号B2分别为`.100`/`.180`。0004收到不同tester/slot后在无已接受PC连接、无测试/电源/OTA在途时动态切换，否则整包busy；同IP不重配。联调掩码255.255.255.0、网关0.0.0.0，RAM保存、不改FRU；首次配置前保留本地测试地址。真实八槽上线、首次发现及默认IP冲突隔离仍待系统验收，见[需求基线§1.1](doc/requirements_baseline.md)。
 
 ### 崩溃诊断（HardFault 排查）
 - 诊断地址随链接变化，读写前必须从**实际烧录的同一份ELF**用`arm-none-eabi-nm -S -n`查询`crash_log`（16×uint32）和`tcp_diag`（8×uint32）。禁止把历史地址的`-w32`命令直接套用到新镜像。`.crash_log`为NOLOAD，复位不清零。
@@ -132,6 +139,7 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 powershell -ExecutionPolicy Bypass -File tools/dev.ps1 protocol-test  # 实际C帧/状态机/事务的QEMU回归
 powershell -ExecutionPolicy Bypass -File tools/dev.ps1 style-test     # 自定义层边界/事件模型+纯接口头独立编译
 powershell -ExecutionPolicy Bypass -File tools/dev.ps1 pc-protocol-test # PC固定头/cJSON离线合同
+powershell -ExecutionPolicy Bypass -File tools/dev.ps1 b2-protocol-test # 实际C SPI协议/状态机/事务，不访问硬件
 python -B -X utf8 tests/verify_rk_protocol_c.py --app-root ../b1       # 编译并运行B1实际RK源码
 python -B -X utf8 tests/rk_gateway_network_test.py --serial COM5 --report build/rk-chain.json # 仅限已备份并安装临时联调镜像；结束恢复正式镜像
 ```
@@ -165,7 +173,7 @@ python -B -X utf8 tests/rk_gateway_network_test.py --serial COM5 --report build/
 6. **D-Cache 已关** → 无 cache 一致性顾虑，**勿再加 `SCB_InvalidateDCache_by_Addr`**（否则 UsageFault 升级 HardFault）。
 7. **DMA 够不到 DTCMRAM**（DMA 在 D2 域），DMA 缓冲放 AXI SRAM (RAM, 0x24000000)。
 8. **FreeRTOS 堆(128KB)手动挪到 AXI SRAM**（`heap_4.c` 的 `.heap` section + linker），不是 CubeMX 默认位置。
-9. **SPI2按板型互斥**：Apollo V2临时给AD7124开发（主机Mode 3）；最终B1以SPI2从机连接B2主机，AD7124改SPI4。两个任务不得同时占用SPI2。
+9. **SPI按板型分配**：Apollo V2的SPI2仅给AD7124开发（Mode 3），B2链路另用SPI3（PA15/PB3/PB4/PB5）；B1用SPI2从机接B2、SPI4主机接AD7124。B2任务独立于RK，DMA1 Stream3/4与`.b2_dma` AXI缓冲专用，禁止占用UART的Stream0～2。
 10. **自定义接口归属**：总线实例统一由`board_interfaces.h`声明，UART内部钩子只在`uart_hw.h`；RK任务用`rk_link_next_sequence()`分配独立序号，禁止外部直接修改计数器。`uart_start_all()`在调度前初始化TX互斥锁；分配失败拒绝发送。注释/风格及剩余耦合约束见`doc/code_quality_review.md`。
 11. **RK解析错误必须上送调用方**：tlv_sm_feed完成后还须检查tlv_sm_get_frame；负数失败、0为零TLV心跳。Length为0或4..1024，最多16 TLV；底层保留未知TLV，最终业务只接受3/5/7合同，不能部分交付。tlv_unpack输入从5A起的完整帧和真实长度。V2/B1字节间门限均100ms，连续完整帧无需外部reset。
 12. **信息类响应的数据源**：固件版本、FRU和测试仪信息响应每次通过加载接口读取W25Q256持久化记录，禁止直接使用`firmware_version_current()`或编译期常量组帧。完整OTA由B同步运行槽版本，OTA查询每次加载并与启动记录交叉核对；普通镜像/FRU的首次初始化兼容路径另行保留，不能借OTA接入擅自删除。OTA接入范围与硬件验收状态见任务清单。
@@ -196,7 +204,7 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 - MCP4725在I2C2、地址0x60，Boot目标电压0–1.8V；不得超过1.8V，实际3V3与VOUT误差待真板校准。
 - B1 PG12是PHY复位，不是RK复位。B2的`/RESET_n`接RK/RK806复位（1.8V域），`/MCU_RESET_n`接B1 NRST（3.3V域），只作异常恢复；`PWRON_L`人工按键与24V软开关不是同一网络，未见B1 GPIO驱动。
 - 三颗双色结果灯使用PG0–PG5，显示2组LPDDR4/4X和1组eMCP；以FAIL/PASS通道定义常亮及闪烁，常温双通道闪烁、高温FAIL通道闪烁，亮/灭各500ms。实际颜色、对象顺序及复位高阻瞬态待B1验证，不以图面红绿旁注代替实物。B1的PG6/LED7已确认表示MCU正常上电，初始化时灭、默认任务完成初始化后常亮，不是RK/DDR电源或网络连通指示；另一单色灯由RK的CPU_GPIO_PWR控制。
-- B1 PB3/PB4/PB5已按20260920-2134版原理图及确认贴装表配置输入、无内部上下拉；B1外部4.7kΩ上拉、B2按位贴0Ω接地，PB3最低位，PB5最高位。`board_slot_code()`返回原始0..7，111也有效；B2在位检测另走SLOT_ONLINE#。不由槽位码自动改IP、FRU、PC siteId或SPI协议，真实贴装与电平仍待验收。详见[本轮B1适配](../b1/docs/board_status_slot_20261010.md)。
+- B1 PB3/PB4/PB5配置输入、无内部上下拉；B1外部4.7kΩ上拉、B2按位贴0Ω接地，PB3最低位。`board_slot_code()`返回0..7，111有效；加1形成siteId，B2在位检测另走SLOT_ONLINE#。仅在B2配置成功后将该siteId用于运行IP及PC结果，不写FRU；后续0004重新读取槽位，变化仍受改IP的busy门禁。真实贴装与电平待验收，见[原引脚核对](../b1/docs/board_status_slot_20261010.md)和[最新接入](doc/b2_spi_integration_20261020.md)。
 
 原理图版本变化时先核对受影响引脚、网络和电气条件并记录原图页码。`tools/sch_netlist.py`可辅助适用的矢量PDF；不适用时使用当前可用的PDF查看/渲染工具，关键网络仍须回到原图复核。
 

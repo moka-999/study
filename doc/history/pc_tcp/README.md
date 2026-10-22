@@ -6,6 +6,7 @@
 
 | 归档文件 | 原文件 | SHA-256 |
 |---|---|---|
+| [pc_tcp协议_20261014_164408.docx](pc_tcp协议_20261014_164408.docx) | pc_tcp协议.docx，同步飞书新增TimingParameters及本轮部分字段解析存储约定前；2026-10-20归档 | 6283d70fdf6002b495c48d1e1955107ec168f51b06d1f1f4d18d38656849790b |
 | [pc_tcp协议_20261014_150058.docx](pc_tcp协议_20261014_150058.docx) | pc_tcp协议.docx，数组评审稿同步飞书及保留云端电压安全范围、明确默认常温显示边界前 | 3e93fa06fe83bf5feb5a75060ebb55d4ab61a2617575a09e17bd034bf96bb8e6 |
 | [pc_tcp协议_20261014_120844.docx](pc_tcp协议_20261014_120844.docx) | pc_tcp协议.docx，0106改为空对象、0107改为失败芯片数组及明确镜像/芯片语义前；新稿仅供本地评审 | d583e27674f9ad522f6cc1a8424401320f54bccdfac14ac0deccccd60bb6e439 |
 | [pc_tcp协议_20261014_114043.docx](pc_tcp协议_20261014_114043.docx) | pc_tcp协议.docx，全篇精简、SLT改为两颗DDR汇总及空index、移除070x前 | 3e3684171dcb057c5cae3dec851bc6209447f8d03f9f9c4423195106c6bc5d5b |

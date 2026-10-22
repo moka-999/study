@@ -6,6 +6,12 @@
 #include "pc_state_machine.h"
 #include "uart_router.h"
 #include "board_interfaces.h"
+#include "../../App/protocol/b2/b2_state_machine.h"
+#include "../../App/tasks/b2/b2_task.h"
+#include "../../App/tasks/b2/b2_service.h"
+#include "../../App/protocol/common/crc.h"
+#include "b2_spi.h"
+#include "network_config.h"
 
 _Static_assert(PC_PROTOCOL_HEADER_SIZE == 18U, "PC header contract changed");
 _Static_assert(PC_PROTOCOL_MAX_PDU == 4096U, "PC PDU limit changed");

@@ -1,5 +1,7 @@
 # PC–MCU JSON业务合同
 
+2026-10-20：按飞书809版及本轮确认，0103/010A增加可选`TimingParameters`对象，11项均可单独提供字符串；0103允许null，010A提供时必须是对象。MCU仅校验、保存本次已受理请求的RAM副本，尚不向RK下发，也不将受理解释为时序已应用。单位、有效取值及RK映射待商量；SLT仍严格匹配`slt/memtest86`。见[时序字段接入记录](pc_timing_parameters_20261020.md)。下方旧日期描述不覆盖本轮结论。
+
 2026-10-14协议及代码以[PC协议](pc_tcp_protocol_spec.md)和[实现记录§10](pc_test_round_protocol_20261014.md#10-整轮slt及070x删除实现2026-10-14未烧录)为准：0106空对象建轮，之后执行FUNC 0103/0105或SLT 010A/010B，最后0107提交errorchip数组。镜像0/1/2映射两组LPDDR/eMCP；SLT固定slt/memtest86、index=null，只做电源/Boot准备，完成由PC回送。0108/0109 PARA预留；070x已从V2/B1源码删除，合法旧请求回notSupported。B2加热/灯态获取尚无报文合同，默认常温仅为显示初值。两板代码已构建/离线验证，V2已安装0.1.35并通过网络检查，B1未烧录；Word/飞书停留在此前621版，待补齐固定名称及灯映射等后续细化。
 
 0103和0509统一使用`vdd1/vdd2/vddq`字符串，直接表示绝对电压mV，例如`"1800"/"1100"/"600"`。必须是非空ASCII十进制数字串，并满足`valMv=nominalMv+stepMv*n`：VDD1步进10mV、VDD2/VDDQ步进5mV，n为整数。越界或非整档直接拒绝，不取整；旧steps字段不再接受。详见[电压字段修改记录](pc_voltage_mv_20261012.md)。
@@ -52,7 +54,7 @@
 Boot改变或配置状态未知/失效也需重新建立启动状态。`reboot`控制是否主动重启，重启统一采用受控断电方式；`bootMode`表示启动模式，不单列重启类型。
 FUNC以`algorithmType/algorithmName`标识，0103固定为functional；SLT另用010A/010B且algorithmIndex=null，PARA的0108/0109先保留。FUNC的`algorithmIndex`为PC当前计划中的算法项编号，同名算法可出现多次并用不同index区分。编号由PC提供，MCU在开始测试执行响应和最终结果中原样带回，不自增、不当作RK算法ID。现有0x0506/0x0509保留，不改变各自包体。
 
-上述完整B1请求严格校验全部六个根字段及power四字段，不接受缺失、重复、未知键或错误类型；timeoutMs为新增可选根字段。
+上述完整B1请求严格校验原六个根字段及power四字段，不接受缺失、重复、未知键或错误类型；timeoutMs与TimingParameters为可选根字段。TimingParameters内只接受已定义的11项字符串，允许部分项和空字符串，不继承上一请求；合法请求受理后复制保存，失败请求不覆盖。
 三路电压复用TPS编码范围检查，但不代表已批准安全训练范围。参数非法回0006
 `failed/invalidArgument`；OTA未健康时回`otaNotReady`，在途冲突回`busy`。
 根对象的index唯一且为合法u32整数时，失败响应原样携带，即使其它字段非法；不合法时省略。

@@ -4,6 +4,7 @@
 #include "rk_link.h"
 #include "ota_app.h"
 #include "result_led.h"
+#include "b2_service.h"
 #if defined(B1_RK_UART)
 #include "monitor_task.h"
 #endif
@@ -11,6 +12,7 @@
 #include "v2_power_sim.h"
 #endif
 #include <string.h>
+#include <stdio.h>
 
 #if defined(ENABLE_V2_MATS_FAIL_TEST) && ENABLE_V2_MATS_FAIL_TEST
 #if defined(B1_RK_UART) || !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
@@ -23,7 +25,7 @@ static struct {
     uint32_t cookie;
     uint32_t index;
     const char *name;           /* 来自RK只读算法表，不借用已经释放的JSON。 */
-    char site_id[16];           /* 本次受理时从W25 FRU读取的站点标签。 */
+    char site_id[16];           /* 受理时固定B2配置的槽位；未配置则使用W25测试标签。 */
     uint8_t active;             /* 包含已经超时但RK仍可能执行的状态。 */
     uint8_t owner_connected;    /* 只有发起测试的原TCP连接可接收结果。 */
     uint8_t preparing;          /* 电源/Boot/READY尚未完成，此时绝不向RK下发算法。 */
@@ -32,6 +34,7 @@ static struct {
     rk_request_t pending;       /* 只保存值，不借用已释放的JSON字符串。 */
     uint8_t delivery_pending;   /* 1=已领取结果，等待当前连接成功组包；不重复执行RK。 */
     rk_response_t delivery;    /* 固定一份结果副本；内存不足时不再消费后续恢复事件。 */
+    cJSON *timing_parameters;   /* 自有RAM副本，仅解析存档；不代表已写入RK时序。 */
 } s_test;
 static uint8_t s_round_active; /* 仅属于当前TCP连接；算法占用与轮次是否收尾分开记录。 */
 
@@ -101,10 +104,36 @@ static int maintenance_busy(void)
 static HAL_StatusTypeDef set_round_lights(uint32_t failed_mask, int beginning)
 {
     result_led_state_t states[RESULT_LED_TARGET_COUNT];
+    uint8_t modes[B2_MIRROR_COUNT];
+    uint8_t known = b2_service_thermal_modes(modes);
     for (size_t mirror = 0U; mirror < RESULT_LED_TARGET_COUNT; ++mirror)
-        states[s_mirror_leds[mirror]] = beginning ? RESULT_LED_TEST_NORMAL :
+        states[s_mirror_leds[mirror]] = beginning ?
+            (!(known & (1U << mirror)) ? RESULT_LED_OFF :
+                modes[mirror] ? RESULT_LED_TEST_HOT : RESULT_LED_TEST_NORMAL) :
             (failed_mask & (1U << mirror)) ? RESULT_LED_FAIL : RESULT_LED_PASS;
     return result_led_set_all(states);
+}
+
+int pc_test_round_update_modes(uint8_t mask, const uint8_t modes[3])
+{
+    if (mask >> RESULT_LED_TARGET_COUNT || !modes) return 0;
+    for (size_t i = 0U; i < RESULT_LED_TARGET_COUNT; ++i)
+        if ((mask & (1U << i)) && modes[i] > 1U) return 0;
+    if (!s_round_active || !mask) return 1;
+    result_led_state_t states[RESULT_LED_TARGET_COUNT];
+    if (result_led_get_all(states) != HAL_OK) return 0;
+    for (size_t i = 0U; i < RESULT_LED_TARGET_COUNT; ++i)
+        if (mask & (1U << i))
+            states[s_mirror_leds[i]] = modes[i] ? RESULT_LED_TEST_HOT : RESULT_LED_TEST_NORMAL;
+    return result_led_set_all(states) == HAL_OK;
+}
+
+/* 正式B2配置的槽位与IP配对；尚未配置时保留FRU本地测试标签，不改持久化记录。 */
+static void save_site_id(const char *fru_site)
+{
+    uint8_t site = b2_service_site_id();
+    if (site) (void)snprintf(s_test.site_id, sizeof(s_test.site_id), "%u", (unsigned int)site);
+    else memcpy(s_test.site_id, fru_site, sizeof(s_test.site_id));
 }
 
 pc_dispatch_result_t pc_test_round_begin(uint32_t sequence, pc_dispatch_response_t *response)
@@ -156,6 +185,11 @@ int pc_test_service_busy(void)
     return s_test.active != 0U;
 }
 
+const cJSON *pc_test_service_timing_parameters(void)
+{
+    return s_test.timing_parameters;
+}
+
 /* 在真正投递算法之前才开启采样统计；队列失败时收回窗口，不自动重发。 */
 static const char *queue_test(const rk_request_t *request)
 {
@@ -205,6 +239,9 @@ pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
     /* 先保证受理应答能组出，再投递命令；内存分配失败不能偷偷启动RK。 */
     int result = status_response(sequence, start->algorithm_index, NULL, response);
     if (result != PC_DISPATCH_RESPONSE_READY) return result;
+    /* 先复制再产生任何硬件/队列副作用；输入JSON返回后会释放，不能保存借用指针。 */
+    cJSON *timing = start->timing_parameters ? cJSON_Duplicate(start->timing_parameters, 1) : NULL;
+    if (start->timing_parameters && !timing) return PC_DISPATCH_ERROR;
     rk_request_t request = {algorithm->command_id, s_test.cookie + 1U, start->timeout_ms};
     const char *error = NULL;
     uint8_t preparing = 0U;
@@ -215,13 +252,16 @@ pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
                            ? DDR_MEMORY_LPDDR4 : DDR_MEMORY_LPDDR4X;
         memcpy(target.mv, start->target_mv, sizeof(target.mv));
         if (pc_boot_mode_parse(start->boot_mode, &target.boot_mode) != 0)
-            return status_response(sequence, start->algorithm_index, "invalidArgument", response);
-        error = pc_power_service_start(PC_POWER_PREPARE_TEST, &target, start->reboot);
+            error = "invalidArgument";
+        else error = pc_power_service_start(PC_POWER_PREPARE_TEST, &target, start->reboot);
         preparing = error == NULL;
     } else
 #endif
         error = queue_test(&request);
-    if (error) return status_response(sequence, start->algorithm_index, error, response);
+    if (error) {
+        cJSON_Delete(timing);
+        return status_response(sequence, start->algorithm_index, error, response);
+    }
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     /* 仍投递真实RK命令。队列拒绝时不改变虚拟电源、不清空上一轮统计。 */
     v2_power_sim_test_begin(start);
@@ -229,7 +269,7 @@ pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
     s_test.cookie = request.cookie;
     s_test.index = start->algorithm_index;
     s_test.name = algorithm->name;
-    memcpy(s_test.site_id, fru.site_label, sizeof(s_test.site_id));
+    save_site_id(fru.site_label);
     s_test.site_id[sizeof(s_test.site_id) - 1U] = '\0';
     s_test.active = 1U;
     s_test.owner_connected = 1U;
@@ -237,6 +277,8 @@ pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
     s_test.slt = 0U;
     s_test.discarded = 0U;
     s_test.pending = request;
+    cJSON_Delete(s_test.timing_parameters);
+    s_test.timing_parameters = timing;
     return PC_DISPATCH_RESPONSE_READY;
 }
 
@@ -253,6 +295,8 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
         return slt_status_response(sequence, "failed", "flashError", response);
     int result = slt_status_response(sequence, "accepted", NULL, response);
     if (result != PC_DISPATCH_RESPONSE_READY) return result;
+    cJSON *timing = start->timing_parameters ? cJSON_Duplicate(start->timing_parameters, 1) : NULL;
+    if (start->timing_parameters && !timing) return PC_DISPATCH_ERROR;
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     v2_power_sim_prepare_slt(start);
 #else
@@ -260,16 +304,23 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     target.memory_type = strcmp(start->memory_type, "LPDDR4") == 0
                        ? DDR_MEMORY_LPDDR4 : DDR_MEMORY_LPDDR4X;
     memcpy(target.mv, start->target_mv, sizeof(target.mv));
-    if (pc_boot_mode_parse(start->boot_mode, &target.boot_mode) != 0)
+    if (pc_boot_mode_parse(start->boot_mode, &target.boot_mode) != 0) {
+        cJSON_Delete(timing);
         return slt_status_response(sequence, "failed", "invalidArgument", response);
+    }
     const char *error = pc_power_service_start(PC_POWER_PREPARE_SLT, &target, start->reboot);
-    if (error) return slt_status_response(sequence, "failed", error, response);
+    if (error) {
+        cJSON_Delete(timing);
+        return slt_status_response(sequence, "failed", error, response);
+    }
 #endif
     s_test.name = "memtest86";
-    memcpy(s_test.site_id, fru.site_label, sizeof(s_test.site_id));
+    save_site_id(fru.site_label);
     s_test.site_id[sizeof(s_test.site_id) - 1U] = '\0';
     s_test.active = s_test.owner_connected = s_test.preparing = s_test.slt = 1U;
     s_test.discarded = 0U;
+    cJSON_Delete(s_test.timing_parameters);
+    s_test.timing_parameters = timing;
     return result;
 }
 

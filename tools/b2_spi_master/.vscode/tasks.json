@@ -1,0 +1,16 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "裸机SPI主机：只编译（第二块V2）",
+            "type": "process",
+            "command": "powershell",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/build.ps1"
+            ],
+            "group": {"kind": "build", "isDefault": true},
+            "problemMatcher": "$gcc"
+        }
+    ]
+}

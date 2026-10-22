@@ -196,6 +196,53 @@ static cJSON *external_request(void)
     return root;
 }
 
+/* 时序字段允许按需提供；这里只验证字符串合同，不猜测单位或RK参数编码。 */
+static void test_timing_parameters(void)
+{
+    static const char *const valid[] = {
+        "null", "{}", "{\"Freq\":\"\"}", "{\"Freq\":\"1600\",\"tRCD\":\"18\"}",
+        "{\"Freq\":\"\",\"CASLatency\":\"\",\"tRC\":\"\",\"tRCD\":\"\",\"tRFC\":\"\","
+        "\"tRP\":\"\",\"tRAS\":\"\",\"tRRD\":\"\",\"BurstLength\":\"\",\"ODT\":\"\",\"tREFI\":\"\"}"
+    };
+    pc_test_start_view_t view = {0};
+    for (size_t i = 0U; i < sizeof(valid) / sizeof(valid[0]); ++i) {
+        cJSON *root = external_request();
+        CHECK(cJSON_AddItemToObject(root, "TimingParameters", cJSON_Parse(valid[i])));
+        CHECK(cJSON_AddNumberToObject(root, "timeoutMs", 1000));
+        CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK);
+        CHECK(view.external_ready && view.timeout_ms == 1000U);
+        cJSON_Delete(root);
+
+        root = base_request();
+        replace(root, "algorithmType", cJSON_CreateString("slt"));
+        replace(root, "algorithmName", cJSON_CreateString("memtest86"));
+        replace(root, "algorithmIndex", cJSON_CreateNull());
+        CHECK(cJSON_AddItemToObject(root, "TimingParameters", cJSON_Parse(valid[i])));
+        /* 飞书010A要求对象；未传字段仍兼容旧客户端，显式null不等同于省略。 */
+        CHECK((pc_slt_start_parse(root, &view) == PC_TEST_JSON_OK) == (i != 0U));
+        cJSON_Delete(root);
+    }
+    static const char *const invalid[] = {
+        "0", "[]", "\"1600\"", "{\"freq\":\"1600\"}", "{\"unknown\":\"1\"}",
+        "{\"Freq\":1600}", "{\"Freq\":null}", "{\"Freq\":true}",
+        "{\"Freq\":{}}", "{\"Freq\":[]}", "{\"Freq\":\"1\",\"Freq\":\"2\"}"
+    };
+    for (size_t i = 0U; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        cJSON *root = base_request();
+        CHECK(cJSON_AddItemToObject(root, "TimingParameters", cJSON_Parse(invalid[i])));
+        pc_test_start_view_t before = view;
+        CHECK(pc_test_start_parse(root, &view) != PC_TEST_JSON_OK);
+        CHECK(memcmp(&view, &before, sizeof(view)) == 0);
+        check_request(root, "invalidArgument", 1, 1U);
+    }
+    cJSON *root = base_request();
+    CHECK(cJSON_AddObjectToObject(root, "TimingParameters"));
+    CHECK(cJSON_AddObjectToObject(root, "TimingParameters"));
+    CHECK(pc_test_start_parse(root, &view) != PC_TEST_JSON_OK);
+    check_request(root, "invalidArgument", 1, 1U);
+    message("PASS: optional partial TimingParameters, string types, duplicate/unknown rejection, SLT contract\n");
+}
+
 /* 只验证协议层：保持现状不会被转换为0V请求，未知测量值不能伪装成实测0。 */
 static void test_message_contract(void)
 {
@@ -505,6 +552,7 @@ static void test_native_power_mv(void)
 
 void test_main(void)
 {
+    test_timing_parameters();
     test_native_power_mv();
     test_result_capacity_and_allocation();
     test_stream_recovery();

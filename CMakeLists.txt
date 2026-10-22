@@ -61,6 +61,7 @@ option(ENABLE_V2_MATS_FAIL_TEST "V2联调：每次MATS结果上报FAIL" OFF)
 set(FIRMWARE_VERSION_MAJOR 0 CACHE STRING "Firmware semantic version major")
 set(FIRMWARE_VERSION_MINOR 1 CACHE STRING "Firmware semantic version minor")
 set(FIRMWARE_VERSION_PATCH 0 CACHE STRING "Firmware semantic version patch")
+set(B2_TEST_SITE_ID 1 CACHE STRING "V2 SPI联调槽位，取值1..8；B1使用实际GPIO")
 
 # 导出编译命令，供clangd等索引工具使用。
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
@@ -79,6 +80,7 @@ enable_language(C ASM)
 
 # 创建App可执行目标。
 add_executable(${CMAKE_PROJECT_NAME})
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE B2_TEST_SITE_ID=${B2_TEST_SITE_ID})
 
 # 引入CubeMX生成的外设及第三方库目标。
 add_subdirectory(cmake/stm32cubemx)
@@ -94,6 +96,13 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # 将自定义源文件加入App目标。
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/b2/b2_protocol.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/b2/b2_state_machine.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/b2/b2_service.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/b2/b2_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/b2_spi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/b2_board.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/network_config.c
     # 项目自有源文件。
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/uart_router.c
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/board_identity.c
@@ -116,7 +125,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_test_service.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_power_service.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_tester_info.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/crc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/common/crc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/frame.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/state_machine.c
     # 正式任务按通信对象分区，纯验证任务统一放test目录。
@@ -193,6 +202,9 @@ endif()
 
 # 配置自定义头文件搜索目录。
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/b2
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/b2
     # 自定义模块头文件目录。
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv
     ${CMAKE_CURRENT_SOURCE_DIR}/App/ota

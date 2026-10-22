@@ -24,6 +24,8 @@ mx.scratch
 .vscode/*
 !.vscode/tasks.json
 .settings/
+__pycache__/
+*.pyc
 
 # 参考资料 / 临时文件（下划线前缀, 根目录）
 /_*
@@ -33,3 +35,6 @@ mx.scratch
 *.bmp
 *.png
 *.svg
+
+# 经SHA256回读校验的文档清理备份；保留可提交性，不能只删除旧文件而丢失归档。
+!doc/history/cleanup_20261020/obsolete_docs.zip

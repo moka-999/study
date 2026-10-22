@@ -23,9 +23,9 @@
 ## UART ↔ RK3588
 | UART | STM32 引脚 | 说明 |
 |------|-----------|------|
-| UART4 TX/RX | PA12/PA11 | → RS0102 U4008 → RK3588 UART0_M0/BMC console候选 |
-| USART2 TX/RX | PD5/PD6 | → RS0102 U4013 → RK3588 UART2_M0_DEBUG候选 |
-| USART1 TX/RX | PA9/PA10 | 板载本地串口；不是最终RK主链路 |
+| UART4 TX/RX | PA12/PA11 | → RS0102 U4008 → RK3588 UART0_M0，固定协议通道 |
+| USART2 TX/RX | PD5/PD6 | → RS0102 U4013 → RK3588 UART2_M0_DEBUG，只接收日志 |
+| USART1 TX/RX | PA9/PA10 | 本地输出所选MCU/RK日志，接收本地log切换命令；不是RK协议通道 |
 
 ## I2C
 | 总线 | 引脚 | 设备 |
@@ -74,5 +74,7 @@ PG6/LED7为MCU正常上电指示，高有效：初始化先灭，默认任务完
 | PB4 | ID1 | R7297，4.7kΩ至3V3_MCU | 输入、GPIO_NOPULL |
 | PB5 | ID2，最高位 | R7298，4.7kΩ至3V3_MCU | 输入、GPIO_NOPULL |
 
-B2接地位贴0Ω为0，不贴为1，禁止B1输出高。`board_slot_code()`一次读取GPIOB，返回PB5:PB4:PB3的0～7原始码，111也有效；不代替B2独立的SLOT_ONLINE#在位检测。不据此修改IP、FRU或PC siteId。
+B2接地位贴0Ω为0，不贴为1，禁止B1输出高。`board_slot_code()`一次读取GPIOB，返回PB5:PB4:PB3的0～7原始码，111也有效；不代替B2独立的SLOT_ONLINE#在位检测。
+
+2026-10-20已接入：`b2_board_site_id()`读取原始码并加1，得到1～8；它不写GPIO，也不独自更改IP。收到B2状态交换后，业务层把testerId与该siteId一起传给`network_config_set_tester()`，成功后运行IP及PC结果站点号才跟随生效，不写FRU。调用链和busy条件见[B2接入记录](b2_spi_integration_20261020.md#31-siteid到ip的实际调用链)。
 本节与LED按20260920-2134版B1第19/21/24页、B2 20260917版及已确认贴装表更新，不表示其它旧章节全部重新核图。改动和验收见[B1记录](../../b1/docs/board_status_slot_20261010.md)。
