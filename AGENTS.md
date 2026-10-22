@@ -17,7 +17,8 @@ App-V2 位于 `../test`（分支 `app-v2`），App-B1 位于 `../b1`（分支 `a
 - App的地址修正验证在 `../test/tests/verify_ota_relocation.py`；在App工程运行 `tools/dev.ps1 ota-probe`。
 - `tools/dev.ps1 ota-test`：在已安装QEMU中运行实际C安装核心，Flash用RAM模拟。
 - `tools/dev.ps1 ota-pack -AppBuild <A1实验构建目录>`：生成一个App的`test.ota`；包格式见`doc/ota_package_v1.md`。
-- 两App的`tools/first_flash.ps1`固定各自板型，调用本工程`tools/first_flash.py`生成可转交首烧包；包内`flash.ps1`只用于空板，备份后核对全空、回读通过才提交初始日志。无force，不替代日常OTA，新增首烧编排仍待实板验收；详见README。
+- 两App的`tools/first_flash.ps1`固定各自板型；`deploy`用于VS Code非默认空白板首烧，先确认版本/24位探针序列号/空闲/全空，再构建并只烧本次包，失败不选旧产物。`build`仍可生成独立交付ZIP，包内`flash.ps1`不需源码。备份后核对全空，B/A1/W25恢复包回读通过才提交初始日志，无force，不替代日常OTA。V2可显式模拟及MATS假FAIL，B1禁止且固定UART4；新增首烧编排和四线SWD仍待实板验收，见README。
+- 两App的日常ST-Link快捷键共用`../test/tools/ota_dev.py`，从W25已确认版本自动patch+1；只用于已部署完整OTA的板。按板型构建RAM助手，捕获复位入口后一次加载，`board_ota.py --reuse-agent`接续各步而不重复复位/load。保留旧首烧/维护入口默认行为；修改的是主机脚本，不是B固件，新编排仍待真板验收。详见`../test/doc/ota_daily_download.md`。
 
 ## 状态与约束
 

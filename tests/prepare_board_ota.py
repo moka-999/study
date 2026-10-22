@@ -11,6 +11,29 @@ import struct
 import zlib
 
 
+def latest_record(snapshot: bytes) -> bytearray:
+    """只读选出NOR快照中最新的已提交记录；CRC/代数不明确时拒绝猜测。"""
+    if len(snapshot) < 0x6000:
+        raise ValueError("journal输入须为NOR从0开始、至少0x6000字节的快照")
+    records = []
+    for offset in range(0x4000, 0x6000, 256):
+        page = snapshot[offset:offset + 256]
+        if (page[:8] == b"BST1\x01\x00\x00\x01" and
+            struct.unpack_from("<I", page, 252)[0] == 0xC001CAFE and
+            struct.unpack_from("<I", page, 248)[0] == zlib.crc32(page[:248])):
+            records.append(bytearray(page[8:60] + page[64:248]))
+    if not records:
+        raise ValueError("没有完整日志记录；空板请使用first_flash首部署入口")
+    record = records[0]
+    for candidate in records[1:]:
+        delta = (struct.unpack_from("<I", candidate)[0] - struct.unpack_from("<I", record)[0]) & 0xFFFFFFFF
+        if delta == 0 or delta == 0x80000000:
+            raise ValueError("启动代数有歧义")
+        if delta < 0x80000000:
+            record = candidate
+    return record
+
+
 def initial_record(package: bytes, image: bytes) -> bytes:
     """为已校验的A1包生成236字节RAM记录；必须交给C日志接口编码和提交。"""
     if len(package) < 116 or not 8 <= len(image) <= 896 * 1024:
@@ -46,25 +69,7 @@ def main():
         raise ValueError("包/元数据/实际镜像不一致")
     package_crc = struct.unpack_from("<I", package, 36)[0]
     if args.journal:
-        snapshot = args.journal.read_bytes()
-        if len(snapshot) < 0x6000:
-            raise ValueError("journal输入须为NOR从0开始、至少0x6000字节的快照")
-        records = []
-        for offset in range(0x4000, 0x6000, 256):
-            page = snapshot[offset:offset + 256]
-            if (page[:8] == b"BST1\x01\x00\x00\x01" and
-                struct.unpack_from("<I", page, 252)[0] == 0xC001CAFE and
-                struct.unpack_from("<I", page, 248)[0] == zlib.crc32(page[:248])):
-                records.append(bytearray(page[8:60] + page[64:248]))
-        if not records:
-            raise ValueError("没有完整日志记录")
-        record = records[0]
-        for candidate in records[1:]:
-            delta = (struct.unpack_from("<I", candidate)[0] - struct.unpack_from("<I", record)[0]) & 0xFFFFFFFF
-            if delta == 0 or delta == 0x80000000:
-                raise ValueError("启动代数有歧义")
-            if delta < 0x80000000:
-                record = candidate
+        record = latest_record(args.journal.read_bytes())
         fields = list(struct.unpack_from("<13I", record))
         if fields[1] != 0 or fields[5] != 0:
             raise ValueError("仅可向已确认NORMAL、pending=0的App提交请求")

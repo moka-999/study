@@ -80,6 +80,11 @@ def validate_bundle(directory: Path, expected_board: str) -> dict:
     if (type(manifest.get("power_simulation")) is not bool
             or manifest.get("rk_uart") not in ((2, 4) if expected_board == "b1" else (1,))):
         raise ValueError("模拟标志/RK串口配置无效")
+    # 旧首烧包没有此字段，按关闭解释；显式假FAIL只允许V2的电源模拟配置。
+    mats_fail = manifest.get("mats_fail_test", False)
+    if (type(mats_fail) is not bool
+            or (mats_fail and (expected_board != "apollo-v2" or not manifest["power_simulation"]))):
+        raise ValueError("MATS假FAIL配置无效，禁止带入B1或非模拟镜像")
     for name in FILES:
         if sha(directory / name) != manifest["sha256"][name]:
             raise ValueError(f"首烧包文件校验失败：{name}")
@@ -140,6 +145,8 @@ def build_bundle(args) -> Path:
     app, _ = TARGETS[args.board]
     if args.power_simulation and args.board != "apollo-v2":
         raise ValueError("只有V2可显式选择模拟电源，RK仍真实")
+    if args.mats_fail_test and (args.board != "apollo-v2" or not args.power_simulation):
+        raise ValueError("MATS假FAIL仅用于V2电源模拟镜像")
     if not re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", args.version) or any(
             int(part) > 65535 for part in args.version.split(".")):
         raise ValueError("版本须为三个0..65535整数")
@@ -147,6 +154,8 @@ def build_bundle(args) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     variant = (f"uart{args.rk_uart}" if app == "b1" else
                "power-sim" if args.power_simulation else "real")
+    if args.mats_fail_test:
+        variant += "-mats-fail"
     output = app_root / "build/first-flash" / f"{args.board}-{args.version}-{variant}-{stamp}"
     boot_build = ROOT / "build" / f"first-flash-{args.board}-{args.configuration.lower()}"
     env = os.environ
@@ -157,14 +166,22 @@ def build_bundle(args) -> Path:
         "--app-name", app, "--ota-boot", "--version", args.version,
         "--rk-uart", args.rk_uart, "--build-type", args.configuration,
         "--compiler", args.compiler, "--cmake", args.cmake, "--ninja", args.ninja,
-        *(["--power-simulation"] if args.power_simulation else []))
+        *(["--power-simulation"] if args.power_simulation else []),
+        *(["--mats-fail-test"] if args.mats_fail_test else []))
     prefix = "ota-app-power-sim" if args.power_simulation else "ota-app"
+    if args.mats_fail_test:
+        prefix += "-mats-fail"
     suffix = "-uart2" if app == "b1" and args.rk_uart == 2 else ""
     app_build = app_root / "build" / f"{prefix}-{args.version}-{args.configuration.lower()}-a1{suffix}"
     cache = (app_build / "CMakeCache.txt").read_text(encoding="utf-8")
     if "ENABLE_OTA_BOOT:BOOL=ON" not in cache or re.search(
             r"^ENABLE_(?:RK_GATEWAY|FLASH_SELF|DRIVER_MOCK|AD7124_WAVE|PWR_WAVE|RESULT_LED_WAVE|PC_PROTOCOL_NET)_TEST:BOOL=ON$", cache, re.M):
         raise ValueError("App不是OTA正式任务配置，拒绝交付测试镜像")
+    if app == "test":
+        for option, enabled in (("ENABLE_V2_POWER_SIMULATION", args.power_simulation),
+                                ("ENABLE_V2_MATS_FAIL_TEST", args.mats_fail_test)):
+            if not re.search(rf"^{option}:BOOL={'ON' if enabled else 'OFF'}$", cache, re.M):
+                raise ValueError(f"构建配置与首烧清单不符：{option}")
     run(sys.executable, "-B", "-X", "utf8", ROOT / "tools/pack_ota.py", "--app-build", app_build,
         "--app-name", app, "--compiler", args.compiler)
     run(args.cmake, "-S", ROOT, "-B", boot_build, "-G", "Ninja",
@@ -190,11 +207,13 @@ def build_bundle(args) -> Path:
     (output / "stable-4k.bin").write_bytes(package + b"\xff" * (-len(package) % 4096))
     manifest = {"format": 1, "board": args.board, "version": args.version,
                 "configuration": args.configuration, "power_simulation": args.power_simulation,
+                "mats_fail_test": args.mats_fail_test,
                 "rk_uart": args.rk_uart if app == "b1" else 1,
                 "sha256": {name: sha(output / name) for name in FILES}}
     (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "README.txt").write_text(
         f"板型={args.board}，版本={args.version}，电源模拟={args.power_simulation}，RK不模拟。\n"
+        f"MATS第一颗假FAIL={args.mats_fail_test}；仅V2联调可开，第二颗保留RK结果。\n"
         "本包仅支持空板首部署，不支持覆盖已有程序或OTA日志。整个目录一起转交，不要单独选bin。\n"
         "需要Windows、Python 3.10+及STM32Cube的GNU Arm/GDB Server/Programmer工具；无需源码或重编译。\n"
         "先运行 flash.ps1 -Action verify；确认RK/温控空闲并断开网络助手后执行：\n"
@@ -203,7 +222,7 @@ def build_bundle(args) -> Path:
         "首次恢复源是本包App，稳定性仍需硬件验收；FRU保留本板数据，不克隆身份。\n"
         "当前IP为本地测试配置192.168.1.201，多板同网需先解决地址冲突；B1正式IP由B2通知，接口另行冻结。\n"
         "V2当前MAC也固定为00:80:E1:00:00:00；同一广播域暂时只接一块这种V2，不能只改IP就并用。\n"
-        "首次烧录成功后请使用正常网络OTA同步新版本，不重复首烧。\n", encoding="utf-8-sig")
+        "首次烧录成功后使用日常一键SWD或网络OTA更新，不重复首烧。\n", encoding="utf-8-sig")
     validate_bundle(output, args.board)
     archive = shutil.make_archive(str(output), "zip", root_dir=output)
     print(f"PASS：首烧包已构建并离线校验：{output}\n可转交同事：{archive}\n"
@@ -345,13 +364,14 @@ def flash_bundle(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("build", "flash", "verify"))
+    parser.add_argument("action", choices=("build", "deploy", "flash", "verify"))
     parser.add_argument("--board", choices=TARGETS, required=True)
     parser.add_argument("--app-root", type=Path)
     parser.add_argument("--version", default="")
     parser.add_argument("--configuration", choices=("Debug", "Release"), default="Release")
     parser.add_argument("--rk-uart", choices=(2, 4), type=int, default=4)
     parser.add_argument("--power-simulation", action="store_true")
+    parser.add_argument("--mats-fail-test", action="store_true")
     parser.add_argument("--bundle", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--serial", default="")
     parser.add_argument("--confirm-idle", action="store_true")
@@ -359,19 +379,30 @@ def main() -> None:
     for name in ("compiler", "cmake", "ninja", "server", "programmer"):
         parser.add_argument("--" + name, type=Path)
     args = parser.parse_args()
-    required = ("compiler", "cmake", "ninja", "app_root") if args.action == "build" else (
-        ("compiler", "server", "programmer") if args.action == "flash" else ())
+    needs_build = args.action in ("build", "deploy")
+    needs_flash = args.action in ("flash", "deploy")
+    required = ("compiler", "cmake", "ninja", "app_root") if needs_build else ()
+    if needs_flash:
+        required += ("compiler", "server", "programmer")
     if any(getattr(args, name) is None for name in required):
         parser.error("缺少本操作所需的工程/工具路径：" + ", ".join(required))
-    if args.action != "build" and (args.version or args.power_simulation):
+    if not needs_build and (args.version or args.power_simulation or args.mats_fail_test):
         parser.error("烧写/校验使用包内固定配置，不接受重新指定版本或模拟开关")
-    if args.action == "build":
-        build_bundle(args)
+    if needs_build and args.board == "b1" and (args.power_simulation or args.mats_fail_test or args.rk_uart != 4):
+        parser.error("B1构建仅允许UART4且禁止V2模拟/假FAIL")
+    if args.mats_fail_test and not args.power_simulation:
+        parser.error("MATS假FAIL必须显式配合V2电源模拟")
+    if needs_flash and (not args.confirm_idle or not args.confirm_blank
+                        or not re.fullmatch(r"[0-9a-fA-F]{24}", args.serial)):
+        parser.error("须指定24位ST-Link序列号，确认空板与RK/温控空闲；未确认前不构建或连接")
+    if needs_build:
+        # 只烧本次构建且完整校验的目录；构建异常直接退出，不落回旧产物。
+        args.bundle = build_bundle(args)
+    if needs_flash:
+        flash_bundle(args)
     elif args.action == "verify":
         print(json.dumps(validate_bundle(args.bundle.resolve(), args.board), ensure_ascii=False, indent=2))
         print("PASS：首烧包完整性与板型校验通过；未连接设备。")
-    else:
-        flash_bundle(args)
 
 
 if __name__ == "__main__":

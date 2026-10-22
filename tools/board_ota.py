@@ -39,8 +39,15 @@ def load_agent() -> list[str]:
             "if agent_mailbox[0] != 0x4147454E", "quit 2", "end"]
 
 
-def begin_agent() -> list[str]:
-    """每次都复位后装入RAM助手；绝不执行Flash加载。"""
+def begin_agent(reuse: bool = False) -> list[str]:
+    """默认用于既有维护流程；reuse仅接续调用方已核验、已启动的RAM助手。"""
+    if reuse:
+        # 日常升级不在各步骤间复位，防止B提前启动App而改变pending/失败计数。
+        return ["set pagination off", "set confirm off", "set remotetimeout 20",
+                f'file "{AGENT_ELF.as_posix()}"', "target extended-remote localhost:61234",
+                "monitor halt", "if ($pc < 0x24000000) || ($pc >= 0x24080000)", "quit 2", "end",
+                "if agent_mailbox[0] != 0x4147454E || agent_mailbox[1] != 0", "quit 2", "end",
+                "hbreak agent_checkpoint"]
     loading = load_agent()
     return ["set pagination off", "set confirm off", "set remotetimeout 20",
             loading[0], "target extended-remote localhost:61234", "monitor reset", "monitor halt"] + loading[1:]
@@ -78,6 +85,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--length", type=lambda s: int(s, 0), default=0x6000)
     parser.add_argument("--input", type=Path)
     parser.add_argument("--name", default="operation")
+    parser.add_argument("--reuse-agent", action="store_true",
+                        help="仅接续当前RAM助手，不复位、不重新load；调用方须先验证板型并初始化助手")
     args = parser.parse_args(argv)
     directory = args.directory.resolve()
     if any(c.isspace() or c == '"' for c in str(directory)):
@@ -88,7 +97,7 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("name只允许字母数字下划线横线")
     if (directory / (args.name + ".gdb")).exists():
         raise ValueError("操作名称已使用，保留原始证据，请换name")
-    commands = begin_agent()
+    commands = begin_agent(args.reuse_agent)
     if args.action == "backup":
         internal = directory / "original-internal.bin"
         if internal.stat().st_size != 0x200000 or (directory / "backup.json").exists():
@@ -121,7 +130,8 @@ def main(argv: list[str] | None = None) -> None:
     else:
         manifest = json.loads((directory / "backup.json").read_text())
         if sha(directory / "original-internal.bin") != manifest["internal_sha256"] or \
-           sha(directory / "original-w25-0-410000.bin") != manifest["w25_sha256"]:
+           sha(directory / "original-w25-0-410000.bin") != manifest["w25_sha256"] or \
+           sha(AGENT_ELF) != manifest["ram_agent_sha256"]:
             raise ValueError("本轮备份校验失败，拒绝写入")
         if args.input is None:
             raise ValueError("写操作需要--input")
