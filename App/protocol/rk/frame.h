@@ -47,10 +47,10 @@ typedef struct {
 /* 内存模型，不是可直接发送的C结构体：payload仅存放连续拼接的Value副本。 */
 typedef struct {
     tlv_unit_t units[TLV_MAX_PER_FRAME]; /* 每个Value的类型、起点和长度。 */
-    uint8_t payload[TLV_PAYLOAD_MAX];    /* 拥有数据副本，不借用串口接收缓冲。 */
-    uint8_t count;                      /* 有效units数0..16；0时payload_used必须也为0。 */
-    uint16_t payload_used;              /* Value累计长度；线上Length另加每单元4字节。 */
-    uint64_t sequence; /* 下行由MCU递增；RK上行填最近已收MCU Seq，不是测试身份或PC Seq。 */
+    uint8_t payload[TLV_PAYLOAD_MAX];    /* 内容区，连续存放各个Value。 */
+    uint8_t count;                      /* 有效units数0..16，即当前TLV数量。 */
+    uint16_t payload_used;              /* 已使用的Value空间，单位为字节；不含TLV头。 */
+    uint64_t sequence; /* 下行由MCU递增；RK上行填最近已收MCU Seq */
 } tlv_frame_t;
 
 /* 通用报告解码的字段视图；正式任务仅用command_id校验双TLV进度。
