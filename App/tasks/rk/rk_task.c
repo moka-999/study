@@ -102,10 +102,12 @@ static void finish_request(rk_response_status_t status)
 static void deliver_result(void)
 {
     if (rkResponseQueue == NULL) return;
+    //是否有要交付的结果
     if (s_pending.delivery) {
         if (xQueueSend(rkResponseQueue, &s_pending.response, 0U) != pdTRUE) return;
         s_pending.delivery = 0U;
     }
+    // 是否有待交付的恢复事件；先交付原超时响应，再通知等待状态已解除。
     if (s_pending.recovered) {
         s_pending.recovered = 0U;
         finish_request(RK_RESPONSE_RECOVERED);
@@ -130,25 +132,31 @@ static int result_wait_expired(void)
 static void accept_frame(const tlv_frame_t *frame)
 {
     /* 普通心跳无需有在途算法；启动编排等待它之后才会投递测试请求。 */
+    // 启动就绪模块只检查普通心跳；双TLV进度和最终结果在下方分别处理。
     rk_link_ready_note_rx(frame);
+    // 空指针直接返回；零TLV或兼容的单个0x0000空Value心跳不进入结果处理。
     if (frame == NULL || frame->count == 0U ||
         (frame->count == 1U && frame->units[0].type == TLV_TYPE_HEARTBEAT &&
          frame->units[0].data_len == 0U)) return;
+    // 如果当前没有等待的请求，记录拒绝原因并返回
     if (!s_pending.waiting) {
         note_rx_reject(RK_RX_REJECT_NO_PENDING, frame, 0U);
         return;
     }
+    //seq是否合规
     if ((uint64_t)(frame->sequence - s_pending.sequence) >
         (uint64_t)(s_pending.last_tx_sequence - s_pending.sequence)) {
         note_rx_reject(RK_RX_REJECT_SEQUENCE, frame, 0U);
         return;
     }
     /* 进度只接受5001+3016双TLV；旧版详情/独立FAIL不参与新结果拼接。 */
+    //count=2 进度心跳包5001+3016
     if (frame->count == 2U) {
         rk_report_t report;
         if (rk_report_decode(frame, &report) != 0 || report.fields != RK_REPORT_PROGRESS) {
             note_rx_format_reject(frame);
         } else if (report.result.command_id != s_pending.request.command_id) {
+            //检查是否是当前的算法号
             note_rx_reject(RK_RX_REJECT_ALGORITHM, frame, report.result.command_id);
         } else {
             s_pending.progress_percent = report.progress_percent;
@@ -157,32 +165,40 @@ static void accept_frame(const tlv_frame_t *frame)
         }
         return;
     }
+    // 3/5/7 TLV最终结果包；必须有5001+1017+9002，最多两组9001+3001。
     rk_final_result_t result;
     if (rk_final_result_decode(frame, &result) != 0) {
+        //格式不完整或字段重复，拒绝该帧
         note_rx_format_reject(frame);
         return;
     }
     if (result.command_id != s_pending.request.command_id) {
+        //检查是否是当前的算法号
         note_rx_reject(RK_RX_REJECT_ALGORITHM, frame, result.command_id);
         return;
     }
     if (result_wait_expired()) {
+        //是否超时
         s_pending.timed_out = 1U;
         finish_request(RK_RESPONSE_TIMEOUT);
     }
+    // 合法最终结果已到达，结束等待；仍须交付响应或恢复事件后才能取新请求。
     s_pending.waiting = 0U;
     /* 已向业务层判超时的请求不能改成第二次成功；迟到结果仅证明RK已结束。 */
     if (s_pending.timed_out) {
         s_pending.recovered = 1U;
         return;
     }
+    // 准备完整结果响应；随后由deliver_result送入队列，COMPLETE不等于DDR测试PASS。
     finish_request(RK_RESPONSE_COMPLETE);
     s_pending.response.result = result;
 }
 /* 每轮调用；只处理一个请求，UART整帧入队失败不会丢请求或无界重试。 */
 static void process_request(void)
 {
+    // 先交付上轮结果，让pc任务取走
     deliver_result();
+    // 如果上轮请求仍在等待中，检查是否超时
     if (s_pending.waiting) {
         if (result_wait_expired()) {
             s_pending.timed_out = 1U;
@@ -190,27 +206,34 @@ static void process_request(void)
         }
         return;
     }
+    // 没有在途等待后，仍须确认旧响应/恢复事件已交付且队列可用，才能取新请求。
     if (s_pending.delivery || s_pending.recovered ||
         rkRequestQueue == NULL || rkResponseQueue == NULL) return;
+    //准备新的请求
     rk_request_t request;
+    // 从队列中获取新的请求 并保存
     if (xQueueReceive(rkRequestQueue, &request, 0U) != pdTRUE) return;
     memset(&s_pending, 0, sizeof(s_pending));
     s_pending.request = request;
+    // 检查请求的算法号是否有效，以及超时时间是否合理
     uint64_t ticks = (uint64_t)request.timeout_ms * configTICK_RATE_HZ / 1000U;
     if (rk_command_find_by_id(request.command_id) == NULL ||
         (request.timeout_ms != 0U && (ticks == 0U || ticks > INT32_MAX))) {
         finish_request(RK_RESPONSE_INVALID);
         return;
     }
+    //分配新的Seq，打包请求帧，并发送到UART
     s_pending.sequence = rk_link_next_sequence();
     uint8_t wire[TLV_CMD_FRAME_SIZE];
     int length = tlv_pack_cmd(request.command_id, NULL, 0U,
                               s_pending.sequence, wire, sizeof(wire));
+    // 检查打包结果和发送结果，如果失败则标记TX_FAILED
     if (length != TLV_CMD_FRAME_SIZE || uart_send(0, wire, (uint16_t)length) != 0) {
         /* uart_send失败保证未向TX环写入任何字节；不回插队列冒丢失风险。 */
         finish_request(RK_RESPONSE_TX_FAILED);
         return;
     }
+    // 记录发送时间和最近发送的Seq，标记为等待状态
     s_pending.sent_tick = xTaskGetTickCount();
     s_pending.last_tx_sequence = s_pending.sequence;
     s_pending.waiting = 1U;
@@ -246,6 +269,7 @@ static void process_heartbeat(TickType_t *last_tick)
     }
 #endif
     if ((TickType_t)(now - *last_tick) < pdMS_TO_TICKS(RK_HEARTBEAT_INTERVAL_MS)) return;
+    //更新上次发送尝试的tick，准备发送心跳帧
     *last_tick = now;
     uint8_t wire[TLV_HEARTBEAT_FRAME_SIZE];
     uint64_t sequence = rk_link_next_sequence();
@@ -260,13 +284,19 @@ static void process_heartbeat(TickType_t *last_tick)
 void StartRkTask(void *argument)
 {
     (void)argument;
+    // 初始化接收状态机和当前请求记录；请求/结果队列已由RTOS初始化代码创建。
     uint8_t buffer[UART_RX_BUF_SIZE];
     tlv_sm_t stream;
     tlv_sm_init(&stream);
+
     memset(&s_pending, 0, sizeof(s_pending));
     TickType_t last_heartbeat = xTaskGetTickCount();
+
+
+    //循环读取
     for (;;) {
 #if defined(B1_RK_UART)
+        // 电源状态不是ON时重置接收状态、处理等待请求，每轮最多丢弃8个接收块。
         if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON) {
             tlv_sm_reset(&stream);
             process_power_off();
@@ -279,28 +309,39 @@ void StartRkTask(void *argument)
             continue;
         }
 #endif
+        //每轮最多取8个RX块
         for (unsigned block = 0U; block < RK_RX_BATCH_MAX; ++block) {
             int length = uart_poll_rx(0, buffer, sizeof(buffer));
             if (length == 0) break;
+            //数据不连续，重置状态机
             if (length == UART_RX_GAP) {
                 tlv_sm_reset(&stream);
                 continue;
             }
+            //将接收到的字节逐个喂入状态机
             for (int i = 0; i < length; ++i) {
                 if (tlv_sm_feed(&stream, buffer[i]) == 1) {
+                    //状态机已接收完整帧，尝试解析并交付
                     tlv_frame_t frame;
                     if (tlv_sm_get_frame(&stream, &frame) < 0) {
+                        // 解包失败时记录拒绝原因，继续处理当前接收块的下一个字节。
                         note_rx_reject(RK_RX_REJECT_TLV, NULL, 0U);
                         continue;
                     }
+                    // 解包成功后交给accept_frame，继续检查心跳、Seq、算法和结果内容。
                     accept_frame(&frame);
                 }
             }
         }
+        //半帧是否超时
         (void)tlv_sm_check_timeout(&stream, RK_BYTE_TIMEOUT_MS);
+        // 推进请求发送、等待时限和内部结果交付。
         process_request();
+        //到时间发送心跳
         process_heartbeat(&last_heartbeat);
+        // 记录RK任务仍在推进，供OTA健康检查使用；不是升级下载进度。
         ota_app_progress(OTA_TASK_RK);
+        //让出cpu
         vTaskDelay(pdMS_TO_TICKS(10U));
     }
 }
