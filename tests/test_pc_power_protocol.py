@@ -212,11 +212,11 @@ def main() -> None:
             "0103纯计算边界或合法index失败回带缺失")
     start_handler = dispatch.split("static pc_dispatch_result_t handle_start_test(", 1)[1].split("\n}", 1)[0]
     start_service = (ROOT / "App/protocol/pc/pc_test_service.c").read_text(encoding="utf-8")
-    require("pc_test_service_start" in start_handler and
+    require("pc_test_service_start" in start_handler and '"otaNotReady"' not in start_service and
             all(token in start_service for token in (
                 "!start->external_ready", "pwr_ctrl_get_state() != PWR_CTRL_STATE_ON",
-                '"notReady"', '"otaNotReady"', "monitor_idd_start", "rk_link_request")),
-            "0103须委托业务服务，保留健康/外部ON门禁，统计及RK下发不能进入JSON解析器")
+                '"notReady"', "monitor_idd_start", "rk_link_request")),
+            "0103须委托业务服务，保留真实外部ON门禁且不再等待OTA健康确认，统计及RK下发不能进入JSON解析器")
     require("PC_POWER_PREPARE_TEST" in start_service and "s_test.preparing" in start_service and
             "pc_power_service_take" in start_service and "pc_power_service_poll();" in dispatch,
             "完整0103必须经正式电源编排完成后再投递算法")

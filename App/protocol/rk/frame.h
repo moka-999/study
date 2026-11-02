@@ -13,7 +13,7 @@
 #define TLV_SYNC_FOOTER       0xA5U  /* 帧末字节：前面的FCRC通过后还要检查它。 */
 
 /* Type是TLV字段类型，不是算法编号，也不是PC命令号。
- * 高4位表示基础类型（1=bool，3=uint8，5=uint16，9=uint64），低12位是字段tag。
+ * 高4位表示基础类型（1=bool，3=uint8，5=uint16，7=uint32，9=uint64），低12位是字段tag。
  * 例如发送异或算法：Type=0x5000，ValueLength=2，Value=03 00（CmdID=3）。
  * 下列长度指Value，不包括Type和ValueLength各自占用的2字节。
  */
@@ -25,6 +25,8 @@
 #define TLV_TYPE_RESULT_TIME  0x9002U /* 上行结果：小端uint64测试耗时，8字节，单位ms。 */
 #define TLV_TYPE_PROGRESS     0x3016U /* 与0x5001同帧：uint8进度0..100，1字节，不是完成标志。 */
 #define TLV_TYPE_RESULT_FAIL  0x1017U /* 整体结论：1字节bool，0=两颗PASS、1=至少一颗FAIL。 */
+#define TLV_TYPE_REGISTER_ADDRESS 0x7018U /* tag24寄存器地址：4字节u32LE；地址本身不指定读写操作。 */
+#define TLV_TYPE_PARAM_ACTION 0x101AU /* 独立动作：tag26、1字节bool，1进入、0退出。 */
 
 /* 容量单位均为字节。线上Length只统计TLV区，不能与整帧长度混用。 */
 #define TLV_PAYLOAD_MIN       4U     /* 非空TLV区下限；零TLV心跳另允许Length=0，1..3非法。 */
@@ -35,6 +37,7 @@
 #define TLV_FRAME_MIN         16U    /* 零TLV心跳仍必须包含Seq、双CRC和帧尾。 */
 #define TLV_MAX_PER_FRAME     16U    /* 单帧TLV个数上限；未知扩展也占一个名额。 */
 #define TLV_CMD_FRAME_SIZE    22U    /* 无参数命令：外层16+TLV头4+CmdID2。 */
+#define TLV_IDD_ACTION_FRAME_SIZE 27U /* 编号命令22字节再加101A的4字节头和1字节Value。 */
 #define TLV_HEARTBEAT_FRAME_SIZE TLV_FRAME_MIN /* 本端普通心跳不附加任何TLV。 */
 
 /* 保留完整Value，不拆除命令号；data_off只在所属帧内有效。 */
@@ -104,11 +107,17 @@ int tlv_pack(tlv_frame_t *frame, uint16_t type, const uint8_t *value, uint16_t v
  */
 int tlv_pack_frame(const tlv_frame_t *in, uint64_t seq, uint8_t *out, uint16_t out_max);
 /* Value前两字节为小端cmd，之后原样复制0..1018字节参数；仅做编码，
- * 不批准命令可执行性。任务层只允许已实现的无参数1..20命令。
+ * 不批准命令可执行性。任务层按命令目录发送1..36编号命令。
  * 返回完整帧长度，错误为0；data_len为0时data可为NULL。
  */
 int tlv_pack_cmd(uint16_t cmd, const uint8_t *data, uint16_t data_len,
                  uint64_t seq, uint8_t *out, uint16_t out_max);
+/* 仅准备IDD动作帧，不发送也不改变任务状态：cmd须为21..36，action须为0/1。
+ * 5000仅含2字节小端编号；101A是独立TLV，不能塞入5000的可选参数区。
+ * 成功返回27字节，非法参数/容量不足返回0且不写输出；当前编号发送路径不调用它。
+ */
+int tlv_pack_idd_action(uint16_t cmd, uint8_t action, uint64_t seq,
+                        uint8_t *out, uint16_t out_max);
 /* 零TLV心跳固定16字节，Length=0；错误返回0。 */
 int tlv_pack_heartbeat(uint64_t seq, uint8_t *out, uint16_t out_max);
 /* 输入从5A开始的完整帧及真实可读总字节数，不是Seq起点或TLV长度。

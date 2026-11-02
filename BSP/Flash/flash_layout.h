@@ -4,7 +4,7 @@
  * ============================================================================
  *
  * 设计原则：
- *   1. 本模块负责版本和FRU；OTA下载/日志归App/ota，内部安装和回滚归B。
+ *   1. 本模块提供版本/FRU记录接口；正式业务仅使用FRU，不自动写固件版本。
  *   2. 每类关键记录各占两个独立 4 KiB 扇区。更新时只改旧副本，另一个
  *      有效副本始终保留，因此写入中断电后仍可恢复最近一次完整记录。
  *   3. 所有整数按 STM32H743 的小端格式存储；字符数组使用 UTF-8/ASCII，
@@ -13,8 +13,7 @@
  *
  * 32 MiB 空间分配：
  *   0x00000000 - 0x0000FFFF  元数据区（版本 A/B、FRU A/B、后续扩展）
- *   0x00010000 - 0x0020FFFF  OTA下载包（2 MiB）
- *   0x00210000 - 0x0040FFFF  OTA稳定恢复包（2 MiB，普通升级不改写）
+ *   0x00010000 - 0x0040FFFF  固件扩展预留区（4 MiB，当前不读写或擦除）
  *   0x00410000 - 0x00C0FFFF  RK固件空间A（8 MiB，仅预留）
  *   0x00C10000 - 0x0140FFFF  RK固件空间B（8 MiB，仅预留）
  *   0x01410000 - 0x01FEFFFF  预留数据区（日志/标定等用途尚未冻结）
@@ -41,10 +40,9 @@
 #define FLASH_LAYOUT_FRU_SLOT_A             0x00002000UL
 #define FLASH_LAYOUT_FRU_SLOT_B             0x00003000UL
 
-/* 保留既有宏名：外部A为下载包，B为稳定包，不是内部Flash的A1/A2。 */
-#define FLASH_LAYOUT_OTA_SLOT_A_BASE        0x00010000UL
-#define FLASH_LAYOUT_OTA_SLOT_B_BASE        0x00210000UL
-#define FLASH_LAYOUT_OTA_SLOT_SIZE          0x00200000UL
+/* 保留原地址，不重新分配或自动清除其中已有内容。 */
+#define FLASH_LAYOUT_RESERVED_FIRMWARE_BASE 0x00010000UL
+#define FLASH_LAYOUT_RESERVED_FIRMWARE_SIZE 0x00400000UL
 
 /*
  * RK的两个独立固件存放空间，每块8 MiB；此处只保留地址，不读写或擦除。
@@ -89,8 +87,8 @@ typedef struct {
 
 /*
  * 固件版本载荷（固定 76 字节）。字段严格保持精简，不保存构建编号、
- * Git提交号或工作区状态。image_length/image_crc32由链接后的打包步骤填写；
- * 运行固件内建结构中的这两个字段为0，表示尚未打包写入W25Q256。
+ * Git提交号或工作区状态。内建结构的image_length/image_crc32为0；
+ * 版本记录接口用于介质自检，正式App启动和PC查询不读写此记录。
  */
 typedef struct {
     uint16_t schema_version;
@@ -153,8 +151,8 @@ typedef enum {
 } flash_store_status_t;
 
 /*
- * 当前固件的编译期身份，仅供打包/初始写入/自检使用。
- * PC的信息类响应禁止直接使用它，必须读取W25Q256中的持久化记录。
+ * 当前固件的编译期身份，供调试定位与介质自检；不会自动写入W25。
+ * PC测试仪信息读取FRU，testerVersion表示硬件版本，不使用此结构。
  */
 const firmware_version_info_t *firmware_version_current(void);
 
@@ -180,7 +178,7 @@ int fru_info_save(flash_if_t *flash, const fru_info_t *fru,
 int fru_info_load_legacy_v1(flash_if_t *flash, fru_info_t *fru,
                             uint32_t *generation);
 
-/* IEEE CRC-32，供离线打包工具和后续 OTA 镜像校验共用。 */
+/* IEEE CRC-32，供记录校验与介质自检使用。 */
 uint32_t flash_crc32(const uint8_t *data, uint32_t length);
 
 _Static_assert(sizeof(flash_record_header_t) == 32U, "flash record header size changed");
@@ -193,13 +191,11 @@ _Static_assert(offsetof(fru_info_t, test_board) == 170U,
                "FRU test_board offset changed");
 _Static_assert(offsetof(fru_info_t, reserved) == 202U,
                "FRU reserved offset changed");
-_Static_assert(FLASH_LAYOUT_OTA_SLOT_A_BASE + FLASH_LAYOUT_OTA_SLOT_SIZE ==
-               FLASH_LAYOUT_OTA_SLOT_B_BASE, "OTA slots must be adjacent");
 /* 按地址连续性与扇区对齐锁定预留边界，防止后续扩展覆盖既有MCU或自检区。 */
 _Static_assert(FLASH_LAYOUT_METADATA_BASE + FLASH_LAYOUT_METADATA_SIZE ==
-               FLASH_LAYOUT_OTA_SLOT_A_BASE, "元数据区必须与MCU下载区相邻");
-_Static_assert(FLASH_LAYOUT_OTA_SLOT_B_BASE + FLASH_LAYOUT_OTA_SLOT_SIZE ==
-               FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE, "RK空间不得覆盖MCU稳定区");
+               FLASH_LAYOUT_RESERVED_FIRMWARE_BASE, "元数据区必须与固件扩展预留区相邻");
+_Static_assert(FLASH_LAYOUT_RESERVED_FIRMWARE_BASE + FLASH_LAYOUT_RESERVED_FIRMWARE_SIZE ==
+               FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE, "RK空间不得覆盖固件扩展预留区");
 _Static_assert(FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE + FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE ==
                FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE, "两个RK固件空间必须相邻");
 _Static_assert(FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE + FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE ==

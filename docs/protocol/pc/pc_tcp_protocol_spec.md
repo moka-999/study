@@ -38,7 +38,7 @@
 
 ## 3. 命令编号
 
-0103/0105用于FUNC开始/结果；0106/0107用于整轮开始/结束及镜像结果灯汇总；0108/0109预留PARA；010A/010B用于整次SLT开始/结果回送。双方按下表使用命令编号。
+0103/0105用于FUNC开始/结果；0106/0107用于整轮开始/结束及镜像结果灯汇总；0108/0109用于PARA开始/结果；010A/010B用于整次SLT开始/结果回送。双方按下表使用命令编号。
 
 | 编号 | 枚举名称 | 用途 |
 |---|---|---|
@@ -56,8 +56,8 @@
 | 0x0105 | CMD_FUNC_TEST_RESULT_REPORT | MCU→PC：FUNC算法结果 |
 | 0x0106 | CMD_START_TEST_ROUND | PC→MCU：整轮开始，包体为{} |
 | 0x0107 | CMD_FINISH_TEST_ROUND | PC→MCU：提交失败芯片清单，结束本轮并更新镜像结果灯 |
-| 0x0108 | CMD_START_PARA_TEST | PC→MCU：PARA开始，保留 |
-| 0x0109 | CMD_PARA_TEST_RESULT_REPORT | MCU→PC：PARA结果，保留 |
+| 0x0108 | CMD_START_PARA_TEST | PC→MCU：开始一个PARA算法项 |
+| 0x0109 | CMD_PARA_TEST_RESULT_REPORT | MCU→PC：PARA算法结果 |
 | 0x010A | CMD_START_SLT_TEST | PC→MCU：开始整次SLT测试 |
 | 0x010B | CMD_SLT_TEST_RESULT_SUBMIT | PC→MCU：回送SLT汇总结果 |
 | 0x0501 | CMD_POWER_ON | PC→MCU：启动RK及内存电源 |
@@ -73,9 +73,9 @@
 | 0x0602 | CMD_POWER_MONITOR_RESP | MCU→PC：电源采样结果响应 |
 | 0x0801 | CMD_QUERY_B2_HEARTBEAT_STATUS | PC→MCU：查询B1–B2保活状态 |
 | 0x0802 | CMD_B2_HEARTBEAT_STATUS_RESP | MCU→PC：B1–B2保活状态响应 |
-| 0x0901 | CMD_FIRMWARE_UPGRADE_REQUEST | PC→MCU：固件升级操作请求 |
-| 0x0902 | CMD_FIRMWARE_UPGRADE_RESP | MCU→PC：升级操作响应及状态 |
-| 0x0903 | CMD_FIRMWARE_UPGRADE_COMPLETE | MCU→PC：目标固件已健康运行 |
+| 0x0901 | CMD_FIRMWARE_UPGRADE_REQUEST | 保留，当前不支持 |
+| 0x0902 | CMD_FIRMWARE_UPGRADE_RESP | 保留，当前不发送 |
+| 0x0903 | CMD_FIRMWARE_UPGRADE_COMPLETE | 保留，当前不发送 |
 
 温控命令属于PC–B2接口，不在本协议中。无专用响应的控制命令使用0006；业务失败统一使用0006 failed。
 
@@ -88,7 +88,7 @@
 | 0x0103 FUNC开始 | 0x0006 accepted；完整启动准备另回completed；最终结果0x0105 | 0x0006 failed |
 | 0x0106 整轮开始 | 0x0006 completed，本轮已开始 | 0x0006 failed |
 | 0x0107 整轮结束 | 0x0006 completed，仅表示收尾及灯状态更新完成 | 0x0006 failed |
-| 0x0108 PARA开始 | 保留，成功应答及结果包体后续定义 | 未实现时0x0006 failed/notSupported |
+| 0x0108 PARA开始 | 0x0006 accepted；完整启动准备另回completed；最终结果0x0109 | 0x0006 failed |
 | 0x010A SLT开始 | 0x0006 accepted；电源/Boot准备完成另回completed，MCU不上传SLT最终结果 | 0x0006 failed |
 | 0x010B SLT结果回送 | 0x0006 completed，确认接收PC汇总结果 | 0x0006 failed |
 | 0x0501 上电 | 0x0006 accepted→completed；已ON直接completed | 0x0006 failed |
@@ -99,7 +99,7 @@
 | 0x0507 查询Boot模式 | 0x0508 Boot模式信息 | 0x0006 failed |
 | 0x0509 设置DDR配置 | 0x0006 completed | 0x0006 failed |
 | 0x0601 查询电源采样 | 0x0602 最新采样及统计结果 | 0x0006 failed |
-| 0x0901 OTA操作 | 0x0902；带目标包查询且健康确认完成时为0x0903 | 0x0006 failed |
+| 0x0901～0x0903保留命令 | 不执行 | 0x0006 failed/notSupported |
 
 ## 4. 指令与JSON包体
 
@@ -130,7 +130,7 @@ PC发送0x0002，MCU返回0x0001；双方包体均为 `{}`，各自使用本端�
 | requestCommandId | integer | 对应PC请求命令号，十进制 |
 | status | string | accepted=已受理；completed=操作完成；failed=失败 |
 | errorCode | string | 仅失败应答携带，见下表 |
-| algorithmIndex | integer/null | FUNC带回合法请求index；SLT填null；其他命令省略 |
+| algorithmIndex | integer/null | FUNC/PARA带回合法请求index；SLT填null；其他命令省略 |
 
 同步控制成功示例：
 
@@ -147,11 +147,10 @@ PC发送0x0002，MCU返回0x0001；双方包体均为 `{}`，各自使用本端�
 | notSupported / invalidState | 命令未支持或当前状态不允许 |
 | busy | 已有测试或互斥操作在途 |
 | notReady / notConfigured | 设备未就绪或必要配置缺失 |
-| otaNotReady | 固件启动健康确认未完成，暂不接受相关控制 |
 | executionFailed / txFailed | 执行或发送失败 |
 | timeout | 等待超时，不等于芯片FAIL |
 
-accepted及启动completed均不表示算法完成。FUNC请求index无效时不回填伪造编号；OTA附加字段见4.30。
+accepted及启动completed均不表示算法完成。FUNC/PARA请求index无效时不回填伪造编号。
 
 ### 4.6 查询测试仪信息及响应（0x0101 / 0x0102）
 
@@ -190,7 +189,8 @@ PC→MCU，每次提交一个FUNC算法。
   "algorithmIndex": 1,
   "TimingParameters": {
     "Freq": "",
-    "CASLatency": "",
+    "CASReadLatency": "",
+    "CASWriteLatency": "",
     "tRC": "",
     "tRCD": "",
     "tRFC": "",
@@ -217,22 +217,23 @@ PC→MCU，每次提交一个FUNC算法。
 | algorithmType | string | 固定functional |
 | algorithmName | string | 已支持的FUNC算法名，如mats、gtest-xor；区分大小写 |
 | algorithmIndex | integer | PC计划项编号0..4294967295；同一轮不同项不复用，响应及结果原样带回 |
-| power | object/null | 对象为训练目标；null表示保持外部供电，条件见下文 |
+| power | object/null | DDR初始化/训练目标；仅当RK已就绪且B1电源ON时，可与bootMode同填null、reboot=false以保持现状 |
 | power.memoryType | string | LPDDR4或LPDDR4X |
-| power.vdd1 / vdd2 / vddq | string | 三轨绝对mV，power为对象时全部必填 |
-| reboot | boolean | true要求冷重启；false不能绕过配置变化所需重启 |
-| bootMode | string/null | 启动介质，取值见4.21；外部已启动模式为null |
+| power.vdd1 / vdd2 / vddq | string | power为对象时三项必填；绝对mV，仅含ASCII数字0～9的非空字符串；标称值、步进及范围见4.24 |
+| reboot | boolean | true要求冷重启；false允许复用有效启动配置，仍受下方重启规则约束 |
+| bootMode | string/null | 启动介质，取值见4.21；null仅配合power:null、reboot:false，空字符串无效 |
 | timeoutMs | integer 可选 | 省略或0不限算法等待；非零1..86400000ms；不是启动等待时限 |
-| TimingParameters | object/null 可选 | 时序参数，可只提供下表中的部分项；当前仅解析保存，不应用到RK |
+| TimingParameters | object 必填 | 默认填{}；子字段可部分提供，均为字符串；当前仅校验保存，不写RK |
 
-原六个根字段必填，TimingParameters和timeoutMs可省略；不接受未知字段。power对象含类型与三路电压，不以缺省字段继承上次值。
+七个根字段必填，含TimingParameters；仅timeoutMs可省略。TimingParameters须为对象，使用默认时序填{}，缺失或null回invalidArgument。不接受未知字段；power不继承上次值。
 
-TimingParameters子字段均为可选字符串；可传空对象或空字符串。未填项不补默认值、不继承上一请求。单位、有效取值及RK下发方式待双方确认；accepted/completed不表示时序已生效。
+TimingParameters子字段均为可选字符串，可只填部分项或空字符串。未填项不补默认值、不继承上一请求。当前仅校验保存，不写RK；accepted/completed不表示时序已生效。
 
 | 子字段 | 类型 | 含义 |
 |---|---|---|
 | Freq | string | 目标频率 |
-| CASLatency | string | CAS读写延迟，读写区分方式待确认 |
+| CASReadLatency | string | CAS读延迟 |
+| CASWriteLatency | string | CAS写延迟 |
 | tRC | string | 同一bank相邻Activate的最小间隔 |
 | tRCD | string | Activate到Read/Write的最小间隔 |
 | tRFC | string | 刷新恢复时间 |
@@ -245,37 +246,21 @@ TimingParameters子字段均为可选字符串；可传空对象或空字符串�
 
 #### 电压与重启规则
 
-| 规则 | 要求 |
-|---|---|
-| 电压格式 | 非空ASCII十进制字符串mV；不含符号、空格、小数、指数或单位，不用JSON数字 |
-| 标称值 | VDD1/VDD2/VDDQ：LPDDR4为1800/1100/1100mV，LPDDR4X为1800/1100/600mV |
-| 步进和范围 | valMv=nominalMv+stepMv×n，n为整数；步进10/5/5mV，范围见4.24；不取整、不接收旧Steps字段 |
-| 安全范围 | PC确认DDR安全电压及三轨组合；MCU校验器件可编码范围和步进。可写不等于DDR安全 |
-| 电压用途 | power用于DDR初始化/训练，不是训练后拉偏；运行期调压另用0509 |
-| 必须重新启动 | 类型、电压或Boot改变，或有效启动配置未知/失效时；即使reboot=false也执行，以MCU判断为准 |
-| 可复用启动 | 配置仍有效、全部不变且RK就绪时可用reboot=false；已OFF则先上电 |
-| 断电约束 | 冷重启直接关RK/DDR电源；PC须先确保RK可断电、不在写盘 |
-
-外部已启动模式：RK已进入算法服务、B1电源状态为ON时，以下请求保持电压与启动状态：
-
-```json
-{"algorithmType":"functional","algorithmName":"mats","algorithmIndex":1,"power":null,"reboot":false,"bootMode":null}
-```
-
-power与bootMode必须同时null、reboot必须false；不能混用部分null或空字符串。
+- PC须确认DDR电压及三轨组合安全，并确保RK允许断电、不在写盘；MCU只校验器件可编码范围和步进。
+- power为对象时，内存类型、电压或Boot改变，或启动配置未知/失效，MCU强制冷重启；reboot=false不能取消。运行期调压另用0509。
 
 #### 应答与推进
 
-| 场景 | MCU应答 / PC规则 |
+| 应答 | 含义与PC处理 |
 |---|---|
-| 完整启动 | 0006 accepted → completed；completed只表示启动准备及算法提交完成 |
-| 外部已启动 | 0006 accepted；不另发启动completed |
-| 最终结果 | 0105；PC收到对应algorithmIndex的结果后再推进下一项 |
-| 准备或通信失败 | 0006 failed，不作为芯片FAIL；超时不自动重发或重启 |
-| 测试在途 | 新开始、改电源/Boot/电压、升级写回busy；心跳和查询可继续 |
-| 断开连接 | 不取消RK；旧结果不补发到新连接，执行未结束前仍可能busy |
+| 0006 accepted | 已受理，尚未完成测试 |
+| 0006 completed | 启动准备及算法提交完成；外部已启动模式不发送此应答 |
+| 0105 | 最终结果；PC核对当前algorithmIndex后再推进下一项 |
+| 0006 failed | 请求或执行失败，非芯片FAIL；busy表示占用，超时不会自动重试或重启 |
 
-0006的requestCommandId=259。合法index原样带回；默认无限等待不表示会自动解除busy。提前收尾见0107。
+0006的requestCommandId=259，合法algorithmIndex原样带回。测试期间心跳、查询可继续；新测试、改电源/Boot/电压可能返回busy。
+
+断线不取消RK，也不向新连接补发旧结果；等待期间不会自动解除busy。提前收尾见0107。
 
 ### 4.8 停止测试（0x0104）
 
@@ -347,7 +332,7 @@ MCU→PC。每个FUNC算法上报一包，当前为两个镜像各一颗DDR的�
 | 无有效数据 | 对应值为null；完全无数据时measurementData=null，不用0代替 |
 | 统计区间 | 本次算法投递前清零、结束冻结；不计启动准备，查询不清零 |
 
-采样异常不等于芯片FAIL；0107提前结束后的结果不再上报。SLT格式见4.15，PARA保留。
+采样异常不等于芯片FAIL；0107提前结束后的结果不再上报。SLT格式见4.15，PARA格式见4.13。
 
 ### 4.10 整轮开始（0x0106）
 
@@ -360,9 +345,9 @@ PC→MCU。开始一轮测试，不携带加热属性或灯状态。
 - 应答：0006 completed，requestCommandId=262；已有整轮或测试占用时回busy。
 - 是否加热和测试期间灯态由B1通过B2通信获取，实际加热仍由PC控制B2。
 - 默认常温仅为显示初值，不代表已确认B2未加热、已冷却或可触碰。
-- 顺序：0106 → 串行FUNC/SLT/PARA → 0107。FUNC等待0105；SLT由PC回送010B并等待确认；PARA的0108/0109当前仅预留。
-- 未先完成0106时，FUNC/SLT开始返回0006 failed/invalidState。
-- FUNC的algorithmIndex在本轮内区分算法项；SLT的algorithmIndex固定null。
+- 顺序：0106 → 串行FUNC/SLT/PARA → 0107。FUNC等待0105；PARA等待0109；SLT由PC回送010B并等待确认。
+- 未先完成0106时，FUNC/PARA/SLT开始返回0006 failed/invalidState。
+- FUNC/PARA的algorithmIndex在本轮内区分算法项；SLT的algorithmIndex固定null。
 - 本命令不启动算法或切换电源；灯态不是已达温、已冷却或可触碰的判据。
 
 ### 4.11 整轮结束（0x0107）
@@ -399,11 +384,89 @@ PC→MCU。提交本轮失败芯片清单并结束本轮；只列失败芯片，
 
 ### 4.12 PARA开始测试（0x0108）
 
-保留：PC→MCU。JSON及执行规则暂不定义，未实现时返回0006 failed/notSupported。
+PC→MCU，每次提交一个PARA算法。请求结构、电压/重启规则及外部已启动模式与4.7一致。
+
+```json
+{
+  "algorithmType": "parametric",
+  "algorithmName": "idd_0",
+  "algorithmIndex": 1,
+  "TimingParameters": {
+    "Freq": "",
+    "CASReadLatency": "",
+    "CASWriteLatency": "",
+    "tRC": "",
+    "tRCD": "",
+    "tRFC": "",
+    "tRP": "",
+    "tRAS": "",
+    "tRRD": "",
+    "BurstLength": "",
+    "ODT": "",
+    "tREFI": ""
+  },
+  "power": {
+    "memoryType": "LPDDR4X",
+    "vdd1": "1800",
+    "vdd2": "1100",
+    "vddq": "600"
+  },
+  "reboot": false,
+  "bootMode": "fspiM1"
+}
+```
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| algorithmType | string | 固定parametric |
+| algorithmName | string | IDD算法名称，按双方约定填写，区分大小写 |
+| algorithmIndex | integer | PC计划项编号，与FUNC相同，响应和结果原样带回 |
+| power / reboot / bootMode | object/null / boolean / string/null | 与4.7相同；示例reboot=false仍受配置变化重启规则约束 |
+| TimingParameters | object 必填 | 默认填{}，不可缺失或null；子字段同4.7，仅校验保存，不写RK |
+| timeoutMs | integer 可选 | 与4.7相同；不是测量窗口 |
+
+- 先完成0106，再发送0108；同一时刻只允许一个FUNC/PARA/SLT测试。
+- 应答为0006 accepted；完整启动准备另回completed；requestCommandId=264，algorithmIndex原样带回。
+- 最终结果为0109，PC收到对应结果后再推进；准备或通信失败为0006 failed，不作为芯片FAIL。
+- 当前仅下发算法编号并等待RK最终结果；进入/退出及专用IDD测量窗口后续接入，PC不增加action字段。
 
 ### 4.13 PARA结果上报（0x0109）
 
-保留：MCU→PC。结果JSON、测量及判定规则暂不定义。
+MCU→PC。结构复用4.9，algorithmType固定parametric，名称及index与0108请求一致。
+
+```json
+{
+  "siteId": "1",
+  "algorithmType": "parametric",
+  "algorithmName": "idd_0",
+  "algorithmIndex": 1,
+  "testTimeMs": 1000,
+  "testResults": [
+    {
+      "mirrorIndex": 0,
+      "testStatus": 1,
+      "resultDesc": {"firstErrorAddress": null, "errorType": ""},
+      "physicalAddr": ""
+    },
+    {
+      "mirrorIndex": 1,
+      "testStatus": 1,
+      "resultDesc": {"firstErrorAddress": null, "errorType": ""},
+      "physicalAddr": ""
+    }
+  ],
+  "measurementData": null
+}
+```
+
+| 字段 | 规则 |
+|---|---|
+| testResults / resultDesc | 沿用RK两颗结果及首错信息；没有错误类型时errorType为空字符串 |
+| testStatus | 0=FAIL、1=PASS，来自RK结果；MCU不根据共轨电流自动作IDD限值判定 |
+| measurementData | 与4.9相同的18项共享统计；示例null表示无有效测量数据 |
+| 统计区间 | 当前为本次算法执行期间统计，不代表已对齐标准IDD稳定测量窗口 |
+
+没有RK最终结果时不伪造0109；采样缺失或通信失败不当作DDR FAIL。
 
 ### 4.14 SLT开始测试（0x010A）
 
@@ -434,9 +497,9 @@ PC→MCU。启动整次SLT，MCU准备电源和EDK启动介质；具体算法及
 | power | object | 沿用4.7的memoryType及三轨字符串mV，非null |
 | reboot | boolean | 沿用4.7重启规则，false不能绕过配置变化所需重启 |
 | bootMode | string | 实际EDK启动介质；取值见4.21，非空且非null |
-| TimingParameters | object 可选 | 子字段同4.7；可只填部分项或空对象，提供时不能为null；当前仅解析保存 |
+| TimingParameters | object 必填 | 默认填{}；子字段可部分提供，均为字符串；当前仅校验保存，不写RK |
 
-- 原六个根字段必填，TimingParameters可省略；不带timeoutMs。电压范围、步进和安全责任沿用4.7。
+- 七个根字段全部必填；TimingParameters默认填{}，缺失或null回invalidArgument。不带timeoutMs；电压范围、步进和安全责任沿用4.7。
 - 应答：0006 accepted → completed，requestCommandId=266、algorithmIndex=null；completed仅表示电源/Boot准备完成，不是SLT测试完成。
 - MCU不等待RK心跳、不下发串口算法，也不检查EDK或报告服务是否启动。
 - PC确认实际启动、取得SLT报告后发送010B；示例emmc须与实际EDK部署位置一致。
@@ -639,170 +702,17 @@ PC反向发送0x0602时，MCU返回0x0006 failed/invalidDirection。
 
 ### 4.28 B1–B2保活状态响应（0x0802）
 
-### 4.29 固件升级请求（0x0901）
+### 4.29 固件升级请求（0x0901，保留）
 
-PC→MCU。一个.ota文件按begin→write→finish发送，每步等待响应；不直接发送bin/axf。以下只定义MCU升级。
+当前B1/V2不提供网络升级。合法请求返回0006 failed，errorCode为notSupported；不写Flash、不复位MCU。
 
-rk_begin/rk_write/rk_finish/rk_query/rk_cancel仅预留，返回0006 failed/notSupported并带回action。
+### 4.30 固件升级响应（0x0902，保留）
 
-开始下载：
+当前不发送。
 
-```json
-{"action":"mcu_begin","packageId":"5A1B2C3D","packageSize":139452}
-```
+### 4.31 固件升级完成（0x0903，保留）
 
-发送数据块：
-
-```json
-{"action":"mcu_write","packageId":"5A1B2C3D","offset":0,"data":"T1RBMQ=="}
-```
-
-完整文件发送后申请安装并重启：
-
-```json
-{"action":"mcu_finish","packageId":"5A1B2C3D"}
-```
-
-查询目标包的升级结果；查询一般状态时省略packageId：
-
-```json
-{"action":"mcu_query","packageId":"5A1B2C3D"}
-```
-
-取消尚未提交的下载：
-
-```json
-{"action":"mcu_cancel","packageId":"5A1B2C3D"}
-```
-
-| 字段名 | 类型 | 含义 |
-|---|---|---|
-| action | string | mcu_begin开始、mcu_write写块、mcu_finish提交并重启、mcu_query查询、mcu_cancel取消 |
-| packageId | string | 包头CRC32，8位大写十六进制，不带0x；非Seq，同一文件保持不变。除mcu_query可省略外，其余动作必填 |
-| packageSize | integer | `.ota`总字节数，116..2097152（2MiB）；仅mcu_begin必填 |
-| offset | integer | 文件原始字节偏移，从0开始；mcu_write必填 |
-| data | string | mcu_write必填；独立块的标准Base64，无换行、有必要填充，解码后1..3000字节 |
-
-| 操作规则 | 要求 |
-|---|---|
-| 包信息 | 文件36..39字节为小端u32包头CRC；44/46/48偏移的三个小端u16为目标版本major/minor/patch |
-| 写块 | 不超过begin返回的blockSize；末块不补零，文件字节原样Base64编码 |
-| 报文限制 | 紧凑JSON，Base64不额外转义；18字节头加正文≤4096字节 |
-| 字段 | 仅使用各动作示例列出的字段；query可省略packageId查询一般状态；旧无前缀动作不接受 |
-| 升级前 | 停止测试、使RK/DDR安全下电，并协调B2维护，防止升级中复位或断电 |
-
-T1RBMQ==仅为4字节示例，因此下一偏移为4；不是一个完整升级包。
-
-### 4.30 固件升级响应（0x0902）
-
-mcu_begin成功：
-
-```json
-{"action":"mcu_begin","packageId":"5A1B2C3D","status":"completed","state":"receiving","blockSize":3000,"nextOffset":0}
-```
-
-mcu_write成功：
-
-```json
-{"action":"mcu_write","packageId":"5A1B2C3D","status":"completed","state":"receiving","offset":0,"nextOffset":4}
-```
-
-mcu_finish受理，随后MCU自动重启；accepted不是升级成功：
-
-```json
-{"action":"mcu_finish","packageId":"5A1B2C3D","status":"accepted","state":"ready"}
-```
-
-一般状态查询响应示例：
-
-```json
-{"action":"mcu_query","status":"completed","state":"confirmed","activePackageId":"11223344","firmwareVersion":"0.1.2","confirmed":true}
-```
-
-| 字段名 | 类型 | 含义 |
-|---|---|---|
-| action | string | 对应请求动作 |
-| packageId | string | 对应请求包；mcu_query请求带该字段时响应也带回，不代表实际运行包 |
-| status | string | completed为本次操作完成；accepted仅为安装已受理 |
-| state | string | 当前升级/启动状态，见下表 |
-| blockSize | integer | mcu_begin返回的单块原始字节上限 |
-| offset | integer | mcu_write确认的本块原始字节偏移 |
-| nextOffset | integer | 已连续写入并读回验证的原始字节数，也是下一块起点 |
-| activePackageId | string / null | mcu_query返回的实际运行包标识；旧镜像无有效标识时为null |
-| firmwareVersion | string | 实际运行固件版本，格式major.minor.patch |
-| confirmed | boolean | 实际运行固件是否通过本次启动健康确认 |
-| download | object | 仅mcu_query且state=receiving时返回的下载进度；其他状态省略，不是固件文件内容 |
-| download.packageId | string | 正在下载的包标识 |
-| download.receivedBytes | integer | 已接收的原始字节数 |
-| download.totalBytes | integer | 下载文件总字节数 |
-
-| state | 含义 |
-|---|---|
-| receiving | 下载中，按nextOffset继续 |
-| ready | 已提交，等待自动重启安装 |
-| commitUnknown | 提交结果不确定，等待复位后查询，不能重新下载 |
-| trial | 本次启动尚待健康确认 |
-| confirmed | 当前固件健康，不单独表示目标包升级成功 |
-| cancelled | 下载已取消 |
-| failed | 未提交下载失败 |
-
-- PC按action、packageId匹配响应，mcu_write还须匹配offset；不按Seq匹配。
-- 重复相同mcu_begin不清空已收进度。仅上一成功块允许以完全相同内容重发；其他错位或不同内容返回失败，不得跳过未确认数据。
-- mcu_cancel成功回0x0902、status=completed、state=cancelled；已提交后禁止取消。
-
-业务失败返回0x0006，例如：
-
-```json
-{"requestCommandId":2305,"status":"failed","action":"mcu_write","packageId":"5A1B2C3D","offset":1024,"nextOffset":0,"errorCode":"offsetMismatch"}
-```
-
-| 字段名 | 类型 | 含义 |
-|---|---|---|
-| requestCommandId | integer | 固定2305，即0x0901 |
-| status | string | 固定failed |
-| action / packageId | string | 仅带回已合法解析的字段 |
-| offset | integer | mcu_write可带回本块偏移 |
-| nextOffset | integer | mcu_write可带回仍有效的下一块偏移 |
-| errorCode | string | 错误码，见下表 |
-
-| errorCode | 含义 |
-|---|---|
-| invalidArgument / invalidDirection / notSupported / invalidState / busy / notReady | 沿用通用参数、方向、支持能力、状态、忙碌及未就绪错误 |
-| offsetMismatch | 偏移错误 |
-| dataMismatch | 重复块内容不同 |
-| packageInvalid | 包结构错误 |
-| targetMismatch | 板型不符 |
-| versionRejected | 版本不允许 |
-| crcMismatch | 校验失败 |
-| flashError | 存储错误 |
-| commitUnknown | 提交结果不确定，等待复位后查询，不能按普通失败立即重传下载 |
-
-### 4.31 固件升级完成（0x0903）
-
-MCU→PC，响应携带目标packageId的mcu_query；仅在目标包运行、通过本次30秒健康确认且无活动升级时返回。否则回0902，不主动推送。
-
-```json
-{"action":"mcu_query","packageId":"5A1B2C3D","status":"completed","state":"confirmed","firmwareVersion":"0.1.3","confirmed":true}
-```
-
-| 字段名 | 类型 | 含义 |
-|---|---|---|
-| action | string | 固定mcu_query |
-| packageId | string | 请求查询且已健康运行的目标包标识 |
-| status | string | 固定completed |
-| state | string | 固定confirmed |
-| firmwareVersion | string | 实际运行固件版本，须与目标文件一致；不是硬件版本testerVersion |
-| confirmed | boolean | 固定true，已通过本次启动健康确认 |
-
-PC核对packageId和firmwareVersion后才判升级成功；可重复查询，无需额外ACK。返回旧版本表示未运行目标包，断连/超时不能单独认定回滚。
-
-| 操作 | PC规则 |
-|---|---|
-| 等待与重发 | 普通请求等待5秒，mcu_finish等待30秒；同一连接最多重发3次，业务字段不变，Seq照常递增 |
-| 未提交下载中断 | 断连/复位或30秒无下载活动即取消，重连从0开始；mcu_query、心跳和重复mcu_begin不延长超时 |
-| mcu_finish后断连 | 即使未收到受理响应，也先查询结果，禁止盲目重新下载；ready和commitUnknown后禁止新下载及取消 |
-| 重连与查询 | 每2秒重连/查询，安装期间B无网络服务；等待600秒仍无结果显示“结果未确认”，不自动切电源或强制复位 |
-| 升级边界 | 仅维护升级，普通路径拒绝同版本和降版；不修改B、稳定版及板卡信息。CRC用于检测损坏，不作为身份认证 |
+当前不发送。0901～0903编号不用于其它业务。
 
 ## 5. 业务命令补充格式
 

@@ -32,6 +32,30 @@
 .global  g_pfnVectors
 .global  Default_Handler
 
+/*
+ * B1受控电源GPIO。系统已确认采用“耦合复位”语义：任何MCU复位都必须
+ * 立即关闭RK和DDR受控电源，之后只允许PC通过正式上电流程重新开启。
+ * PC6/PC7是真实使能，PC6关闭4V后TPS随之掉电；当前BRD的PG11路径为NC，
+ * 仍在系统初始化之前保持低，避免未来误装0R时产生意外使能。
+ */
+    .equ    RCC_AHB4ENR,            0x580244E0
+    .equ    RCC_GPIOC_GPIOG_EN,     0x00000044
+    .equ    GPIOC_MODER,            0x58020800
+    .equ    GPIOC_OTYPER,           0x58020804
+    .equ    GPIOC_BSRR,             0x58020818
+    .equ    GPIOG_MODER,            0x58021800
+    .equ    GPIOG_OTYPER,           0x58021804
+    .equ    GPIOG_BSRR,             0x58021818
+    .equ    GPIOC_EN_RESET,         0x00C00000  /* PC6/PC7输出锁存置低 */
+    .equ    GPIOG_EN_RESET,         0x08000000  /* PG11输出锁存置低 */
+    .equ    GPIOC_OTYPE_MASK,       0x000000C0
+    .equ    GPIOG_OTYPE_MASK,       0x00000800
+    .equ    GPIOC_MODE_MASK,        0x0000F000
+    .equ    GPIOC_MODE_OUTPUT,      0x00005000
+    .equ    GPIOG_MODE_MASK,        0x00C00000
+    .equ    GPIOG_MODE_OUTPUT,      0x00400000
+
+
 /* start address for the initialization values of the .data section.
 defined in linker script */
 .word  _sidata
@@ -58,7 +82,52 @@ defined in linker script */
   .weak  Reset_Handler
   .type  Reset_Handler, %function
 Reset_Handler:
-  ldr   sp, =_estack      /* set stack pointer */
+  ldr   sp, =_estack      /* 使用内部DTCM栈，不依赖RAM内容。 */
+
+    /* 先开GPIOC/G时钟；读回和DSB保证后续GPIO写入不会越过时钟使能。 */
+    ldr     r0, =RCC_AHB4ENR
+    ldr     r1, [r0]
+    ldr     r2, =RCC_GPIOC_GPIOG_EN
+    orr     r1, r1, r2
+    str     r1, [r0]
+    ldr     r1, [r0]
+    dsb
+
+    /* 先写低电平锁存值，再切换输出模式，避免模式切换时产生高脉冲。 */
+    ldr     r0, =GPIOC_BSRR
+    ldr     r1, =GPIOC_EN_RESET
+    str     r1, [r0]
+    ldr     r0, =GPIOG_BSRR
+    ldr     r1, =GPIOG_EN_RESET
+    str     r1, [r0]
+
+    /* PC6是真正的4V/TPS总开关，优先切为输出低；PG11随后保持低。 */
+    ldr     r0, =GPIOC_OTYPER
+    ldr     r1, [r0]
+    ldr     r2, =GPIOC_OTYPE_MASK
+    bic     r1, r1, r2
+    str     r1, [r0]
+    ldr     r0, =GPIOC_MODER
+    ldr     r1, [r0]
+    ldr     r2, =GPIOC_MODE_MASK
+    bic     r1, r1, r2
+    ldr     r2, =GPIOC_MODE_OUTPUT
+    orr     r1, r1, r2
+    str     r1, [r0]
+
+    ldr     r0, =GPIOG_OTYPER
+    ldr     r1, [r0]
+    ldr     r2, =GPIOG_OTYPE_MASK
+    bic     r1, r1, r2
+    str     r1, [r0]
+    ldr     r0, =GPIOG_MODER
+    ldr     r1, [r0]
+    ldr     r2, =GPIOG_MODE_MASK
+    bic     r1, r1, r2
+    ldr     r2, =GPIOG_MODE_OUTPUT
+    orr     r1, r1, r2
+    str     r1, [r0]
+    dsb
 
 /* Call the ExitRun0Mode function to configure the power supply */
   bl  ExitRun0Mode

@@ -7,7 +7,7 @@
 **  Author		: STM32CubeMX
 **
 **  Abstract    : Linker script for STM32H743IITx series
-**                1920Kbytes application FLASH and 1056Kbytes RAM
+**                2048Kbytes FLASH and 1056Kbytes RAM
 **
 **                Set heap size, stack size and stack location according
 **                to application requirements.
@@ -50,7 +50,7 @@
 */
 
 /* Entry Point */
-ENTRY(Reset_Handler)
+ENTRY(Boot_Image_Reset)
 
 /* Specify the memory areas */
 MEMORY
@@ -60,9 +60,9 @@ RAM (xrw)      : ORIGIN = 0x24000000, LENGTH = 512K
 RAM_D2 (xrw)      : ORIGIN = 0x30000000, LENGTH = 288K
 RAM_D3 (xrw)      : ORIGIN = 0x38000000, LENGTH = 64K
 ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
-/* 普通调试布局不变；OTA两槽共同限制为896KiB，禁止越界覆盖相邻槽。 */
-FLASH (rx)      : ORIGIN = DEFINED(OTA_APP_BASE) ? OTA_APP_BASE : 0x08020000,
-                 LENGTH = DEFINED(OTA_APP_BASE) ? 896K : 1920K
+/* 首128KiB放精简Boot，其余1920KiB供单App；最终ELF合并两段。 */
+BOOT (rx)       : ORIGIN = 0x08000000, LENGTH = 128K
+FLASH (rx)      : ORIGIN = 0x08020000, LENGTH = 1920K
 }
 
 /* Highest address of the user mode stack */
@@ -76,6 +76,9 @@ _Min_Stack_Size = 0x1000; /* required amount of stack */
 SECTIONS
 {
   /* The startup code goes first into FLASH */
+  /* 首扇区嵌入独立Boot；App向量从第二扇区开始。 */
+  .boot_image : { KEEP(*(.boot_image)) } >BOOT
+  ASSERT(SIZEOF(.boot_image) >= 664, "缺少完整Boot")
   .isr_vector :
   {
     . = ALIGN(4);
@@ -181,6 +184,10 @@ SECTIONS
     PROVIDE(__data_end = .);
     PROVIDE(__tdata_end = .);
   } >DTCMRAM AT> FLASH
+
+  /* 链接时检查代码和RAM初始化载荷未超过内部Flash容量。 */
+  ASSERT(LOADADDR(.tdata) + SIZEOF(.tdata) <= ORIGIN(FLASH) + LENGTH(FLASH),
+         "Application exceeds internal Flash")
 
   PROVIDE( __tdata_start = ADDR(.tdata) );
   PROVIDE( __tdata_size = __tdata_end - __tdata_start );

@@ -3,7 +3,6 @@
 #include "queue.h"
 #include "pc_test_service.h"
 #include "pc_power_service.h"
-#include "ota_app.h"
 #include "b2_board.h"
 #include "network_config.h"
 #include <string.h>
@@ -39,12 +38,6 @@ void b2_service_exchange(const b2_request_t *request, b2_service_reply_t *reply)
 static int network_change_busy(int connected)
 {
     if (connected || pc_test_service_busy() || pc_power_service_busy()) return 1;
-#if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
-    ota_download_progress_t progress;
-    ota_download_get_progress(&progress);
-    if (progress.state == OTA_DOWNLOAD_RECEIVING || progress.state == OTA_DOWNLOAD_READY ||
-        progress.state == OTA_DOWNLOAD_COMMIT_UNKNOWN) return 1;
-#endif
     return 0;
 }
 

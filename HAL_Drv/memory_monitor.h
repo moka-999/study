@@ -19,6 +19,10 @@ typedef struct {
     ad7124_t adc;
     uint8_t pac_ready;
     uint8_t adc_ready;
+    uint8_t voltage_collecting; /* 已开始一轮扫描，包括等待第一条转换的阶段。 */
+    uint8_t voltage_mask;       /* 本轮已经取得的CH0..2，只有全部有效才交付。 */
+    uint32_t voltage_begin_ms;  /* 本轮首次推进时刻；用于统计窗口和扫描超时。 */
+    int32_t voltage_pending_mv[MEMORY_MONITOR_RAIL_COUNT];
 } memory_monitor_t;
 
 typedef struct {
@@ -52,6 +56,9 @@ void memory_monitor_configure(memory_monitor_t *monitor,
  */
 int memory_monitor_init(memory_monitor_t *monitor);
 
+/** 返回已初始化的VOLTAGE/IDD组位；NULL返回0，只读，不访问总线。 */
+uint8_t memory_monitor_ready_groups(const memory_monitor_t *monitor);
+
 /**
  * @brief 采集三轨电压、IDD和TPS状态，按类别标记有效性。
  * @param[in,out] monitor 非NULL句柄，须先初始化；设备访问会刷新/读取状态。
@@ -63,6 +70,37 @@ int memory_monitor_init(memory_monitor_t *monitor);
  */
 int memory_monitor_sample(memory_monitor_t *monitor,
                           memory_monitor_sample_t *sample);
+
+/**
+ * @brief 独立读取PAC的三轨新快照，只更新sample中的IDD组。
+ * @return IF_OK本次刷新、稳定等待及配置校验均成功；IF_ERR失败。
+ * @note 保留原始码及current_ua精度；失败清IDD有效位，不影响电压/TPS组。
+ *       同步串行调用，刷新后仍等待数据稳定；不能宣称读到了全部内部转换。
+ */
+int memory_monitor_read_current(memory_monitor_t *monitor,
+                                memory_monitor_sample_t *sample);
+
+/**
+ * @brief 推进高精度AD三轨扫描，每次最多读取一个已就绪通道。
+ * @param[in,out] monitor 已配置的句柄，内部跨调用保存未收齐的通道。
+ * @param[in,out] sample 完整成功才替换电压组；等待时保留上次完整电压。
+ * @param[in] now_ms 本次调用起点的毫秒时刻，允许uint32_t回绕。
+ * @param[out] begin_ms 非NULL；返回非0时给出本轮扫描起点，供窗口过滤。
+ * @return 1取得新完整三轨；0等待或尚未收齐；IF_ERR器件/参数异常；
+ *         IF_TIMEOUT一轮超过1000ms，须重新初始化ADC。
+ * @note FS=384、Sinc4不变。失败清电压有效位及未完成扫描，不影响PAC；
+ *       返回0不是失败样本，也不能把缓存电压再次累计到统计中。
+ */
+int memory_monitor_poll_voltage(memory_monitor_t *monitor,
+                                memory_monitor_sample_t *sample,
+                                uint32_t now_ms, uint32_t *begin_ms);
+
+/**
+ * @brief 独立读取三颗TPS状态，只更新对应组；读取会清器件状态。
+ * @return IF_OK全部成功；IF_ERR任一失败并清TPS有效位，其余两组保持。
+ */
+int memory_monitor_read_status(memory_monitor_t *monitor,
+                               memory_monitor_sample_t *sample);
 
 /**
  * @brief 下电后清除器件就绪标志，使下次上电重新初始化。

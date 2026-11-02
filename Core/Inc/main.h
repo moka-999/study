@@ -79,7 +79,7 @@ extern DMA_HandleTypeDef hdma_usart1_rx;
 #define B1_SPI4_MOSI_PORT      GPIOE
 #define B1_SPI4_MOSI_PIN       GPIO_PIN_14
 
-/* USART1本地日志出口；UART4对接RK协议；USART2只收RK调试日志。 */
+/* USART1本地日志出口；UART4对接RK协议；USART2双向连接RK调试口。 */
 #define B1_USART1_TX_PORT      GPIOA
 #define B1_USART1_TX_PIN       GPIO_PIN_9
 #define B1_USART1_RX_PORT      GPIOA

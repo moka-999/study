@@ -37,7 +37,7 @@ typedef struct {
     const char *boot_mode;       /* 已支持的Boot模式名称；不是PXE开关。 */
     uint8_t external_ready;      /* 1=power/bootMode均为null，保持RK现有供电和启动状态。 */
     uint32_t timeout_ms;         /* 最终结果等待毫秒数；0=不限制，非零最多86400000。 */
-    const cJSON *timing_parameters; /* 借用TimingParameters对象；NULL=未提供/null，不代表已应用。 */
+    const cJSON *timing_parameters; /* 成功解析后借用必填对象；空对象表示默认时序，不代表已应用。 */
 } pc_test_start_view_t;
 
 /** 将已定义的PC启动介质名称转为DAC业务枚举；0成功，-1无效，失败不改输出。 */
@@ -74,7 +74,7 @@ pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type
                                       int16_t steps[3], uint16_t target_mv[3]);
 
 /**
- * @brief 校验START_TEST六个必填字段及可选timeoutMs/TimingParameters，不操作硬件。
+ * @brief 校验START_TEST七个必填字段及可选timeoutMs，不操作硬件。
  * @param[in] root 非NULL JSON对象；网络正文须先经pc_json_parse_object拒绝内嵌NUL。
  * @param[out] view 非NULL输出视图，失败不修改。
  * @return PC_TEST_JSON_OK成功；其他值区分参数、缺字段、类型及整数范围错误。
@@ -85,15 +85,16 @@ pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type
  *       电压对象严格要求memoryType和字符串mV的vdd1/vdd2/vddq，复用pc_power_parse。
  *       TPS可编码不等于DDR安全范围已经批准。
  *       algorithmName只校验字符串类型，具体算法支持情况由命令表决定。
- *       TimingParameters可省略/null/空对象，也可只含已定义字段中的几项；值须为
+ *       TimingParameters必须为对象，默认时序传{}；也可只含已定义字段中的几项，值须为
  *       字符串，空字符串仍保留。仅校验字段和类型，不猜测单位/范围，不向RK下发。
+ *       CASReadLatency与CASWriteLatency分别表示读、写延迟，可单独提供；不接受CASLatency。
  */
 pc_test_json_result_t pc_test_start_parse(const cJSON *root,
                                           pc_test_start_view_t *view);
 
 /** 010A专用解析：严格匹配slt/memtest86，index为null，power/bootMode非null。
  * 复用三轨字符串mV、Boot与reboot校验；不接受timeoutMs，不检查RK软件状态。
- * TimingParameters省略时兼容原客户端；提供时须为对象，不能显式填null。
+ * TimingParameters必须为对象，默认时序传{}；省略或显式填null均拒绝。
  * view仍借用root，algorithm_index置0但不得在线上回填0（SLT必须回null）。
  */
 pc_test_json_result_t pc_slt_start_parse(const cJSON *root, pc_test_start_view_t *view);
@@ -143,7 +144,8 @@ typedef struct {
 } pc_functional_die_result_t;
 
 /**
- * @brief 为一次FUNC算法创建0x0105，两条结果按mirrorIndex=0、1排列。
+ * @brief 为FUNC/PARA创建共享结果正文，两条RK结果按mirrorIndex=0、1排列。
+ * @param[in] algorithm_type 仅允许functional或parametric，不决定PC帧头命令号。
  * @param[in] algorithm_name 非NULL、NUL结尾的算法名称，复制到结果中。
  * @param[in] algorithm_index PC计划项编号，原样回带。
  * @param[in] site_id 非NULL板卡标志字符串，内容由业务层加载。
@@ -154,6 +156,11 @@ typedef struct {
  *       physicalAddr固定为空。PASS的地址为null且错误类型为空；FAIL地址0仍保留为十六进制字符串。
  *       testTimeMs按uint64十进制JSON整数无损输出，不经过double换算。
  */
+cJSON *pc_algorithm_result_create(const char *algorithm_type, const char *algorithm_name,
+    uint32_t algorithm_index, const char *site_id, uint64_t elapsed_ms,
+    const pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT]);
+
+/* 固定functional的兼容入口，其余输入、所有权及失败返回值与上面相同。 */
 cJSON *pc_functional_result_create(const char *algorithm_name,
                                     uint32_t algorithm_index,
                                     const char *site_id,
@@ -161,7 +168,7 @@ cJSON *pc_functional_result_create(const char *algorithm_name,
                                     const pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT]);
 
 /* 仅借用统计快照，不依赖采样任务或器件；组包不会推进窗口或增加样本。
- * statistics用于0602，measurementData位于0105顶层，表示B1共用电源轨而非单颗DDR电流。
+ * statistics用于0602，measurementData位于0105/0109顶层，表示共轨而非单颗DDR电流。
  * 全部无样本时measurementData为null；部分无样本的单项为null。
  * 返回1成功、0参数/分配失败，失败时调用方删除整个body。
  */

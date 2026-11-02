@@ -8,7 +8,7 @@
 #include "uart_router.h"
 #include "state_machine.h"
 #include "rk_link.h"
-#include "ota_app.h"
+#include "task_watchdog.h"
 #if defined(B1_RK_UART)
 #include "pwr_ctrl.h"
 #endif
@@ -280,7 +280,7 @@ static void process_heartbeat(TickType_t *last_tick)
     }
 }
 
-/* argument未使用；每10ms推进一次，OFF也上报OTA任务健康，不正常返回。 */
+/* argument未使用；每10ms推进一次，OFF也上报任务存活，不正常返回。 */
 void StartRkTask(void *argument)
 {
     (void)argument;
@@ -304,7 +304,7 @@ void StartRkTask(void *argument)
                 if (uart_poll_rx(0, buffer, sizeof(buffer)) == 0) break;
             }
             last_heartbeat = xTaskGetTickCount();
-            ota_app_progress(OTA_TASK_RK);
+            task_watchdog_progress(TASK_WATCHDOG_RK);
             vTaskDelay(pdMS_TO_TICKS(20U));
             continue;
         }
@@ -339,8 +339,8 @@ void StartRkTask(void *argument)
         process_request();
         //到时间发送心跳
         process_heartbeat(&last_heartbeat);
-        // 记录RK任务仍在推进，供OTA健康检查使用；不是升级下载进度。
-        ota_app_progress(OTA_TASK_RK);
+        // 记录RK任务仍在推进，供独立看门狗检查使用；不要求RK实际在线。
+        task_watchdog_progress(TASK_WATCHDOG_RK);
         //让出cpu
         vTaskDelay(pdMS_TO_TICKS(10U));
     }

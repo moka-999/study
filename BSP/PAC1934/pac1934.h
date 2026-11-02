@@ -97,7 +97,7 @@ typedef struct {
 
 typedef struct {
     uint32_t vbus_mv;         /* 电压mV，向下取整。 */
-    uint32_t current_ma;      /* 兼容现有PC/统计的整数mA，不在此修改业务格式。 */
+    uint32_t current_ma;      /* 旧诊断接口的整数mA；统计和PC响应使用current_ua换算。 */
     uint32_t power_mw;        /* 功率mW，向下取整。 */
     uint64_t current_ua;      /* 保留低电流信息的µA值；不是1µA精度承诺。 */
 } pac1934_measurement_t;

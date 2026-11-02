@@ -1,4 +1,4 @@
-/* PC测试业务：管理整轮、FUNC和SLT；复用电源、RK队列及结果灯业务接口。 */
+/* PC测试业务：管理整轮、FUNC/PARA和SLT；复用电源、RK队列及结果灯接口。 */
 #ifndef PC_TEST_SERVICE_H
 #define PC_TEST_SERVICE_H
 
@@ -9,9 +9,11 @@
  * 完整配置由正式电源编排准备，READY后才启动统计并投递算法；accepted表示
  * 请求受理，不保证算法已下发。缺少板级配置/RK适配器仍拒绝，不伪造确认。
  * start中的字符串/JSON只借用至返回；在途上下文保存静态算法目录及必要字段副本。
+ * request_command仅允许0103/FUNC或0108/PARA，名称须属于对应RK算法类别。
+ * PARA先只下发编号并等待最终结果；当前统计是执行全程，不是标准IDD有效窗口。
  * 时序参数仅复制到RAM，尚不下发RK；accepted/completed不表示时序已经应用。
  */
-pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
+pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response);
 
 /** 0106只建立当前连接的整轮；已有整轮/测试/维护操作时拒绝。
@@ -26,7 +28,7 @@ pc_dispatch_result_t pc_test_round_begin(uint32_t sequence, pc_dispatch_response
 int pc_test_round_update_modes(uint8_t mask, const uint8_t modes[3]);
 
 /** 0107在完整JSON校验之后调用；位0/1/2分别为两组LPDDR及eMCP的FAIL。
- * 原子更新三灯后关闭整轮；未入RK队列的FUNC不再投递，已入队的请求仍须等待
+ * 原子更新三灯后关闭整轮；未入RK队列的FUNC/PARA不再投递，已入队的请求仍须等待
  * 实际结束才能解除busy，但不再交付结果。此操作不取消RK、不切电、不控温。
  */
 pc_dispatch_result_t pc_test_round_end(uint32_t failed_mask,
@@ -57,7 +59,7 @@ void pc_test_service_disconnected(void);
 /* 1=准备电源、执行中、结果待组包或超时后状态未知；0=无本服务在途请求。 */
 int pc_test_service_busy(void);
 
-/** 读取最近一次已受理FUNC/SLT的时序对象，只供TCP任务本地诊断。
+/** 读取最近一次已受理FUNC/PARA/SLT的时序对象，只供TCP任务本地诊断。
  * 返回只读借用指针：NULL=尚未保存或该请求未提供/null；{}与空字符串原样保留。
  * 不包含硬件生效状态，不写W25、不生成新响应字段、不合并上一请求的参数。
  * 下一次成功受理开始请求会替换并释放旧对象；拒绝、结果结束或断线不覆盖副本。

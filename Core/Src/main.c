@@ -1,5 +1,7 @@
+#include "board_storage_config.h"
 #include "main.h"
 #include "board_identity.h"
+#include "board_diagnostics.h"
 #include "flash_bsp.h"
 #include "app_freertos.h"
 #include "result_led.h"
@@ -23,13 +25,25 @@ DMA_HandleTypeDef hdma_usart1_rx;
 QSPI_HandleTypeDef hqspi;
 
 uint8_t g_b1_mac[6];
+/* 256分频、4095重装，典型LSI时钟下约32秒超时。 */
+static void MX_IWDG_Init(void)
+{
+    IWDG_HandleTypeDef watchdog = {0};
+    watchdog.Instance = IWDG1;
+    watchdog.Init.Prescaler = IWDG_PRESCALER_256;
+    watchdog.Init.Reload = 4095U;
+    watchdog.Init.Window = 4095U;
+    if (HAL_IWDG_Init(&watchdog) != HAL_OK) Error_Handler();
+}
 
 static void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C_Init(void);
 static void MX_SPI_Init(void);
 static void MX_UART_Init(void);
+#if BOARD_W25_PRESENT
 static void MX_QSPI_Init(void);
+#endif
 
 /*
  * LED1/2、LED3/4、LED5/6分别组成三颗双色灯，奇数通道FAIL、偶数通道PASS。
@@ -67,20 +81,37 @@ static const pc_power_rk_adapter_t s_power_rk = {
 int main(void)
 {
     HAL_Init();
+    board_diagnostics_boot_stage("system clock");
     SystemClock_Config();
+    board_diagnostics_boot_stage("GPIO safe defaults");
     MX_GPIO_Init();
     /* 装载首板联调时序/业务初值但保持OFF；收到正式PC命令后才操作电源。 */
     pwr_ctrl_init(&b1_power_default_timing);
+    /* 先建立本地调试口，后续外设初始化失败才有可见的阶段信息。 */
+    MX_UART_Init();
+    board_diagnostics_boot_stage("power business config (OFF)");
     if (pc_power_service_configure(&b1_power_default_business, &s_power_rk) != 0)
         Error_Handler();
+    board_diagnostics_boot_stage("I2C controllers");
     MX_I2C_Init();
+    board_diagnostics_boot_stage("SPI controllers");
     MX_SPI_Init();
-    MX_UART_Init();
+#if BOARD_W25_PRESENT
+    board_diagnostics_boot_stage("QSPI controller");
     MX_QSPI_Init();
-    /* 只初始化并确认QSPI通信，不在启动时自动擦写版本或FRU生产区域。 */
-    if (flash_if.init(&flash_if) != IF_OK) Error_Handler();
+    board_diagnostics_boot_stage("W25 device init");
+    /* 只初始化W25器件；不读取或写入固件版本、升级状态。 */
+    if (flash_if.init(&flash_if) != IF_OK)
+        Error_Handler();
+    board_diagnostics_boot_stage("W25 init OK; watchdog and LEDs");
+#else
+    board_diagnostics_boot_stage("W25 absent: tester info from constants");
+#endif
+    /* 在任务启动前开启看门狗，运行期由任务存活监测统一喂狗。 */
+    MX_IWDG_Init();
     require_ok(result_led_init(&s_result_led_map));
 
+    board_diagnostics_boot_stage("MAC and PHY reset");
     memcpy(g_b1_mac, board_mac_address(), sizeof(g_b1_mac));
     HAL_GPIO_WritePin(B1_ETH_NRST_PORT, B1_ETH_NRST_PIN, GPIO_PIN_RESET);
     HAL_Delay(10);
@@ -88,6 +119,8 @@ int main(void)
     HAL_Delay(100);
 
     /* 网络/RK/监测任务在RTOS中运行；这里只装载初值和适配器，不开电或写Boot电压。 */
+    /* FreeRTOS建立对象可能屏蔽SysTick；在此之前结束早期有超时的轮询输出。 */
+    board_diagnostics_boot_finish();
     osKernelInitialize();
     MX_FREERTOS_Init();
     osKernelStart();
@@ -293,8 +326,8 @@ static void uart_init(UART_HandleTypeDef *uart, USART_TypeDef *instance)
     uart->Init.WordLength = UART_WORDLENGTH_8B;
     uart->Init.StopBits = UART_STOPBITS_1;
     uart->Init.Parity = UART_PARITY_NONE;
-    /* RK调试口只收日志，绝不把本地切换命令或PC输入写入RK控制台。 */
-    uart->Init.Mode = instance == USART2 ? UART_MODE_RX : UART_MODE_TX_RX;
+    /* 三个串口均支持收发；USART2调试输入由控制台模式选择，不承载PC协议。 */
+    uart->Init.Mode = UART_MODE_TX_RX;
     uart->Init.HwFlowCtl = UART_HWCONTROL_NONE;
     uart->Init.OverSampling = UART_OVERSAMPLING_16;
     uart->Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
@@ -303,9 +336,9 @@ static void uart_init(UART_HandleTypeDef *uart, USART_TypeDef *instance)
 }
 
 /*
- * UART4协议、USART2日志输入、USART1本地控制台各配独立NORMAL RX DMA。
+ * UART4协议、USART2双向调试、USART1本地控制台各配独立NORMAL RX DMA。
  * RX DMA在调度器启动后的默认任务中才开启，避免FromISR早于内核运行。
- * UART4/USART1的TX复用软件环+TXE中断，不占用DMA Stream。
+ * 三路TX各用独立软件环+TXE中断，不占用DMA Stream。
  */
 static void uart_rx_dma_init(UART_HandleTypeDef *uart, DMA_HandleTypeDef *dma,
                               DMA_Stream_TypeDef *stream, uint32_t request)
@@ -330,6 +363,8 @@ static void MX_UART_Init(void)
     __HAL_RCC_USART2_CLK_ENABLE();
     __HAL_RCC_UART4_CLK_ENABLE();
     uart_init(&huart1, USART1);
+    board_diagnostics_boot_console_ready();
+    board_diagnostics_boot_stage("USART2/UART4 and RX DMA");
     uart_init(&huart2, USART2);
     uart_init(&huart4, UART4);
     __HAL_RCC_DMA1_CLK_ENABLE();
@@ -352,6 +387,7 @@ static void MX_UART_Init(void)
     HAL_NVIC_EnableIRQ(USART1_IRQn);
 }
 
+#if BOARD_W25_PRESENT
 static void MX_QSPI_Init(void)
 {
     __HAL_RCC_QSPI_CLK_ENABLE();
@@ -366,9 +402,11 @@ static void MX_QSPI_Init(void)
     hqspi.Init.DualFlash = QSPI_DUALFLASH_DISABLE;
     require_ok(HAL_QSPI_Init(&hqspi));
 }
+#endif
 
 void Error_Handler(void)
 {
+    board_diagnostics_boot_error();
     __disable_irq();
     for (;;) {}
 }

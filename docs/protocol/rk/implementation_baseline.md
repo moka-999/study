@@ -20,7 +20,7 @@
 
 ## B1运行连接
 
-- UART4已固定对接RK UART0_M0运行协议，`B1_RK_UART`仅允许4；USART2只收RK UART2_M0_DEBUG日志，USART1为本地可切换日志出口，不再把USART2作为协议候选。
+- UART4已固定对接RK UART0_M0运行协议，`B1_RK_UART`仅允许4；USART2双向连接RK UART2_M0_DEBUG（log rk模式转发控制台输入），USART1为本地可切换日志出口，不再把USART2作为协议候选。
 - slot0=UART4协议、slot1=USART2日志、slot2=USART1本地控制台；目前均115200/8N1，RX NORMAL DMA、IDLE/TC事件，HT被过滤。后两路由日志模块消费，不经过TLV解析器；日志配置/运行命令见[说明](../../uart_log_console_20261010.md)。
 - UART DMA缓冲在AXI SRAM，TX锁/钩子/RX启动由调度后的默认任务初始化。
 - B1默认pwr_ctrl=OFF，不主动发送RK命令/心跳。上电时序未冻结前无正常上电入口。

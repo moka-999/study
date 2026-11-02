@@ -34,6 +34,8 @@ static const rk_tlv_rule_t s_tlv_rules[] = {
     {TLV_TYPE_RESULT_TIME,    8U,  8U,              RK_RESULT_FIELD_TIME,           0U},
     {TLV_TYPE_PROGRESS,       1U,  1U,              RK_RESULT_FIELD_PROGRESS,     100U},
     {TLV_TYPE_RESULT_FAIL,    1U,  1U,              RK_RESULT_FIELD_FAIL,           1U},
+    {TLV_TYPE_REGISTER_ADDRESS, 4U, 4U,            RK_RESULT_FIELD_COUNT,          0U},
+    {TLV_TYPE_PARAM_ACTION,   1U,  1U,              RK_RESULT_FIELD_COUNT,          1U},
 };
 
 /* 返回只读规则；NULL代表未知扩展类型，由上层决定是否消费。 */
@@ -162,6 +164,21 @@ int tlv_pack_cmd(uint16_t cmd, const uint8_t *data, uint16_t data_len,
     if (data_len != 0U) memcpy(frame.payload + 2, data, data_len);
     return tlv_pack_frame(&frame, seq, out, out_max);
 }
+
+/* 进入/退出各是一条独立请求；本函数只编码已确认的字段，不推断RK的阶段应答。 */
+int tlv_pack_idd_action(uint16_t cmd, uint8_t action, uint64_t seq,
+                        uint8_t *out, uint16_t out_max)
+{
+    if (cmd < 21U || cmd > 36U || action > 1U ||
+        out == NULL || out_max < TLV_IDD_ACTION_FRAME_SIZE) return 0;
+    tlv_frame_t frame;
+    frame_init(&frame);
+    uint8_t command[2] = {(uint8_t)cmd, (uint8_t)(cmd >> 8)};
+    if (tlv_pack(&frame, TLV_TYPE_CMD, command, sizeof(command)) != 0 ||
+        tlv_pack(&frame, TLV_TYPE_PARAM_ACTION, &action, sizeof(action)) != 0) return 0;
+    return tlv_pack_frame(&frame, seq, out, out_max);
+}
+
 int tlv_pack_heartbeat(uint64_t seq, uint8_t *out, uint16_t out_max)
 {
     tlv_frame_t frame;

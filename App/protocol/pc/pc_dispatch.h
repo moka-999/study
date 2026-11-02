@@ -53,7 +53,7 @@ void pc_dispatch_poll(void);
  * 使用传入的MCU发送序号，不回显PC/RK序号。成功发送后TCP任务才递增计数。
  */
 int pc_dispatch_next_response(uint32_t sequence, pc_dispatch_response_t *response);
-/** 当前连接结束时调用，清理连接拥有的未提交业务；已提交升级不能撤销。 */
+/** 当前连接结束时调用，清理连接拥有的未提交业务；不取消已发送给RK的算法。 */
 void pc_dispatch_disconnected(void);
 
 #ifdef __cplusplus

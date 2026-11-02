@@ -5,31 +5,48 @@
 #include "pwr_ctrl.h"
 #endif
 
-/* 无参数命令目录：编号显式列出，不用数组下标+1推导协议值。
+/* 编号命令目录：编号显式列出，不用数组下标+1推导协议值。
  * 入队检查、发送前复核、联调名称映射共用这一张表。增项前须确认RK实现；
  * 本表不替代正式PC业务的参数、电源、RK-ready和算法生命周期检查。
  */
 static const rk_command_descriptor_t s_command_table[] = {
-    { 1U, "gtest-stuck-address"}, /* 粘滞地址测试。 */
-    { 2U, "gtest-rand"},          /* 随机数测试。 */
-    { 3U, "gtest-xor"},           /* 异或测试。 */
-    { 4U, "gtest-sub"},           /* 减法测试。 */
-    { 5U, "gtest-mul"},           /* 乘法测试。 */
-    { 6U, "gtest-div"},           /* 除法测试。 */
-    { 7U, "gtest-or"},            /* 按位或测试。 */
-    { 8U, "gtest-and"},           /* 按位与测试。 */
-    { 9U, "gtest-seqinc"},        /* 递增序列测试。 */
-    {10U, "gtest-solidbits"},     /* 固定位模式测试。 */
-    {11U, "gtest-checkerboard"},  /* 棋盘格测试。 */
-    {12U, "gtest-blockseq"},      /* 块序列测试。 */
-    {13U, "gtest-walkbits0"},     /* 0位行走测试。 */
-    {14U, "gtest-walkbits1"},     /* 1位行走测试。 */
-    {15U, "gtest-bitspread"},     /* 位扩散测试。 */
-    {16U, "gtest-bitflip"},       /* 位翻转测试。 */
-    {17U, "mats"},               /* MATS测试，不是保留编号。 */
-    {18U, "marchx"},             /* March X测试。 */
-    {19U, "marchc-"},            /* March C-测试。 */
-    {20U, "marchc+"},            /* March C+测试。 */
+    { 1U, "gtest-stuck-address", RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 粘滞地址测试。 */
+    { 2U, "gtest-rand",          RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 随机数测试。 */
+    { 3U, "gtest-xor",           RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 异或测试。 */
+    { 4U, "gtest-sub",           RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 减法测试。 */
+    { 5U, "gtest-mul",           RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 乘法测试。 */
+    { 6U, "gtest-div",           RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 除法测试。 */
+    { 7U, "gtest-or",            RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 按位或测试。 */
+    { 8U, "gtest-and",           RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 按位与测试。 */
+    { 9U, "gtest-seqinc",        RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 递增序列测试。 */
+    {10U, "gtest-solidbits",     RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 固定位模式测试。 */
+    {11U, "gtest-checkerboard",  RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 棋盘格测试。 */
+    {12U, "gtest-blockseq",      RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 块序列测试。 */
+    {13U, "gtest-walkbits0",     RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 0位行走测试。 */
+    {14U, "gtest-walkbits1",     RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 1位行走测试。 */
+    {15U, "gtest-bitspread",     RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 位扩散测试。 */
+    {16U, "gtest-bitflip",       RK_COMMAND_CATEGORY_FUNCTIONAL}, /* 位翻转测试。 */
+    {17U, "mats",               RK_COMMAND_CATEGORY_FUNCTIONAL}, /* MATS测试，不是保留编号。 */
+    {18U, "marchx",             RK_COMMAND_CATEGORY_FUNCTIONAL}, /* March X测试。 */
+    {19U, "marchc-",            RK_COMMAND_CATEGORY_FUNCTIONAL}, /* March C-测试。 */
+    {20U, "marchc+",            RK_COMMAND_CATEGORY_FUNCTIONAL}, /* March C+测试。 */
+    /* IDD名称严格保留RK文档括号中的大小写；本表不宣称标准测量窗口已实现。 */
+    {21U, "idd_0",              RK_COMMAND_CATEGORY_PARAMETRIC},
+    {22U, "idd_2P",             RK_COMMAND_CATEGORY_PARAMETRIC},
+    {23U, "idd_2PS",            RK_COMMAND_CATEGORY_PARAMETRIC},
+    {24U, "idd_2N",             RK_COMMAND_CATEGORY_PARAMETRIC},
+    {25U, "idd_2NS",            RK_COMMAND_CATEGORY_PARAMETRIC},
+    {26U, "idd_3P",             RK_COMMAND_CATEGORY_PARAMETRIC},
+    {27U, "idd_3PS",            RK_COMMAND_CATEGORY_PARAMETRIC},
+    {28U, "idd_3N",             RK_COMMAND_CATEGORY_PARAMETRIC},
+    {29U, "idd_3NS",            RK_COMMAND_CATEGORY_PARAMETRIC},
+    {30U, "idd_4R",             RK_COMMAND_CATEGORY_PARAMETRIC},
+    {31U, "idd_4W",             RK_COMMAND_CATEGORY_PARAMETRIC},
+    {32U, "idd_5",              RK_COMMAND_CATEGORY_PARAMETRIC},
+    {33U, "idd_5AB",            RK_COMMAND_CATEGORY_PARAMETRIC},
+    {34U, "idd_5PB",            RK_COMMAND_CATEGORY_PARAMETRIC},
+    {35U, "idd_6",              RK_COMMAND_CATEGORY_PARAMETRIC},
+    {36U, "idd_6ET",            RK_COMMAND_CATEGORY_PARAMETRIC},
 };
 
 const rk_command_descriptor_t *rk_command_find_by_id(uint16_t command_id)

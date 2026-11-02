@@ -28,7 +28,7 @@
 #endif
 /*
  * 当前运行镜像的编译期身份。独立段由链接脚本 KEEP，即使 PC 查询命令尚未
- * 接入，也能在 ELF/量产镜像中定位。长度和 CRC 不能自引用，交由清单填写。
+ * 接入，也能在ELF中定位。长度和CRC保留为0；本结构不会自动写入W25。
  */
 static const firmware_version_info_t s_current_firmware_version
     __attribute__((section(".firmware_version"), used)) = {
@@ -194,7 +194,7 @@ void fru_info_init(fru_info_t *fru)
 
 static int flash_interface_is_valid(const flash_if_t *flash)
 {
-    return flash != NULL && flash->read != NULL && flash->write != NULL;
+    return flash != NULL && flash->read != NULL;
 }
 
 static int fixed_string_is_terminated(const char *text, uint32_t capacity)
@@ -530,7 +530,7 @@ static int save_record(flash_if_t *flash, const record_area_t *area,
     uint32_t target_address;
     uint32_t next_generation;
 
-    if (!flash_interface_is_valid(flash) || area == NULL || payload == NULL ||
+    if (!flash_interface_is_valid(flash) || flash->write == NULL || area == NULL || payload == NULL ||
         area->payload_size > sizeof(probe_payload)) {
         return FLASH_STORE_ERR_PARAM;
     }

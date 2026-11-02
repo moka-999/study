@@ -20,7 +20,7 @@
 #define PC_COMMAND_TESTER_INFO_RESP   0x0102U
 
 /*
- * 一轮测试以0106开始、0107结束；轮内串行执行FUNC或SLT，PARA仅保留编号。
+ * 一轮测试以0106开始、0107结束；轮内串行执行FUNC、PARA或SLT。
  * FUNC的mirrorIndex取RK 0x3001，表示镜像0/1；当前每镜像一颗，physicalAddr为空。
  * SLT由PC读取服务器报告后回送010B，不复用FUNC的UART算法或0105结果通道。
  */
@@ -28,8 +28,8 @@
 #define PC_COMMAND_TEST_RESULT_REPORT  0x0105U
 #define PC_COMMAND_ROUND_BEGIN         0x0106U /* PC→MCU，{}；只建立整轮上下文。 */
 #define PC_COMMAND_ROUND_END           0x0107U /* PC→MCU，失败芯片数组；汇总灯并废弃未交付结果。 */
-#define PC_COMMAND_PARA_START          0x0108U /* 预留，当前返回notSupported。 */
-#define PC_COMMAND_PARA_RESULT         0x0109U /* 预留MCU→PC，反向请求返回invalidDirection。 */
+#define PC_COMMAND_PARA_START          0x0108U /* parametric/idd_*，开始包结构与FUNC一致。 */
+#define PC_COMMAND_PARA_RESULT         0x0109U /* MCU→PC，返回RK结果及全程统计；反向请求拒绝。 */
 #define PC_COMMAND_SLT_START           0x010AU /* slt/memtest86，按参数准备电源与Boot。 */
 #define PC_COMMAND_SLT_RESULT          0x010BU /* PC回送本次SLT结果，不等待RK串口结果。 */
 
@@ -48,7 +48,7 @@
 #define PC_COMMAND_QUERY_POWER_MONITOR 0x0601U
 #define PC_COMMAND_POWER_MONITOR_RESP  0x0602U
 
-/* 固件升级请求/动作应答/完成确认；mcu_*已实现，rk_*仅保留且返回notSupported。 */
+/* 历史升级编号保留，禁止复用；当前不提供升级服务，均返回notSupported。 */
 #define PC_COMMAND_FIRMWARE_UPGRADE_REQUEST   0x0901U
 #define PC_COMMAND_FIRMWARE_UPGRADE_RESP      0x0902U
 #define PC_COMMAND_FIRMWARE_UPGRADE_COMPLETE  0x0903U

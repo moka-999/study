@@ -1,11 +1,12 @@
 ﻿param(
-    [ValidateSet('build', 'rebuild', 'check', 'ota-build', 'ota-swd')]
+    [ValidateSet('build', 'rebuild', 'check', 'flash')]
     [string]$Task = 'build',
     [ValidateSet('MCU', 'RK')]
     [string]$LogSource,
     [string]$Version = '',
     [ValidateSet('Debug', 'Release')]
-    [string]$Configuration = 'Release',
+    [string]$Configuration = 'Debug',
+    [ValidateRange(1, 254)][int]$TestIpLastOctet = 201,
     [string]$Serial = '',
     [ValidateSet('NO', 'YES')][string]$ConfirmIdle = 'NO'
 )
@@ -13,7 +14,10 @@
 $ErrorActionPreference = 'Stop'
 # 保留UTF-8 BOM，兼容Windows PowerShell 5读取中文注释。
 $repo = Split-Path -Parent $PSScriptRoot
-$buildDir = Join-Path $repo 'build_debug'
+# 默认201沿用日常目录；其他地址独立构建，避免覆盖另一块板的镜像。
+$buildName = $Configuration
+if ($TestIpLastOctet -ne 201) { $buildName += "-ip$TestIpLastOctet" }
+$buildDir = Join-Path $repo "build/standalone/$buildName"
 $cache = Join-Path $buildDir 'CMakeCache.txt'
 
 function Get-CachedTool([string]$key) {
@@ -55,6 +59,7 @@ function Find-Python {
     throw 'Python not found. Install Python 3 or add python.exe to PATH.'
 }
 
+if ($Task -eq 'flash' -and $ConfirmIdle -ne 'YES') { throw '请先停止RK/温控并断开PC；允许复位后加 -ConfirmIdle YES。' }
 $python = Find-Python
 if ($Task -eq 'check') {
     # 都是离线检查，不打开串口、网络或调试器；缺失测试脚本必须报错。
@@ -74,42 +79,22 @@ if ($Task -eq 'check') {
 $ninja = Find-BundledExe 'ninja' 'ninja.exe' 'CMAKE_MAKE_PROGRAM'
 $cmake = Find-BundledExe 'cmake' 'cmake.exe' 'CMAKE_COMMAND'
 
-if ($Task -eq 'ota-swd') {
-    # 固定B1板型，不接受V2模拟；快捷键传YES即代表操作者已确认停测及允许复位。
-    if ($ConfirmIdle -ne 'YES') { throw '请先停止RK/温控并断开PC，确认后加-ConfirmIdle YES。' }
-    if ($LogSource) { throw 'ota-swd日志默认来源沿用B1工程配置，不接收-LogSource。' }
-    if (-not $Version) { $Version = 'auto' }
-    $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe' 'CMAKE_C_COMPILER'
-    $server = Find-BundledExe 'stlink-gdbserver' 'ST-LINK_gdbserver.exe' 'OTA_STLINK_SERVER'
-    $programmer = Find-BundledExe 'programmer' 'STM32_Programmer_CLI.exe' 'OTA_PROGRAMMER'
-    $shared = Join-Path (Split-Path -Parent $repo) 'test\tools\ota_dev.py'
-    if (-not (Test-Path -LiteralPath $shared)) { throw 'B1开发侧一键下载需要同级test工程。' }
-    $arguments = @('-B', '-X', 'utf8', $shared, 'swd', '--board', 'b1', '--app-root', $repo,
-        '--version', $Version, '--configuration', $Configuration, '--confirm-idle',
-        '--cmake', $cmake, '--ninja', $ninja, '--compiler', $compiler,
-        '--server', $server, '--programmer', $programmer)
-    if ($Serial) { $arguments += @('--serial', $Serial) }
-    & $python @arguments
-    exit $LASTEXITCODE
-}
-
-if ($Task -eq 'ota-build') {
-    # 只构建B1发布包及独立网络工具，不烧录；实际升级须操作者另行执行。
-    if (-not $Version) { throw 'ota-build需要-Version，例如0.1.37；须高于板上版本。' }
-    if ($LogSource) { throw 'ota-build不接收-LogSource；日志默认来源沿用B1工程配置。' }
-    $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe' 'CMAKE_C_COMPILER'
-    & $python -B -X utf8 (Join-Path $repo 'tools\ota_build.py') --version $Version `
-        --configuration $Configuration --cmake $cmake --ninja $ninja --compiler $compiler
-    exit $LASTEXITCODE
-}
-
 # 每次构建先轻量reconfigure，刷新UTC构建时间和76字节版本载荷。
 # 这不是clean；Ninja仍只重编译受影响源码，工具链与已有缓存保持一致。
 $cmakeArgs = @(
     '-S', $repo, '-B', $buildDir, '-G', 'Ninja',
-    '-DCMAKE_BUILD_TYPE=Debug', "-DCMAKE_MAKE_PROGRAM=$ninja",
-    "-DPython3_EXECUTABLE=$python"
+    "-DCMAKE_BUILD_TYPE=$Configuration", "-DCMAKE_MAKE_PROGRAM=$ninja",
+    "-DPython3_EXECUTABLE=$python",
+    "-DB1_TEST_IP_LAST_OCTET=$TestIpLastOctet"
 )
+$compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe' 'CMAKE_C_COMPILER'
+$env:PATH = "$(Split-Path -Parent $compiler);$env:PATH"
+if ($Version) {
+    if ($Version -notmatch '^(\d+)\.(\d+)\.(\d+)$') { throw 'Version格式为major.minor.patch。' }
+    $parts = @($Matches[1], $Matches[2], $Matches[3])
+    foreach ($part in $parts) { if ([long]$part -gt 65535) { throw '版本各段最大65535。' } }
+    $cmakeArgs += @("-DFIRMWARE_VERSION_MAJOR=$($parts[0])", "-DFIRMWARE_VERSION_MINOR=$($parts[1])", "-DFIRMWARE_VERSION_PATCH=$($parts[2])")
+}
 if (-not (Test-Path -LiteralPath $cache)) {
     $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake"
 }
@@ -126,4 +111,21 @@ if ($Task -eq 'rebuild') {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 & $ninja -C $buildDir
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$image = Join-Path $buildDir 'b1.bin'
+& $python -B -X utf8 (Join-Path $PSScriptRoot 'direct_flash.py') --image $image --target b1-h743 --check-only
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+# 在镜像地址检查通过后导出带IP的完整ELF，方便两块B1分别烧录。
+$namedElf = Join-Path $buildDir "b1_192.168.1.$TestIpLastOctet.elf"
+Copy-Item -LiteralPath (Join-Path $buildDir 'b1.elf') -Destination $namedElf -Force
+Write-Host "B1本地调试地址：192.168.1.${TestIpLastOctet}:8888；B2配置后仍可动态切换。"
+Write-Host "完整Boot+App ELF：$namedElf"
+if ($Task -eq 'flash') {
+    $download = @('-B', '-X', 'utf8', (Join-Path $PSScriptRoot 'direct_flash.py'),
+        '--image', $image, '--target', 'b1-h743', '--confirm-idle', 'YES',
+        '--programmer', (Find-BundledExe 'programmer' 'STM32_Programmer_CLI.exe' 'DIRECT_PROGRAMMER'))
+    if ($Serial) { $download += @('--serial', $Serial) }
+    & $python @download
+    exit $LASTEXITCODE
+}
+exit 0

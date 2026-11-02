@@ -1,6 +1,6 @@
 /*
  * UART字节路由接口：不承载TCP转发，不解释RK/PC协议。
- * B1槽0固定UART4协议，槽1为USART2日志输入，槽2为USART1本地控制台。
+ * B1槽0固定UART4协议，槽1为USART2双向调试，槽2为USART1本地控制台。
  */
 #ifndef UART_ROUTER_H
 #define UART_ROUTER_H
@@ -69,11 +69,11 @@ int uart_get_rx_diagnostics(int id, uart_rx_diagnostics_t *out);
 
 /**
  * @brief 在任务上下文将载荷交给已注册UART发送接口。
- * @param[in] id UART_PORT_RK_PROTOCOL或UART_PORT_CONSOLE；RK日志输入拒绝发送。
+ * @param[in] id UART_PORT_RK_PROTOCOL、UART_PORT_RK_DEBUG或UART_PORT_CONSOLE。
  * @param[in] buffer 非NULL，至少可读length字节，当前STM32实现复制入TX环。
  * @param[in] length 非0字节数，当前TX环最大可接纳2047字节。
  * @return IF_OK已复制入TX环；IF_ERR参数/槽无效、锁失败或环空间不足。
- * @note UART4取锁最多100ms；USART1取锁0等待。失败不入队部分载荷。IF_OK不代表线上
+ * @note UART4取锁最多100ms；USART1/USART2取锁0等待。失败不入队部分载荷。IF_OK不代表线上
  *       发完或RK收到；调用方须决定失败重试/丢弃策略，禁止ISR调用。
  */
 int uart_send(int id, uint8_t *buffer, uint16_t length);

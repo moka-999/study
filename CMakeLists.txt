@@ -5,11 +5,6 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
-# OTA与普通调试构建隔离；一个A1镜像经修正表可安装到任一896KiB槽。
-option(ENABLE_OTA_RELOCATION_PROBE "Build slot-limited App with relocation records" OFF)
-option(ENABLE_OTA_BOOT "Require B journal and healthy-start confirmation" OFF)
-set(OTA_APP_BASE "0x08020000" CACHE STRING "OTA App slot address")
-
 # B1只使用真实驱动和真实算法结果；拒绝V2的模拟电源、隔离网关及MATS假FAIL。
 if(ENABLE_V2_POWER_SIMULATION OR ENABLE_RK_GATEWAY_TEST OR ENABLE_V2_MATS_FAIL_TEST)
     message(FATAL_ERROR "B1 does not support V2 power simulation, gateway test or MATS fake failure")
@@ -33,6 +28,13 @@ else()
     message(FATAL_ERROR "B1_LOG_DEFAULT_SOURCE must be MCU or RK")
 endif()
 
+# B2尚未通知编号时的本地调试地址；正式动态IP不受该构建参数限制。
+set(B1_TEST_IP_LAST_OCTET 201 CACHE STRING "B1 local test IP last octet: 1..254")
+if(NOT B1_TEST_IP_LAST_OCTET MATCHES "^[1-9][0-9]*$"
+   OR B1_TEST_IP_LAST_OCTET LESS 1 OR B1_TEST_IP_LAST_OCTET GREATER 254)
+    message(FATAL_ERROR "B1_TEST_IP_LAST_OCTET must be an integer from 1 to 254")
+endif()
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # B1版本身份由构建系统统一生成，保持与V2验收格式完全一致。
@@ -46,7 +48,7 @@ set(HAL_SOURCES
     stm32h7xx_hal.c stm32h7xx_hal_cortex.c stm32h7xx_hal_dma.c
     stm32h7xx_hal_dma_ex.c stm32h7xx_hal_exti.c stm32h7xx_hal_flash.c
     stm32h7xx_hal_flash_ex.c stm32h7xx_hal_gpio.c stm32h7xx_hal_i2c.c
-    stm32h7xx_hal_i2c_ex.c stm32h7xx_hal_mdma.c stm32h7xx_hal_pwr.c stm32h7xx_hal_pwr_ex.c
+    stm32h7xx_hal_i2c_ex.c stm32h7xx_hal_iwdg.c stm32h7xx_hal_mdma.c stm32h7xx_hal_pwr.c stm32h7xx_hal_pwr_ex.c
     stm32h7xx_hal_qspi.c stm32h7xx_hal_rcc.c stm32h7xx_hal_rcc_ex.c
     stm32h7xx_hal_spi.c stm32h7xx_hal_spi_ex.c stm32h7xx_hal_uart.c
     stm32h7xx_hal_uart_ex.c stm32h7xx_hal_eth.c stm32h7xx_hal_eth_ex.c
@@ -87,6 +89,7 @@ add_executable(b1
     Core/Src/board_identity.c
     Core/Src/result_led.c
     Core/Src/log_console.c
+    Core/Src/board_diagnostics.c
     Core/Src/freertos.c
     Core/Src/ethernet_board.c
     Core/Src/stm32h7xx_hal_timebase_tim.c
@@ -106,7 +109,6 @@ add_executable(b1
     App/protocol/pc/pc_protocol.c
     App/protocol/pc/pc_state_machine.c
     App/protocol/pc/pc_dispatch.c
-    App/protocol/pc/pc_ota.c
     App/protocol/pc/pc_tester_info.c
     App/protocol/pc/pc_test_message.c
     App/protocol/pc/pc_test_service.c
@@ -118,6 +120,7 @@ add_executable(b1
     App/tasks/rk/rk_task.c
     App/tasks/rk/rk_link.c
     App/tasks/common/monitor_task.c
+    App/tasks/common/task_watchdog.c
     App/protocol/b2/b2_protocol.c
     App/protocol/b2/b2_state_machine.c
     App/tasks/b2/b2_service.c
@@ -142,20 +145,7 @@ add_executable(b1
     ${LWIP_SOURCES}
 )
 
-if(ENABLE_OTA_RELOCATION_PROBE)
-    target_compile_definitions(b1 PRIVATE OTA_RELOCATION_PROBE=1)
-endif()
-if(ENABLE_OTA_BOOT)
-    if(NOT ENABLE_OTA_RELOCATION_PROBE)
-        message(FATAL_ERROR "OTA requires slot-limited build")
-    endif()
-    target_sources(b1 PRIVATE App/ota/ota_app.c App/ota/ota_install.c
-        App/ota/boot_record.c App/ota/boot_health.c)
-    target_compile_definitions(b1 PRIVATE ENABLE_OTA_BOOT=1)
-endif()
-
 target_include_directories(b1 PRIVATE
-    App/ota
     Core/Inc
     HAL_Drv
     BSP/Flash
@@ -195,6 +185,11 @@ target_compile_definitions(b1 PRIVATE
     B1_LOG_DEFAULT_SOURCE=${B1_LOG_DEFAULT_VALUE}
 )
 
+# IP宏仅作用于lwIP初始化文件，切换地址时不重编译无关驱动。
+set_property(SOURCE LWIP/App/lwip.c APPEND PROPERTY COMPILE_DEFINITIONS
+    B1_TEST_IP_LAST_OCTET=${B1_TEST_IP_LAST_OCTET}
+)
+
 # 版本宏只作用于持久化布局实现，避免字符串定义散落到业务代码。
 set_property(SOURCE BSP/Flash/flash_layout.c APPEND PROPERTY COMPILE_DEFINITIONS
     FIRMWARE_VERSION_MAJOR=${FIRMWARE_VERSION_MAJOR}
@@ -205,7 +200,8 @@ set_property(SOURCE BSP/Flash/flash_layout.c APPEND PROPERTY COMPILE_DEFINITIONS
     FIRMWARE_TARGET="b1-h743"
 )
 target_link_libraries(b1 m)
-target_link_options(b1 PRIVATE -Wl,-Map=b1.map)
+# cJSON用浮点格式化及回读校验输出小数；newlib-nano默认不链接这两项。
+target_link_options(b1 PRIVATE -Wl,-Map=b1.map -Wl,-u,_printf_float -Wl,-u,_scanf_float)
 set_target_properties(b1 PROPERTIES ADDITIONAL_CLEAN_FILES b1.map)
 
 # 产出PC/量产工具可直接写入W25Q256的76字节版本载荷及校验清单。
@@ -223,20 +219,5 @@ add_custom_command(TARGET b1 POST_BUILD
     VERBATIM
 )
 
-set(BOOT_OBJ ${CMAKE_BINARY_DIR}/boot.s.o)
-set(BOOT_ELF ${CMAKE_BINARY_DIR}/boot.elf)
-set(BOOT_FLAGS -mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-d16)
-add_custom_command(
-    OUTPUT ${BOOT_OBJ}
-    COMMAND ${CMAKE_C_COMPILER} ${BOOT_FLAGS} -x assembler-with-cpp
-            -c ${CMAKE_CURRENT_SOURCE_DIR}/boot/boot.s -o ${BOOT_OBJ}
-    DEPENDS boot/boot.s
-)
-add_custom_command(
-    OUTPUT ${BOOT_ELF}
-    COMMAND ${CMAKE_C_COMPILER} ${BOOT_FLAGS} -nostartfiles -nostdlib
-            -T ${CMAKE_CURRENT_SOURCE_DIR}/boot/STM32H743_boot.ld
-            ${BOOT_OBJ} -o ${BOOT_ELF}
-    DEPENDS ${BOOT_OBJ} boot/STM32H743_boot.ld
-)
-add_custom_target(boot ALL DEPENDS ${BOOT_ELF})
+# 最终ELF/BIN同时包含精简Boot和单App。
+include(boot/minimal_boot.cmake)

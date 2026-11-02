@@ -251,15 +251,35 @@
 /* ═══════════════════════════════════════════════════════════════════
  * 设备句柄
  * ═══════════════════════════════════════════════════════════════════ */
+/* 初始化阶段；失败时保留所在阶段，通道0xFF表示尚未选择校准通道。 */
+typedef enum {
+    AD7124_INIT_NONE = 0, AD7124_INIT_RESET, AD7124_INIT_ID,
+    AD7124_INIT_CONTROL, AD7124_INIT_CONFIG, AD7124_INIT_DIAGNOSTICS,
+    AD7124_INIT_CALIBRATION, AD7124_INIT_CONTINUOUS, AD7124_INIT_READY
+} ad7124_init_stage_t;
+
+/* 单通道校准启动前的实际回读；valid=1才完整，不能当作当前实时寄存器。 */
+typedef struct {
+    uint16_t control, channel, config;
+    uint32_t filter, error_enable, error;
+    uint8_t status, valid;
+} ad7124_cal_snapshot_t;
+
 typedef struct {
     spi_if_t     *spi;           /* 借用SPI接口；需覆盖本句柄使用期。 */
     GPIO_TypeDef *cs_port;       /* CS GPIO 端口                    */
     uint16_t      cs_pin;        /* CS GPIO 引脚                    */
     uint8_t       id;            /* ID 寄存器值 (上电后读取)         */
     uint32_t      last_error;    /* 最近一次非零ERROR，重新初始化不覆盖历史故障证据。 */
+    uint32_t      current_error; /* 最近一次ERROR读取值；每次初始化开始清零，与历史错误分开。 */
+    ad7124_init_stage_t init_stage;
+    int           init_result;   /* 最近初始化返回值；IF_OK成功，负值失败。 */
+    uint8_t       init_channel;  /* 最近初始化处理通道0..2；0xFF表示无通道。 */
     uint8_t       last_status;   /* 最近一次转换/就绪状态，包含ERROR及POR标志。 */
+    ad7124_cal_snapshot_t cal_snapshot;
     uint8_t       adc_mode;      /* MODE缓存；UNKNOWN表示恢复失败。  */
     uint8_t       num_ch;        /* 实际使能的通道数 (init 写入)     */
+    uint8_t       grounded_ainm; /* 0默认全诊断；1仅用于B1三路AIN1/3/5接AGND、增益1无缓冲。 */
     void        (*wait_ms)(uint32_t ms);  /* 延时回调, NULL=HAL_Delay 忙等 */
 } ad7124_t;
 
@@ -318,9 +338,12 @@ int  ad7124_write_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len);
 /**
  * @brief 复位并配置三路DDR采样，使用内部2.5V基准和连续模式。
  * @param[in,out] d 非NULL、SPI和CS已绑定的句柄；成功后num_ch为3。
- * @return IF_OK初始化操作完成；IF_ERR参数、ID或任一配置访问失败。
+ * @return IF_OK配置、三路零位校准及启动均完成；IF_TIMEOUT校准等待耗尽；
+ *         IF_ERR参数、ID、配置访问或校准失败。
  * @note 同步调用，失败可能已更新部分硬件/缓存，不能按就绪设备使用。
  *       默认CH0..2对应AIN0/1、2/3、4/5；保持既有正端缓冲、负端AGND配置。
+ *       各setup依次内部校零，增益1保留出厂GAIN；全部成功才开启连续扫描。
+ *       每路校准最多500次轮询，事务间至少1ms，SPI及调度耗时另计。
  */
 int  ad7124_init(ad7124_t *d);
 
@@ -379,7 +402,8 @@ int  ad7124_config_setup(ad7124_t *d, uint8_t setup,
  *       内部时钟各功耗档和FS=2047的校准，SPI/调度耗时另计。
  *       校准尚未启动时失败才尽力恢复；尝试启动后的任何错误或恢复失败均令
  *       adc_mode=UNKNOWN、num_ch=0，调用方必须重新初始化，不自动复位器件。
- *       不支持正在校准、掉电或CONT_READ模式；仅由维护调用，不在init自动执行。
+ *       不支持正在校准、掉电或CONT_READ模式；运行中仅由互斥的维护流程调用。
+ *       init自动执行三路零位校准，使用固定配置的较短等待预算。
  */
 int  ad7124_calibrate(ad7124_t *d, uint8_t ch);
 
@@ -394,6 +418,17 @@ int  ad7124_calibrate(ad7124_t *d, uint8_t ch);
  *       500轮1ms等待，另有SPI耗时。错误时读取ERROR并保留last_error，丢弃当次数据；不作符号扩展。
  */
 int  ad7124_read_ch(ad7124_t *d, uint8_t ch, int32_t *raw);
+
+/**
+ * @brief 单次检查RDY；已有转换数据时读取原始码及其通道号。
+ * @param[in,out] d 已初始化、启用DATA_STATUS的连续/单次模式设备。
+ * @param[out] raw 非NULL；返回1时写入0..0xFFFFFF，其他返回值不修改。
+ * @param[out] channel 非NULL；返回1时写入0..num_ch-1，其他情况不修改。
+ * @return 1取得一条新转换；0尚未就绪；IF_ERR参数、SPI或器件状态异常。
+ * @note 不循环等待ADC转换，但仍保留每次SPI事务后的t12保护等待；
+ *       调用方须周期推进，并自行给完整扫描设置超时，不能反复消费旧快照。
+ */
+int ad7124_try_read_conversion(ad7124_t *d, uint32_t *raw, uint8_t *channel);
 
 /**
  * @brief 读取单通道并换算为整数毫伏，不补偿前端分压。

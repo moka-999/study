@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import hashlib
+import argparse
 import json
 import re
 import struct
@@ -43,6 +44,9 @@ def sha256(path: Path) -> str:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--build-dir", type=Path, default=ROOT / "build/standalone/Debug")
+    args = parser.parse_args()
     text = HEADER.read_text(encoding="utf-8")
     ports = dict(re.findall(r"#define B1_(\w+)_PORT\s+GPIO([A-I])", text))
     pins = {name: int(pin) for name, pin in re.findall(r"#define B1_(\w+)_PIN\s+GPIO_PIN_(\d+)", text)}
@@ -56,23 +60,28 @@ def main() -> int:
     require("B1_PWR_DDR_EN_PIN | B1_ETH_NRST_PIN" in source,
             "PG11/PG12 safe defaults missing")
 
-    boot = (ROOT / "boot/boot.s").read_text(encoding="utf-8")
-    boot_reset = boot.split("Reset_Handler:", 1)[1]
-    require(all(token in boot for token in (
+    startup = (ROOT / "startup_stm32h743xx.s").read_text(encoding="utf-8")
+    reset = startup.split("Reset_Handler:", 1)[1]
+    require(all(token in startup for token in (
         "RCC_AHB4ENR,            0x580244E0",
         "GPIOC_BSRR,             0x58020818",
         "GPIOG_BSRR,             0x58021818",
         "GPIOC_EN_RESET,         0x00C00000",
         "GPIOG_EN_RESET,         0x08000000")),
-        "Boot coupled-reset GPIO addresses or reset masks are incomplete")
-    app_validation_index = boot_reset.index("ldr     r0, =APP_BASE")
-    require(boot_reset.index("ldr     r0, =GPIOC_BSRR") <
-            boot_reset.index("ldr     r0, =GPIOG_BSRR") < app_validation_index and
-            boot_reset.index("ldr     r0, =GPIOC_MODER") <
-            boot_reset.index("ldr     r0, =GPIOG_MODER") < app_validation_index,
-            "Boot must force PC6/PC7/PG11 low before App validation")
-    require("tst     r2, #1" in boot_reset and "beq     .Lfail" in boot_reset,
-            "Boot must reject an even non-Thumb App reset vector")
+        "独立启动入口缺少耦合复位GPIO地址或低电平掩码")
+    first_init = reset.index("bl  ExitRun0Mode")
+    require(reset.index("ldr     r0, =GPIOC_BSRR") <
+            reset.index("ldr     r0, =GPIOG_BSRR") <
+            reset.index("ldr     r0, =GPIOC_MODER") <
+            reset.index("ldr     r0, =GPIOG_MODER") < first_init <
+            reset.index("bl  SystemInit") < reset.index("CopyDataInit:"),
+            "必须先锁存低电平、配置PC6/PC7/PG11输出，再初始化系统和RAM")
+    boot_startup = (ROOT / "boot/startup.S").read_text(encoding="utf-8")
+    require(all(value in boot_startup for value in (
+                "BOOT_BOARD_B1", "0x580244E0", "0x58020818", "0x58021818",
+                "0x00C00000", "0x08000000")) and
+            boot_startup.index("ldr r0, =0x58020818") < boot_startup.index("ldr r0, =_sidata"),
+            "精简Boot也必须在初始化RAM前关闭PC6/PC7/PG11")
 
     require("SPI_POLARITY_HIGH, SPI_PHASE_2EDGE" in source,
             "AD7124 SPI4 must use mode 3")
@@ -204,9 +213,14 @@ def main() -> int:
             "Flash扇区RMW或磨损规避逻辑缺失")
     require("QSPI_ADDRESS_32_BITS" in qspi and "W25Q_CAPACITY - addr" in qspi,
             "W25Q256四字节寻址或容量边界检查缺失")
-    require("flash_if.init(&flash_if)" in source and
-            "firmware_version_save" not in source and "fru_info_save" not in source,
-            "B1启动应初始化Flash但不得自动写生产元数据")
+    require("flash_if.init(&flash_if)" in source and "firmware_version_" not in source and
+            "fru_info_save" not in source and source.index("flash_if.init(&flash_if)") <
+            source.index("osKernelInitialize()"),
+            "B1启动只初始化W25器件，不读写固件版本或重置FRU")
+    require("IWDG_PRESCALER_256" in source and "HAL_IWDG_Init(&watchdog)" in source and
+            source.index("flash_if.init(&flash_if)") < source.index("    MX_IWDG_Init();") <
+            source.index("osKernelInitialize()"),
+            "独立App须在外设初始化后、任务启动前开启IWDG")
     require("sizeof(firmware_version_info_t) == 76U" in flash_header and
             "sizeof(fru_info_t) == 224U" in flash_header and
             re.search(r"#define\s+FRU_INFO_SCHEMA_VERSION\s+2U", flash_header),
@@ -451,10 +465,14 @@ def main() -> int:
             "handle_set_result_indicator" not in pc_dispatch and
             "handle_query_indicator_status" not in pc_dispatch,
             "070x旧结果灯命令必须从固件删除")
-    require("fru_info_load" in pc_info and "fru_info_load_legacy_v1" in pc_info and
-            "board_mac_address()" in pc_info and "pc_tester_info_load" in pc_dispatch and
+    boot_fru = (ROOT / "boot/boot_fru.c").read_text(encoding="utf-8")
+    boot_main = (ROOT / "boot/boot_main.c").read_text(encoding="utf-8")
+    require("fru_info_load" in pc_info and "fru_info_save" not in pc_info and
+            "#if !BOARD_W25_PRESENT" in pc_info and
+            "fru_info_load_legacy_v1" in boot_fru and "fru_info_save" in boot_fru and
+            "UID_BASE" in boot_main and "pc_tester_info_load" in pc_dispatch and
             "firmware_version_current(" not in pc_dispatch,
-            "PC信息查询必须读取持久FRU，空白B1身份使用自身UID MAC")
+            "Boot维护持久FRU，App只读；未焊W25首板显式使用常量")
     require("return tlv_unpack(" in rk_state and
             re.search(r"tlv_sm_get_frame\([^;]+\)\s*<\s*0", rk_task) and
             "length < TLV_PAYLOAD_MIN" in rk_frame and
@@ -562,48 +580,49 @@ def main() -> int:
             "HAL_DMA_IRQHandler" in interrupts and "HAL_UART_IRQHandler" in interrupts,
             "B1 UART RX必须使用NORMAL DMA+IDLE，并忽略HT重复前缀")
     console = (ROOT / "Core/Src/log_console.c").read_text(encoding="utf-8")
-    require("uart == &huart1 ? 0U" in uart_hw and "instance == USART2 ? UART_MODE_RX" in source and
+    require("uart == &huart4 ? pdMS_TO_TICKS(UART_TX_LOCK_TIMEOUT_MS) : 0U" in uart_hw and
+            "uart->Init.Mode = UART_MODE_TX_RX;" in source and "huart2.TxISR = uart_tx_drain;" in uart_hw and
+            "USART2.Mode=MODE_TX_RX" in (ROOT / "b1.ioc").read_text(encoding="utf-8") and
             "UART_PORT_RK_PROTOCOL" not in console and '"log mcu"' in console and '"log rk"' in console and
             "HAL_UART_Transmit(" not in source + console and "Core/Src/log_console.c" in cmake,
-            "日志须非阻塞且隔离协议，RK调试口只能接收，启动日志也必须经过来源选择")
+            "日志须非阻塞且隔离协议，RK调试口须双向且发送不等待，启动日志也必须经过来源选择")
+    diagnostics = (ROOT / "Core/Src/board_diagnostics.c").read_text(encoding="utf-8")
+    require(source.index("    MX_UART_Init();") < source.index("    MX_I2C_Init();") and
+            source.index("    board_diagnostics_boot_finish();") < source.index("    osKernelInitialize();") and
+            "s_boot_finished" in diagnostics and "__get_PRIMASK()" in diagnostics and
+            "__get_BASEPRI()" in diagnostics and "__get_IPSR()" in diagnostics and
+            "20U);" in diagnostics and "board_diagnostics_process();" in rtos_source and
+            "Core/Src/board_diagnostics.c" in cmake,
+            "早期日志须在UART就绪后、内核创建前有界发送；运行期状态只由默认任务推进")
     require(not re.search(r"\bSCB_(?:Enable|Clean|Invalidate)DCache\w*\s*\(",
                           source + uart_hw + uart_router + formal_tasks),
             "B1保持D-Cache关闭，新增UART/任务不能加入cache维护调用")
 
-    # OTA复用公共实现，但健康观察和维护门必须接入B1各任务且不改硬件归属。
-    ota_app = (ROOT / "App/ota/ota_app.c").read_text(encoding="utf-8")
-    pc_ota = (ROOT / "App/protocol/pc/pc_ota.c").read_text(encoding="utf-8")
-    require("ENABLE_OTA_BOOT" in cmake and "OTA_RELOCATION_PROBE=1" in cmake and
-            "896K" in linker and "g_pfnVectors" in
-            (ROOT / "Core/Src/system_stm32h7xx.c").read_text(encoding="utf-8"),
-            "OTA必须限制槽容量并按可修正向量符号设置VTOR")
-    require("StartOtaWatchdogTask" in rtos_source and "IWDG1->KR = 0xAAAAU" in rtos_source and
-            "ota_app_watchdog_tick()" in rtos_source and
-            all(f"ota_app_progress(OTA_TASK_{name})" in text for name, text in
-                (("DEFAULT", rtos_source), ("TCP", tcp_task), ("MONITOR", monitor_task),
-                 ("RK", rk_task))) and
-            rk_task.split("void StartRkTask", 1)[1].index("ota_app_progress(OTA_TASK_RK)") <
-            rk_task.split("void StartRkTask", 1)[1].index("continue;"),
-            "四任务必须参与健康观察，OFF不能导致RK健康缺报")
-    ota_header = (ROOT / "App/ota/ota_app.h").read_text(encoding="utf-8")
-    require("OTA_TASK_HB" not in ota_header and
-            "(1U << OTA_TASK_COUNT) - 1U" in ota_app,
-            "OTA健康位图必须按真实任务数量生成，不能仍等待已移除的HB")
+    # 精简Boot与单App不依赖升级模块；TCP生命周期与Flash事务保护仍须保留。
+    system = (ROOT / "Core/Src/system_stm32h7xx.c").read_text(encoding="utf-8")
+    require("ORIGIN = 0x08000000, LENGTH = 128K" in linker and
+            "ORIGIN = 0x08020000, LENGTH = 1920K" in linker and
+            "ENTRY(Boot_Image_Reset)" in linker and "SCB->VTOR = (uint32_t)g_pfnVectors;" in system and
+            "0x000000U" in system and "#define USER_VECT_TAB_ADDRESS" in system and
+            "ASSERT(LOADADDR(.tdata) + SIZEOF(.tdata) <= ORIGIN(FLASH) + LENGTH(FLASH)" in linker,
+            "合并镜像必须包含128KiB Boot和1920KiB App，VTOR使用实际App向量")
+    require(not (ROOT / "App/ota").exists() and
+            not (ROOT / "App/protocol/pc/pc_ota.c").exists() and
+            "ENABLE_OTA_BOOT" not in cmake and "boot/minimal_boot.cmake" in cmake and
+            "OTA_APP_BASE" not in linker and "otaNotReady" not in pc_dispatch,
+            "活动工程不应残留MCU升级入口、双槽布局或OTA健康门禁")
     require("pc_dispatch_poll();" in tcp_task and "pc_dispatch_disconnected();" in tcp_task and
             "select(listenfd + 1" in tcp_task and "SO_SNDTIMEO" in tcp_task and
-            "PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, pc_ota_handle" in pc_dispatch and
-            '"otaNotReady"' in pc_dispatch and '"notSupported"' in pc_ota,
-            "OTA命令/有界等待/断线生命周期或普通镜像拒绝入口缺失")
-    require("monitor_ota_enter" in monitor_task and "s_ota_maintenance" in monitor_task and
             "flash_transaction_prepare()" in rtos_source and
-            "flash_transaction_begin(1000U)" in pc_info and
-            "firmware_version_load(" in ota_app and "firmware_version_current(" not in ota_app,
-            "OTA必须串行访问Flash并保留OFF维护门和W25信息来源")
-    print("OTA槽容量、四任务健康、B1 OFF门禁及Flash事务检查通过")
+            "flash_transaction_begin(1000U)" in pc_info,
+            "TCP有界等待/断线生命周期与Flash事务保护不得随升级功能删除")
+    require("App/tasks/common/task_watchdog.c" in cmake,
+            "移除OTA健康确认后，正式任务仍需看门狗监控")
+    print("Boot＋App布局、早期关电、无OTA依赖及只读FRU检查通过")
 
-    manifest_path = ROOT / "build_debug/b1.manifest.json"
-    image_path = ROOT / "build_debug/b1.bin"
-    payload_path = ROOT / "build_debug/b1.version.bin"
+    manifest_path = args.build_dir / "b1.manifest.json"
+    image_path = args.build_dir / "b1.bin"
+    payload_path = args.build_dir / "b1.version.bin"
     if manifest_path.exists() and image_path.exists() and payload_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         image = image_path.read_bytes()
@@ -619,7 +638,7 @@ def main() -> int:
                 fields[9].rstrip(b"\0") == b"b1-h743" and manifest["target"] == "b1-h743",
                 "版本二进制载荷的schema/长度/CRC32/B1目标与清单不一致")
     print(f"B1 independent project: {len(actual)}/{len(EXPECTED)} pins PASS")
-    print("Coupled-reset Boot early-off and optional PG11 gate contract PASS")
+    print("独立启动早期关电及PG11防御性控制合同通过")
     print("Safe defaults, SPI2 slave mode 0, SPI4 mode 3 and YT8512H PASS")
     print("Result LED states, 500ms scheduler, active-high PG0-PG5 map and boundary PASS")
     print("W25Q256 32MiB layout, 4-byte QSPI, version/FRU and manifest contract PASS")

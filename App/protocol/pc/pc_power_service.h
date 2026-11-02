@@ -7,7 +7,7 @@
 
 typedef enum {
     PC_POWER_ON = 0, PC_POWER_OFF, PC_POWER_RESTART,
-    PC_POWER_PREPARE_TEST, /* FUNC：电源/Boot完成后还须本轮RK普通心跳。 */
+    PC_POWER_PREPARE_TEST, /* FUNC/PARA：电源/Boot完成后还须本轮RK普通心跳。 */
     PC_POWER_PREPARE_SLT   /* SLT：每次冷启动并准备电源/Boot，不检查RK软件状态。 */
 } pc_power_action_t;
 
@@ -57,13 +57,13 @@ typedef struct {
 
 /** 仅启动期或唯一TCP任务在空闲且电源OFF时调用；复制配置/函数指针。
  * 返回0成功、-1拒绝；config=NULL清除配置。另须配置pwr_ctrl的真实轨间时序。
- * 适配器可为NULL；单独0501/0502不依赖RK就绪，0505/完整0103必须绑定。
+ * 适配器可为NULL；单独0501/0502不依赖RK就绪，0505/完整0103/0108必须绑定。
  */
 int pc_power_service_configure(const pc_power_config_t *config,
                                const pc_power_rk_adapter_t *adapter);
 /** 唯一TCP任务调用。NULL=已受理（含立即完成），否则静态业务错误名。
  * PREPARE_TEST/PREPARE_SLT必须给target；其它动作target必须NULL，受理时复制target。
- * reboot须为0/1：FUNC为1强制冷启动，为0仍会在配置变化或失效时冷启动；
+ * reboot须为0/1：FUNC/PARA为1强制冷启动，为0仍在配置变化或失效时冷启动；
  * SLT无论reboot值、配置是否相同，每次都冷启动，让RK重新走服务器下载流程。
  * 预检查不访问GPIO/I2C；实际驱动在poll推进。完成结果未消费前仍为busy。
  * SLT的DONE仅表示本地准备完成；其成功缓存不能当成FUNC初始化就绪。

@@ -6,8 +6,6 @@
 #include "monitor_task.h"
 #include "pwr_ctrl.h"
 #include "result_led.h"
-#include "ota_app.h"
-#include "pc_ota.h"
 #include "pc_test_service.h"
 #include "pc_power_service.h"
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
@@ -218,8 +216,8 @@ static int add_i32_array(cJSON *object, const char *name,
     return 1;
 }
 
-static int add_u32_array(cJSON *object, const char *name,
-                         const uint32_t values[MEMORY_MONITOR_RAIL_COUNT])
+static int add_number_array(cJSON *object, const char *name,
+                             const double values[MEMORY_MONITOR_RAIL_COUNT])
 {
     cJSON *array = cJSON_AddArrayToObject(object, name);
     if (!array) return 0;
@@ -317,11 +315,11 @@ static pc_dispatch_result_t handle_start_test(
 
     if (pc_test_start_parse(root, &start) == PC_TEST_JSON_OK) {
 #if defined(ENABLE_RK_GATEWAY_TEST) && ENABLE_RK_GATEWAY_TEST
-        if (!start.external_ready)
+        if (request->command_id == PC_COMMAND_START_TEST && !start.external_ready)
             return rk_gateway_test_start(&start, mcu_tx_sequence, response);
         error_code = "notSupported";
 #else
-        return pc_test_service_start(&start, mcu_tx_sequence, response);
+        return pc_test_service_start(request->command_id, &start, mcu_tx_sequence, response);
 #endif
     }
     return build_command_failure_with_index(request, mcu_tx_sequence,
@@ -362,14 +360,6 @@ static pc_dispatch_result_t handle_slt_result(const pc_protocol_frame_t *request
     if (pc_slt_result_parse(root, &result) != PC_TEST_JSON_OK)
         return build_command_failure(request, sequence, "invalidArgument", response);
     return pc_test_slt_result(&result, sequence, response);
-}
-
-/* PARA没有业务合同，不把预留命令转发成FUNC，更不伪造测量结论。 */
-static pc_dispatch_result_t handle_reserved(const pc_protocol_frame_t *request,
-    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
-{
-    (void)root;
-    return build_command_failure(request, sequence, "notSupported", response);
 }
 
 /*
@@ -709,8 +699,8 @@ static pc_dispatch_result_t handle_query_power_monitor(
     cJSON *body = NULL;
     char json[PC_DISPATCH_RESPONSE_CAPACITY - PC_PROTOCOL_HEADER_SIZE] = {0};
     uint8_t valid_mask;
-    uint32_t current_ma[MEMORY_MONITOR_RAIL_COUNT];
-    uint32_t power_mw[MEMORY_MONITOR_RAIL_COUNT];
+    double current_ma[MEMORY_MONITOR_RAIL_COUNT];
+    double power_mw[MEMORY_MONITOR_RAIL_COUNT];
     pc_dispatch_result_t result;
 
     if (root->child != NULL) {
@@ -745,11 +735,12 @@ static pc_dispatch_result_t handle_query_power_monitor(
     }
     if ((valid_mask & MEMORY_MONITOR_VALID_IDD) != 0U) {
         for (size_t rail = 0U; rail < MEMORY_MONITOR_RAIL_COUNT; rail++) {
-            current_ma[rail] = snapshot.memory.idd[rail].current_ma;
+            /* 内部保留µA，只在JSON边界换成mA数值，避免提前舍掉小电流。 */
+            current_ma[rail] = (double)snapshot.memory.idd[rail].current_ua / 1000.0;
             power_mw[rail] = snapshot.memory.idd[rail].power_mw;
         }
-        if (!add_u32_array(body, "currentMa", current_ma) ||
-            !add_u32_array(body, "powerMw", power_mw)) {
+        if (!add_number_array(body, "currentMa", current_ma) ||
+            !add_number_array(body, "powerMw", power_mw)) {
             cJSON_Delete(body);
             return PC_DISPATCH_ERROR;
         }
@@ -795,7 +786,7 @@ static const pc_command_entry_t s_command_table[] = {
     {PC_COMMAND_TEST_RESULT_REPORT, reject_response_command}, /* MCU→PC，拒收。 */
     {PC_COMMAND_ROUND_BEGIN,       handle_round_begin},       /* 建立当前连接的整轮。 */
     {PC_COMMAND_ROUND_END,         handle_round_end},         /* 汇总灯、废弃未交付结果。 */
-    {PC_COMMAND_PARA_START,        handle_reserved},          /* 仅保留，不执行IDD。 */
+    {PC_COMMAND_PARA_START,        handle_start_test},        /* 轮内PARA，最终上报0109。 */
     {PC_COMMAND_PARA_RESULT,       reject_response_command},  /* MCU→PC，拒收。 */
     {PC_COMMAND_SLT_START,         handle_slt_start},         /* 电源/Boot准备，不等待RK。 */
     {PC_COMMAND_SLT_RESULT,        handle_slt_result},        /* PC报告SLT实际结束。 */
@@ -810,9 +801,6 @@ static const pc_command_entry_t s_command_table[] = {
     {PC_COMMAND_SET_DDR_CONFIG, handle_set_ddr_config},       /* 选择类型/三轨拉偏。 */
     {PC_COMMAND_QUERY_POWER_MONITOR, handle_query_power_monitor}, /* 读取缓存快照。 */
     {PC_COMMAND_POWER_MONITOR_RESP, reject_response_command}, /* MCU -> PC，拒收。 */
-    {PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, pc_ota_handle},            /* PC -> MCU，固件升级动作表。 */
-    {PC_COMMAND_FIRMWARE_UPGRADE_RESP, reject_response_command},     /* MCU -> PC，拒收。 */
-    {PC_COMMAND_FIRMWARE_UPGRADE_COMPLETE, reject_response_command}, /* MCU -> PC，拒收。 */
 };
 
 pc_dispatch_result_t pc_dispatch_handle(
@@ -833,11 +821,11 @@ pc_dispatch_result_t pc_dispatch_handle(
         request->json, request->json_length, &root, NULL);
     if (json_result != PC_JSON_OK) {
         /*
-         * 0103重复键按业务参数错误应答；共享入口已经验证UTF-8、词法、语法和
+         * FUNC/PARA重复键按业务参数错误应答；共享入口已经验证UTF-8、词法、语法和
          * 对象边界，仅因重复键释放树。此错误分支重新取树，只提取唯一合法index，
          * 绝不执行命令；其他命令的重复键统一按invalidArgument应答。
          */
-        if (request->command_id == PC_COMMAND_START_TEST &&
+        if ((request->command_id == PC_COMMAND_START_TEST || request->command_id == PC_COMMAND_PARA_START) &&
             json_result == PC_JSON_ERROR_DUPLICATE_KEY) {
             root = cJSON_ParseWithLengthOpts((const char *)request->json,
                                              request->json_length, NULL, 0);
@@ -856,7 +844,7 @@ pc_dispatch_result_t pc_dispatch_handle(
     }
 
     /* 算法在途或超时后执行状态未知时，禁止会改变运行环境的业务。
-     * 查询/心跳仍可用；升级只允许只读mcu_query，不能在测试中复位MCU。
+     * 查询/心跳仍可用，不影响正在执行的算法。
      */
     static const uint16_t test_conflicts[] = {
         PC_COMMAND_POWER_ON, PC_COMMAND_POWER_OFF, PC_COMMAND_RESET_RK,
@@ -866,46 +854,10 @@ pc_dispatch_result_t pc_dispatch_handle(
         int conflict = 0;
         for (size_t i = 0U; i < sizeof(test_conflicts) / sizeof(test_conflicts[0]); ++i)
             if (request->command_id == test_conflicts[i]) conflict = 1;
-        if (request->command_id == PC_COMMAND_FIRMWARE_UPGRADE_REQUEST) {
-            const cJSON *action = cJSON_GetObjectItemCaseSensitive(root, "action");
-            conflict = !cJSON_IsString(action) || strcmp(action->valuestring, "mcu_query") != 0;
-        }
         if (conflict) {
             cJSON_Delete(root);
             return build_command_failure(request, mcu_tx_sequence, "busy", response);
         }
-    }
-
-#if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
-    /* 下载维护期间不启动新的电源流程；真实/虚拟电源使用同一业务互斥规则。 */
-    ota_download_progress_t progress;
-    ota_download_get_progress(&progress);
-    int maintenance = progress.state == OTA_DOWNLOAD_RECEIVING || progress.state == OTA_DOWNLOAD_READY ||
-                      progress.state == OTA_DOWNLOAD_COMMIT_UNKNOWN;
-    for (size_t i = 0U; maintenance && i < sizeof(test_conflicts) / sizeof(test_conflicts[0]); ++i) {
-        if (request->command_id == test_conflicts[i]) {
-            cJSON_Delete(root);
-            return build_command_failure(request, mcu_tx_sequence, "busy", response);
-        }
-    }
-#if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
-    const cJSON *action = cJSON_GetObjectItemCaseSensitive(root, "action");
-    if (request->command_id == PC_COMMAND_FIRMWARE_UPGRADE_REQUEST &&
-        cJSON_IsString(action) && strcmp(action->valuestring, "mcu_begin") == 0 &&
-        v2_power_sim_state() != PWR_CTRL_STATE_OFF) {
-        cJSON_Delete(root);
-        return build_command_failure(request, mcu_tx_sequence, "invalidState", response);
-    }
-#endif
-#endif
-
-    /* 共用入口拦住试运行期间的电源配置；查询、心跳、下电仍可用。 */
-    if (!ota_app_is_confirmed() &&
-        (request->command_id == PC_COMMAND_POWER_ON ||
-         request->command_id == PC_COMMAND_RESET_RK || request->command_id == PC_COMMAND_SET_BOOT_MODE ||
-         request->command_id == PC_COMMAND_SET_DDR_CONFIG)) {
-        cJSON_Delete(root);
-        return build_command_failure(request, mcu_tx_sequence, "otaNotReady", response);
     }
 
     /* 小表顺序查找，命中只执行一次；未命中返回notSupported，不隐式转发RK。 */
@@ -942,9 +894,6 @@ void pc_dispatch_poll(void)
 #if !defined(ENABLE_RK_GATEWAY_TEST) || !ENABLE_RK_GATEWAY_TEST
     (void)pc_test_service_poll(0U, NULL);
 #endif
-#if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
-    ota_download_poll();
-#endif
 }
 
 int pc_dispatch_next_response(uint32_t sequence, pc_dispatch_response_t *response)
@@ -971,8 +920,5 @@ void pc_dispatch_disconnected(void)
     pc_test_service_disconnected();
 #if defined(ENABLE_RK_GATEWAY_TEST) && ENABLE_RK_GATEWAY_TEST
     rk_gateway_test_disconnect();
-#endif
-#if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
-    ota_download_disconnected();
 #endif
 }

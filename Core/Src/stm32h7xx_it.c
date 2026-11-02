@@ -13,6 +13,14 @@ void DebugMon_Handler(void) {}
 /* HAL 的 1ms 时间基准独占 TIM1；SysTick 留给 FreeRTOS 内核。 */
 void TIM1_UP_IRQHandler(void) { HAL_TIM_IRQHandler(&htim1); }
 
+/* TIM1每1ms推进HAL计时；其他定时器回调不得改变HAL_Delay的时间基准。 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM1) {
+        HAL_IncTick();
+    }
+}
+
 /* ETH DMA 中断只交给 HAL，完成回调再唤醒 LwIP 收发线程。 */
 void ETH_IRQHandler(void) { HAL_ETH_IRQHandler(&heth); }
 

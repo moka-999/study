@@ -22,10 +22,11 @@
 #include "lwip/netif.h"
 #include "pc_dispatch.h"
 #include "pc_state_machine.h"
-#include "ota_app.h"
+#include "task_watchdog.h"
 #include "b2_service.h"
 #include <string.h>
-#include <errno.h>
+/* 与lwIP socket共用错误码变量，不能读取newlib的另一份errno。 */
+#include "lwip/errno.h"
 
 #define TCP_PORT    8888
 #define RX_BUF_SIZE 1024
@@ -121,7 +122,7 @@ void StartTcpServerTask(void *argument)
         FD_ZERO(&readers); FD_SET(listenfd, &readers);
         struct timeval accept_wait = {0, 20000};
         int available = select(listenfd + 1, &readers, NULL, NULL, &accept_wait);
-        ota_app_progress(OTA_TASK_TCP);
+        task_watchdog_progress(TASK_WATCHDOG_TCP);
         pc_dispatch_poll();
         if (available < 0) { close(listenfd); vTaskDelete(NULL); return; }
         if (available == 0) {
@@ -162,7 +163,7 @@ void StartTcpServerTask(void *argument)
 
         /* 阶段4：服务当前连接，任何致命协议错误都跳出并关闭connfd。 */
         for (;;) {
-            ota_app_progress(OTA_TASK_TCP);
+            task_watchdog_progress(TASK_WATCHDOG_TCP);
             pc_dispatch_poll();
             b2_service_poll(1);
             /* 领取真实RK异步结果，业务层已完成JSON组包；本任务只传输及推进Seq。 */
