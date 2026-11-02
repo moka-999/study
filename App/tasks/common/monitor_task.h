@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 typedef struct {
-    uint32_t timestamp_ms;
+    uint32_t timestamp_ms; /* 当前有效电压/电流中较老的采集起点，HAL毫秒时基。 */
     pwr_ctrl_state_t power_state;
     memory_monitor_sample_t memory;
 } monitor_snapshot_t;
@@ -34,9 +34,9 @@ int monitor_get_latest(monitor_snapshot_t *snapshot);
 
 /**
  * 任务上下文启动统计：IF_OK成功；IF_ERR参数无效；IF_TIMEOUT器件事务锁忙；
- * IF_ERR也表示电源非ON、OTA维护/未健康或已有窗口。拒绝时旧统计保持不变。
+ * IF_ERR也表示电源非ON或已有窗口。拒绝时旧统计保持不变。
  * 参数范围同idd_stats_begin；仅收集后续实际新采样，不重复使用s_latest。
- * ponytail: 沿用约2秒后台采样；高频需求须先冻结RK/器件时窗再调整调度。
+ * 电流快速采集、电压完整三轨扫描分别计数；缓存或未就绪轮询不补作新样本。
  * 不保证短窗口足够样本，不触发RK/温控动作。
  */
 int monitor_idd_start(uint32_t duration_ms, uint32_t minimum_samples);
@@ -53,11 +53,6 @@ int monitor_idd_get(idd_stats_t *out);
  * @note 重复调用复用静态锁；不访问硬件。须在启动相关任务前完成。
  */
 int monitor_task_prepare(void);
-
-/** OTA取得OFF状态的维护占用；与上电/调压使用同一事务锁，0表示占用成功。 */
-int monitor_ota_enter(void);
-/** 仅取消尚未提交的下载时释放维护占用；READY提交后一直保留到复位。 */
-void monitor_ota_leave(void);
 
 /**
  * @brief 持事务锁执行PC的内存类型选择或三轨拉偏。
@@ -138,7 +133,8 @@ monitor_boot_result_t monitor_get_boot_mode(boot_mode_t *mode,
  * @brief 监测任务入口，周期发布电源状态及三轨采样快照。
  * @param[in] argument 未使用，可为NULL。
  * @note prepare须在调度前完成；仅ON时初始化/采样，非ON清就绪标志。
- *       V2使用本工程映射；循环等待2000ms，另有总线/锁耗时，不正常返回。
+ *       电流每轮读取，AD每10ms探测并收齐三轨后发布；TPS每1s读取。
+ *       ON每轮让出1个RTOS节拍，非ON等待20ms；实际速率仍受总线/调度影响。
  */
 void StartMonitorTask(void *argument);
 

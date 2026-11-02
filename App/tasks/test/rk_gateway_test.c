@@ -38,7 +38,7 @@ pc_dispatch_result_t rk_gateway_test_start(const pc_test_start_view_t *start,
         return execution_response(sequence, start->algorithm_index, "notSupported", response);
     /* 只做联调名称映射；使用正式RK命令目录，避免两张表顺序不同导致发错算法。 */
     const rk_command_descriptor_t *command = rk_command_find_by_name(start->algorithm_name);
-    if (command == NULL)
+    if (command == NULL || command->category != RK_COMMAND_CATEGORY_FUNCTIONAL)
         return execution_response(sequence, start->algorithm_index, "notSupported", response);
     rk_request_t request = {command->command_id, ++s_cookie, RK_GATEWAY_TEST_TIMEOUT_MS};
     if (rk_link_request(&request) != 0)

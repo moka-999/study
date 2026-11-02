@@ -55,12 +55,9 @@ uint32_t HAL_GetTick(void);
 int pc_test_service_busy(void);
 int pc_power_service_busy(void);
 int pc_test_round_update_modes(uint8_t, const uint8_t *);
-enum { OTA_DOWNLOAD_IDLE, OTA_DOWNLOAD_RECEIVING, OTA_DOWNLOAD_READY, OTA_DOWNLOAD_COMMIT_UNKNOWN };
-typedef struct { int state; } ota_download_progress_t;
-void ota_download_get_progress(ota_download_progress_t *);
 '''
     (build / "port.h").write_text(port, encoding="utf-8")
-    for name in ("FreeRTOS", "queue", "task", "main", "pc_test_service", "pc_power_service", "ota_app"):
+    for name in ("FreeRTOS", "queue", "task", "main", "pc_test_service", "pc_power_service"):
         (build / (name + ".h")).write_text('#include "port.h"\n', encoding="utf-8")
     (build / "b2_under_test.h").write_text(
         '#include "' + (root / "App/tasks/b2/b2_service.c").as_posix() + '"\n'
@@ -70,12 +67,12 @@ void ota_download_get_progress(ota_download_progress_t *);
     sources = [test_root / "tests/test_b2_protocol.c", test_root / "tools/b2_spi_master/wire.c"]
     sources += [root / p for p in ("App/protocol/b2/b2_protocol.c",
                                    "App/protocol/b2/b2_state_machine.c", "App/protocol/common/crc.c")]
-    boot = root.parent / "bootloader/tests"
+    support = Path(__file__).resolve().parent / "support"
     flags = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
-               "-std=c11", "-O1", "-g", "-DENABLE_OTA_BOOT=1", "-Wall", "-Wextra", "-Werror",
+               "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
                "-ffunction-sections", "-fdata-sections"]
-    link_flags = [str(boot / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
-                  "-T" + str(boot / "qemu_test.ld"), "-Wl,--gc-sections"]
+    link_flags = [str(support / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
+                  "-T" + str(support / "qemu_test.ld"), "-Wl,--gc-sections"]
     command = flags + ["-I" + str(p) for p in includes] + list(map(str, sources)) + link_flags
     run_suite(args, command, build, root.name, "PASS: B2 protocol")
 

@@ -133,14 +133,14 @@ pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type
     return PC_TEST_JSON_OK;
 }
 
-/* 时序字段全部可选，保留字符串原值；RK单位/编码尚未定义，不擅自转换为寄存器值。 */
-static pc_test_json_result_t parse_timing_parameters(const cJSON *timing, int slt)
+/* 对象必填，空对象表示默认时序；读/写延迟可分别提供，保留字符串原值，不推导另一项。 */
+static pc_test_json_result_t parse_timing_parameters(const cJSON *timing)
 {
     static const char *const fields[] = {
-        "Freq", "CASLatency", "tRC", "tRCD", "tRFC", "tRP", "tRAS", "tRRD",
-        "BurstLength", "ODT", "tREFI"
+        "Freq", "CASReadLatency", "CASWriteLatency", "tRC", "tRCD", "tRFC",
+        "tRP", "tRAS", "tRRD", "BurstLength", "ODT", "tREFI"
     };
-    if (!timing || (!slt && cJSON_IsNull(timing))) return PC_TEST_JSON_OK;
+    if (!timing) return PC_TEST_JSON_ERROR_MISSING_FIELD;
     if (!cJSON_IsObject(timing)) return PC_TEST_JSON_ERROR_FIELD_TYPE;
     uint32_t seen = 0U;
     for (const cJSON *item = timing->child; item; item = item->next) {
@@ -156,12 +156,13 @@ static pc_test_json_result_t parse_timing_parameters(const cJSON *timing, int sl
     return PC_TEST_JSON_OK;
 }
 
-/* 两类开始请求共用电压/Boot规则；仅SLT允许null index且禁止外部已启动模式。 */
+/* 三类开始请求共用电压/Boot规则；仅SLT允许null index且禁止外部已启动模式。 */
 static pc_test_json_result_t parse_start(const cJSON *root,
                                         pc_test_start_view_t *view, int slt)
 {
     const char *fields[8] = {
-        "algorithmType", "algorithmName", "algorithmIndex", "power", "reboot", "bootMode"
+        "algorithmType", "algorithmName", "algorithmIndex", "power", "reboot", "bootMode",
+        "TimingParameters"
     };
     static const char *const algorithm_types[] = {"functional", "slt", "parametric"};
     pc_test_start_view_t candidate = {0};
@@ -171,9 +172,8 @@ static pc_test_json_result_t parse_start(const cJSON *root,
     const cJSON *timeout = cJSON_GetObjectItemCaseSensitive(root, "timeoutMs");
     const cJSON *timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters");
     if (slt && timeout) return PC_TEST_JSON_ERROR_FIELDS;
-    size_t field_count = 6U;
+    size_t field_count = 7U;
     if (timeout) fields[field_count++] = "timeoutMs";
-    if (timing) fields[field_count++] = "TimingParameters";
     if (!has_exact_fields(root, fields, field_count))
         return PC_TEST_JSON_ERROR_FIELDS;
 
@@ -183,9 +183,9 @@ static pc_test_json_result_t parse_start(const cJSON *root,
         return PC_TEST_JSON_ERROR_FIELD_TYPE;
     }
 
-    pc_test_json_result_t result = parse_timing_parameters(timing, slt);
+    pc_test_json_result_t result = parse_timing_parameters(timing);
     if (result != PC_TEST_JSON_OK) return result;
-    candidate.timing_parameters = cJSON_IsObject(timing) ? timing : NULL;
+    candidate.timing_parameters = timing;
     if (slt) {
         if (!cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(root, "algorithmIndex")))
             return PC_TEST_JSON_ERROR_FIELD_TYPE;
@@ -351,13 +351,15 @@ cJSON *pc_test_result_create(const char *algorithm_name,
     return root;
 }
 
-cJSON *pc_functional_result_create(const char *algorithm_name,
+cJSON *pc_algorithm_result_create(const char *algorithm_type, const char *algorithm_name,
                                     uint32_t algorithm_index,
                                     const char *site_id,
                                     uint64_t elapsed_ms,
                                     const pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT])
 {
-    if (!algorithm_name || !site_id || !dies) return NULL;
+    if (!algorithm_type || !algorithm_name || !site_id || !dies ||
+        (strcmp(algorithm_type, "functional") != 0 && strcmp(algorithm_type, "parametric") != 0))
+        return NULL;
     for (size_t die = 0U; die < PC_FUNCTIONAL_DIE_COUNT; ++die) {
         if (!dies[die].error_type || dies[die].failed > 1U) return NULL;
     }
@@ -371,7 +373,7 @@ cJSON *pc_functional_result_create(const char *algorithm_name,
     } while (elapsed_ms != 0U);
     cJSON *root = cJSON_CreateObject();
     if (!root || !cJSON_AddStringToObject(root, "siteId", site_id) ||
-        !cJSON_AddStringToObject(root, "algorithmType", "functional") ||
+        !cJSON_AddStringToObject(root, "algorithmType", algorithm_type) ||
         !cJSON_AddStringToObject(root, "algorithmName", algorithm_name) ||
         !cJSON_AddNumberToObject(root, "algorithmIndex", algorithm_index) ||
         !cJSON_AddRawToObject(root, "testTimeMs", elapsed_digits)) {
@@ -419,11 +421,24 @@ cJSON *pc_functional_result_create(const char *algorithm_name,
     return root;
 }
 
-/* mean/min/max均在int32/uint32采样值范围内，转换成JSON double不会丢整数精度。 */
-static cJSON *metric_value(const idd_metric_stats_t *metric, unsigned kind)
+cJSON *pc_functional_result_create(const char *algorithm_name, uint32_t algorithm_index,
+    const char *site_id, uint64_t elapsed_ms,
+    const pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT])
 {
-    int64_t value = kind == 0U ? metric->mean : kind == 1U ? metric->maximum : metric->minimum;
-    return metric->valid_count ? cJSON_CreateNumber((double)value) : cJSON_CreateNull();
+    return pc_algorithm_result_create("functional", algorithm_name, algorithm_index,
+                                      site_id, elapsed_ms, dies);
+}
+
+/* 电流统计保留µA，JSON沿用mA单位；均值先除样本数，避免整数µA均值再次截断。 */
+static cJSON *metric_value(const idd_metric_stats_t *metric, unsigned kind, int is_current)
+{
+    if (metric->valid_count == 0U) return cJSON_CreateNull();
+    double value = (double)(kind == 0U ? metric->mean : kind == 1U ? metric->maximum : metric->minimum);
+    if (is_current) {
+        if (kind == 0U) value = (double)metric->sum / (double)metric->valid_count;
+        value /= 1000.0;
+    }
+    return cJSON_CreateNumber(value);
 }
 
 int pc_test_add_statistics(cJSON *body, const idd_stats_t *snapshot)
@@ -440,7 +455,8 @@ int pc_test_add_statistics(cJSON *body, const idd_stats_t *snapshot)
         cJSON *array = cJSON_AddArrayToObject(stats, names[field]);
         if (!array) return 0;
         for (unsigned rail = 0; rail < MEMORY_MONITOR_RAIL_COUNT; ++rail) {
-            cJSON *number = metric_value(field < 3U ? &snapshot->voltage[rail] : &snapshot->current[rail], field % 3U);
+            cJSON *number = metric_value(field < 3U ? &snapshot->voltage[rail] : &snapshot->current[rail],
+                                        field % 3U, field >= 3U);
             if (!number || !cJSON_AddItemToArray(array, number)) { cJSON_Delete(number); return 0; }
         }
     }
@@ -463,7 +479,7 @@ int pc_test_add_measurement(cJSON *body, const idd_stats_t *snapshot)
     if (!measurement) return 0;
     for (unsigned i = 0; any_valid && i < 18U; ++i) {
         const idd_metric_stats_t *metric = i < 9U ? &snapshot->voltage[i / 3U] : &snapshot->current[(i - 9U) / 3U];
-        cJSON *number = metric_value(metric, i % 3U);
+        cJSON *number = metric_value(metric, i % 3U, i >= 9U);
         if (!number || !cJSON_AddItemToObject(measurement, names[i], number)) {
             cJSON_Delete(number); cJSON_Delete(measurement); return 0;
         }

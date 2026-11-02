@@ -95,12 +95,12 @@ void mock_exit(void);
 #define taskEXIT_CRITICAL() mock_exit()
 ''', encoding="utf-8")
     (build / "task.h").write_text('#include "FreeRTOS.h"\n', encoding="utf-8")
-    boot = root.parent / "bootloader/tests"
+    support = Path(__file__).resolve().parent / "support"
     command = [compiler, "-mcpu=cortex-m7", "-mthumb", "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror",
                "-I" + str(build), "-I" + str(root / "Core/Inc"),
                str(ROOT / "tests/test_result_led.c"), str(root / "Core/Src/result_led.c"),
-               str(boot / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
-               "-T" + str(boot / "qemu_test.ld"), "-o", str(build / "test.elf")]
+               str(support / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
+               "-T" + str(support / "qemu_test.ld"), "-o", str(build / "test.elf")]
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode:

@@ -18,11 +18,12 @@ def main():
     args = parser.parse_args()
     # 单次复现只用外部已启动模式，不借用文档中会改变模拟电压的20组示例。
     body = dict(algorithmType="functional", algorithmName="gtest-stuck-address",
-                algorithmIndex=1, power=None, reboot=False, bootMode=None)
+                algorithmIndex=1, power=None, reboot=False, bootMode=None,
+                TimingParameters={})
     packet = make_frame(0x0103, json.dumps(body, separators=(",", ":")).encode(), 2)
-    assert struct.unpack(">IHHHHIH", packet[:18]) == (149, 1, 8, 0, 0x0103, 2, 0)
+    assert struct.unpack(">IHHHHIH", packet[:18]) == (171, 1, 8, 0, 0x0103, 2, 0)
     if not args.execute:
-        print("离线校验通过：149字节，gtest-stuck-address，未连接开发板。")
+        print("离线校验通过：171字节，gtest-stuck-address，未连接开发板。")
         return
     if args.report is None or args.report.exists():
         parser.error("执行必须指定不存在的--report，禁止覆盖诊断证据")

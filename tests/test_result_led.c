@@ -61,6 +61,8 @@ void test_main(void)
     result_led_process(600U); CHECK(levels == 0U); /* 重复提交不延后500ms闪烁边界。 */
     result_led_process(2100U); CHECK(levels == 31U); /* 跨过3个半周期只更新一次。 */
     result_led_all_off(); CHECK(levels == 0U);
+    result_led_process(2600U); CHECK(levels == 0U); /* OFF跨过闪烁相位仍须全灭。 */
+    result_led_process(3100U); CHECK(levels == 0U);
     tick = UINT32_MAX - 99U;
     CHECK(result_led_set_all(states) == HAL_OK && levels == 31U);
     result_led_process(399U); CHECK(levels == 31U);

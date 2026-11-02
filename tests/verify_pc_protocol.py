@@ -266,23 +266,28 @@ def main() -> None:
                              ("PC_COMMAND_ROUND_END", "handle_round_end"),
                              ("PC_COMMAND_SLT_START", "handle_slt_start"),
                              ("PC_COMMAND_SLT_RESULT", "handle_slt_result"),
-                             ("PC_COMMAND_PARA_START", "handle_reserved"),
+                             ("PC_COMMAND_PARA_START", "handle_start_test"),
                              ("PC_COMMAND_PARA_RESULT", "reject_response_command")):
         assert routes[command] == handler
     assert not any(0x0700 <= value <= 0x07FF for value in values), "070x已从正式命令表移除"
+    assert not any(0x0901 <= value <= 0x0903 for value in values), "历史升级编号不再路由到升级处理"
     assert "s_command_table[i].handler(request, mcu_tx_sequence" in dispatch_source
     passed += 1
 
     tester_store_source = (ROOT / "App" / "protocol" / "pc" /
                            "pc_tester_info.c").read_text(encoding="utf-8")
-    assert 'TESTER_PRODUCT_NAME        "LPDDR4/X_200B"' in tester_store_source
-    assert 'TESTER_NAME                "JMCT-4000"' in tester_store_source
-    assert 'TESTER_HARDWARE_REVISION   "D00"' in tester_store_source
-    assert 'TESTER_BOARD_NAME          "RK3588_test"' in tester_store_source
+    storage_config = (ROOT / "Core/Inc/board_storage_config.h").read_text(encoding="utf-8")
+    boot_fru = (ROOT / "boot/boot_fru.c").read_text(encoding="utf-8")
+    for field, value in (("TESTER_PRODUCT_NAME", "LPDDR4/X_200B"),
+                         ("TESTER_NAME", "JMCT-4000"),
+                         ("TESTER_HARDWARE_REVISION", "D00"),
+                         ("TESTER_BOARD_NAME", "RK3588_test")):
+        assert re.search(r"#define\s+" + field + r'\s+"' + re.escape(value) + '"', storage_config)
     assert "fru_info_load" in tester_store_source
-    assert "fru_info_load_legacy_v1" in tester_store_source
-    assert "fru_info_save" in tester_store_source
-    assert 'if (strcmp(fru->tester_name, "LPDDR4/X_200B") != 0) return 0;' in tester_store_source
+    assert "#if !BOARD_W25_PRESENT" in tester_store_source
+    assert "fru_info_save" not in tester_store_source
+    assert "fru_info_load_legacy_v1" in boot_fru and "fru_info_save" in boot_fru
+    assert 'if (strcmp(fru->tester_name, "LPDDR4/X_200B") != 0) return 0;' in boot_fru
     passed += 1
 
     # 正式TCP任务只保留socket与状态机编排，不能再包含JSON/业务处理细节。
@@ -365,7 +370,7 @@ def main() -> None:
     start_handler = dispatch_source.split("static pc_dispatch_result_t handle_start_test(", 1)[1].split("\n}", 1)[0]
     service_source = (ROOT / "App/protocol/pc/pc_test_service.c").read_text(encoding="utf-8")
     assert "pc_test_service_start" in start_handler
-    assert '"notReady"' in service_source and '"otaNotReady"' in service_source
+    assert '"notReady"' in service_source and '"otaNotReady"' not in service_source
     assert "pc_dispatch_next_response" in tcp_source
     assert "PC_DISPATCH_NO_RESPONSE" not in start_handler
     assert "build_command_failure_with_index" in start_handler

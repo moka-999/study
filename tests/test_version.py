@@ -107,9 +107,8 @@ def verify_partition_map(root: Path = ROOT) -> None:
     total = header_define("FLASH_LAYOUT_TOTAL_SIZE", root)
     metadata_base = header_define("FLASH_LAYOUT_METADATA_BASE", root)
     metadata_size = header_define("FLASH_LAYOUT_METADATA_SIZE", root)
-    ota_a = header_define("FLASH_LAYOUT_OTA_SLOT_A_BASE", root)
-    ota_b = header_define("FLASH_LAYOUT_OTA_SLOT_B_BASE", root)
-    ota_size = header_define("FLASH_LAYOUT_OTA_SLOT_SIZE", root)
+    firmware_reserved = header_define("FLASH_LAYOUT_RESERVED_FIRMWARE_BASE", root)
+    firmware_reserved_size = header_define("FLASH_LAYOUT_RESERVED_FIRMWARE_SIZE", root)
     rk_a = header_define("FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE", root)
     rk_b = header_define("FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE", root)
     rk_size = header_define("FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE", root)
@@ -121,12 +120,11 @@ def verify_partition_map(root: Path = ROOT) -> None:
     assert total == 32 * 1024 * 1024
     assert metadata_base == 0
     assert metadata_size == 0x10000
-    assert (ota_a, ota_b, ota_size) == (0x10000, 0x210000, 0x200000)
+    assert (firmware_reserved, firmware_reserved_size) == (0x10000, 0x400000)
     assert (rk_a, rk_b, rk_size) == (0x410000, 0xC10000, 8 * 1024 * 1024)
     assert (self_test, self_test_size) == (0x1FF0000, 0x10000)
-    assert metadata_base + metadata_size == ota_a
-    assert ota_a + ota_size == ota_b
-    assert ota_b + ota_size == rk_a
+    assert metadata_base + metadata_size == firmware_reserved
+    assert firmware_reserved + firmware_reserved_size == rk_a
     assert rk_a + rk_size == rk_b
     assert rk_b + rk_size == reserved
     assert reserved + reserved_size == self_test
@@ -206,6 +204,9 @@ def verify_source_contract() -> None:
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     linker = (ROOT / "STM32H743xx_FLASH.ld").read_text(encoding="utf-8")
 
+    main_source = (ROOT / "Core/Src/main.c").read_text(encoding="utf-8")
+    assert "firmware_version_" not in main_source, "启动路径不能读写固件版本记录"
+    assert "firmware_version_sync" not in layout_c, "自动同步版本入口应已删除"
     assert "generation_is_newer" in layout_c and "payload_crc32" in layout_c
     assert "offsetof(fru_info_t, tester_name) == 138U" in layout_h
     assert "offsetof(fru_info_t, test_board) == 170U" in layout_h

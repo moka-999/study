@@ -21,12 +21,6 @@ endif()
 # App工程及默认产物名称。
 set(CMAKE_PROJECT_NAME test)
 
-# App地址修正实验属于App工程，不把FreeRTOS/LwIP等源码复制进独立B工程。
-# 默认关闭；实验镜像不是已实现下载/回滚的正式OTA镜像。
-option(ENABLE_OTA_RELOCATION_PROBE "Build isolated App relocation probe" OFF)
-option(ENABLE_OTA_BOOT "Require B journal and healthy-start confirmation" OFF)
-set(OTA_APP_BASE "0x08020000" CACHE STRING "OTA probe slot address")
-
 # 仅用于阿波罗 V2 逻辑分析仪验收；默认关闭，正式镜像绝不跳过 DDR 器件访问。
 option(ENABLE_PWR_WAVE_TEST "Build Apollo V2 pwr_ctrl waveform image" OFF)
 
@@ -45,12 +39,12 @@ option(ENABLE_AD7124_WAVE_TEST "Build isolated Apollo V2 AD7124 SPI waveform ima
 # 阿波罗 V2 PC业务网络验收；沿用正式分发，隔离RK任务。
 option(ENABLE_PC_PROTOCOL_NET_TEST "Build isolated PC protocol TCP business test image" OFF)
 
-# 隔离全链路镜像保留正式健康检查，只模拟0103业务门禁；正式构建默认关闭。
+# 隔离全链路镜像保留正式任务监控，只模拟0103业务门禁；正式构建默认关闭。
 # ON仅用于V2隔离联调：允许0103走模拟电源/ready路径并连接脚本扮演的RK。
 # OFF走正式服务及其外部就绪/电源门禁；不是RK协议总开关，禁止量产打开。
 option(ENABLE_RK_GATEWAY_TEST "Build temporary PC MCU RK gateway test image" OFF)
 
-# V2沿用正式TCP/RK/OTA任务，仅电源和测量业务使用无硬件副作用的联调模型。
+# V2沿用正式TCP/RK任务，仅电源和测量业务使用无硬件副作用的联调模型。
 # 不替代真实RK算法；B1及量产构建禁用，只有显式选择才会编入。
 option(ENABLE_V2_POWER_SIMULATION "Simulate V2 power and measurements with real RK" OFF)
 
@@ -85,10 +79,6 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE B2_TEST_SITE_ID=${B2_TE
 # 引入CubeMX生成的外设及第三方库目标。
 add_subdirectory(cmake/stm32cubemx)
 
-if(ENABLE_OTA_RELOCATION_PROBE)
-    target_compile_definitions(STM32_Drivers PRIVATE OTA_RELOCATION_PROBE=1)
-endif()
-
 # 自定义库目录；没有额外目录时保持空列表。
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # 需要额外库搜索目录时在此补充。
@@ -118,7 +108,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv/spi_hw.c
     # PC-MCU 与 MCU-RK 是两套独立协议，源码目录必须保持物理隔离。
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_dispatch.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_ota.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_protocol.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_state_machine.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_test_message.c
@@ -134,6 +123,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/led_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/monitor_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/task_watchdog.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/pwr_wave_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/result_led_wave_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/test/qspi_test.c
@@ -151,17 +141,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/BSP/WDT/wdt.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/cJSON/cJSON.c
 )
-
-if(ENABLE_OTA_BOOT)
-    if(NOT ENABLE_OTA_RELOCATION_PROBE OR ENABLE_PC_PROTOCOL_NET_TEST OR ENABLE_FLASH_SELF_TEST OR
-       ENABLE_DRIVER_MOCK_TEST OR ENABLE_AD7124_WAVE_TEST OR ENABLE_DRIVER_SELF_TEST OR
-       ENABLE_PWR_WAVE_TEST OR ENABLE_RESULT_LED_WAVE_TEST)
-        message(FATAL_ERROR "OTA App requires slot-limited build and all normal critical tasks")
-    endif()
-    target_sources(${CMAKE_PROJECT_NAME} PRIVATE App/ota/ota_app.c App/ota/ota_install.c
-        App/ota/boot_record.c App/ota/boot_health.c)
-    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ENABLE_OTA_BOOT=1)
-endif()
 
 # Mock任务体只进入隔离测试镜像，正式固件不编译测试代码。
 if(ENABLE_RK_GATEWAY_TEST)
@@ -207,7 +186,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/b2
     # 自定义模块头文件目录。
     ${CMAKE_CURRENT_SOURCE_DIR}/HAL_Drv
-    ${CMAKE_CURRENT_SOURCE_DIR}/App/ota
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pc
@@ -266,7 +244,10 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # 需要额外库时在此补充。
 )
 
-# 生成精确的裸镜像、CRC32清单和76字节版本载荷；不向固件中加入OTA行为。
+# cJSON用浮点格式化及回读校验输出小数；newlib-nano默认不链接这两项。
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -Wl,-u,_printf_float -Wl,-u,_scanf_float)
+
+# 生成可直接烧录的裸镜像、CRC32清单和76字节版本载荷。
 add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_OBJCOPY} -O binary
             $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
@@ -284,33 +265,5 @@ add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
     VERBATIM
 )
 
-# ===================================================================
-# Bootloader — 最小跳转 (0x08000000, 128KB)
-# 烧录顺序: boot.elf 先, test.elf 后
-# 用显式命令构建, 绕开 CMake executable 规则 (全局 -T/编译flags 会泄漏)
-# ===================================================================
-set(BOOT_OBJ ${CMAKE_BINARY_DIR}/boot.s.o)
-set(BOOT_ELF ${CMAKE_BINARY_DIR}/boot.elf)
-set(BOOT_FLAGS -mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-d16)
-
-add_custom_command(
-    OUTPUT ${BOOT_OBJ}
-    COMMAND ${CMAKE_C_COMPILER} ${BOOT_FLAGS} -x assembler-with-cpp
-            -c ${CMAKE_CURRENT_SOURCE_DIR}/boot/boot.s -o ${BOOT_OBJ}
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/boot/boot.s
-    COMMENT "Assembling boot/boot.s"
-    VERBATIM
-)
-
-add_custom_command(
-    OUTPUT ${BOOT_ELF}
-    COMMAND ${CMAKE_C_COMPILER} ${BOOT_FLAGS}
-            -nostartfiles -nostdlib
-            -T ${CMAKE_CURRENT_SOURCE_DIR}/boot/STM32H743_boot.ld
-            ${BOOT_OBJ} -o ${BOOT_ELF}
-    DEPENDS ${BOOT_OBJ} ${CMAKE_CURRENT_SOURCE_DIR}/boot/STM32H743_boot.ld
-    COMMENT "Linking boot.elf"
-    VERBATIM
-)
-
-add_custom_target(boot ALL DEPENDS ${BOOT_ELF})
+# 最终ELF/BIN同时包含精简Boot和单App。
+include(boot/minimal_boot.cmake)

@@ -8,7 +8,6 @@ import subprocess
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app-root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--boot-root", type=Path, default=Path(__file__).resolve().parents[2] / "bootloader")
     parser.add_argument("--compiler", default=shutil.which("arm-none-eabi-gcc") or "arm-none-eabi-gcc")
     parser.add_argument("--qemu", default=shutil.which("qemu-system-arm") or "D:/qemu/qemu-system-arm.exe")
     args = parser.parse_args()
@@ -36,12 +35,12 @@ def main():
     sources = [Path(__file__).with_name("test_driver_reliability.c"),
                root / "HAL_Drv/qspi_hw.c", root / "BSP/MCP4725/mcp4725.c",
                root / "LWIP/Target/eth_custom_phy_interface.c", v2 / "BSP/PCF8574/pcf8574.c",
-               args.boot_root / "tests/qemu_start.s"]
+               Path(__file__).resolve().parent / "support/qemu_start.s"]
     command = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-DSTM32H743xx", "-DUSE_HAL_DRIVER",
                "-ffunction-sections", "-fdata-sections", *["-I" + str(p) for p in includes],
                *map(str, sources), "-nostartfiles", "--specs=nosys.specs",
-               "-T" + str(args.boot_root / "tests/qemu_test.ld"), "-Wl,--gc-sections", "-o", str(build / "test.elf")]
+               "-T" + str(Path(__file__).resolve().parent / "support/qemu_test.ld"), "-Wl,--gc-sections", "-o", str(build / "test.elf")]
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode:

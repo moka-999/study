@@ -15,7 +15,7 @@ static unsigned sent;
 static int tx_failure, power_on = PWR_CTRL_STATE_ON;
 /* 仅测试桩使用：记录发送尝试，包含未入队的失败帧；不修改生产任务的接口。 */
 static unsigned tx_attempts;
-static struct { uint64_t sequence; uint32_t tick; uint16_t type; } tx_log[16];
+static struct { uint64_t sequence; uint32_t tick; uint16_t type, command; } tx_log[16];
 static jmp_buf task_exit;
 static unsigned task_iterations, delay_calls, health_calls, rx_calls, rx_batch_calls;
 static unsigned resume_power_after;
@@ -52,9 +52,9 @@ void vTaskDelay(uint32_t delay)
     }
     if (delay_calls == task_iterations) longjmp(task_exit, 1);
 }
-void ota_app_progress(int task)
+void task_watchdog_progress(int task)
 {
-    CHECK(task == OTA_TASK_RK);
+    CHECK(task == TASK_WATCHDOG_RK);
     ++health_calls;
 }
 void led_toggle(int led) { (void)led; }
@@ -85,6 +85,8 @@ int uart_send(int id, uint8_t *buffer, uint16_t length)
     CHECK(tx_attempts < sizeof(tx_log) / sizeof(tx_log[0]));
     tx_log[tx_attempts].sequence = frame.sequence;
     tx_log[tx_attempts].tick = tick;
+    tx_log[tx_attempts].command = frame.count ?
+        (uint16_t)(frame.payload[0] | ((uint16_t)frame.payload[1] << 8)) : 0U;
     tx_log[tx_attempts++].type = frame.count ? frame.units[0].type : TLV_TYPE_HEARTBEAT;
     if (tx_failure) return -1;
     ++sent;
@@ -198,7 +200,7 @@ static tlv_frame_t task_result_frame(uint64_t sequence, uint16_t command, uint64
     return frame;
 }
 /* 编号和名称按 RK 原始定义逐项核对，不用生产表反向生成预期值。
- * 同一条命令的两种查询应返回同一描述项；IDD 等未支持编号不能误入队。
+ * 同一条命令的两种查询应返回同一描述项，并保持FUNC/IDD类别边界。
  */
 static void test_command_table(void)
 {
@@ -206,14 +208,19 @@ static void test_command_table(void)
         "gtest-stuck-address", "gtest-rand", "gtest-xor", "gtest-sub", "gtest-mul",
         "gtest-div", "gtest-or", "gtest-and", "gtest-seqinc", "gtest-solidbits",
         "gtest-checkerboard", "gtest-blockseq", "gtest-walkbits0", "gtest-walkbits1",
-        "gtest-bitspread", "gtest-bitflip", "mats", "marchx", "marchc-", "marchc+"
+        "gtest-bitspread", "gtest-bitflip", "mats", "marchx", "marchc-", "marchc+",
+        "idd_0", "idd_2P", "idd_2PS", "idd_2N", "idd_2NS", "idd_3P", "idd_3PS",
+        "idd_3N", "idd_3NS", "idd_4R", "idd_4W", "idd_5", "idd_5AB", "idd_5PB",
+        "idd_6", "idd_6ET"
     };
-    static const uint16_t unsupported[] = {0U, 21U, 36U, UINT16_MAX};
+    static const uint16_t unsupported[] = {0U, 37U, UINT16_MAX};
     for (unsigned i = 0U; i < sizeof(names) / sizeof(names[0]); ++i) {
         const rk_command_descriptor_t *command = rk_command_find_by_id((uint16_t)(i + 1U));
         CHECK(command != NULL && command->command_id == i + 1U);
         CHECK(command->name != NULL && strcmp(command->name, names[i]) == 0);
         CHECK(rk_command_find_by_name(names[i]) == command);
+        CHECK(command->category == (i < 20U ? RK_COMMAND_CATEGORY_FUNCTIONAL :
+                                              RK_COMMAND_CATEGORY_PARAMETRIC));
     }
     for (unsigned i = 0U; i < sizeof(unsupported) / sizeof(unsupported[0]); ++i) {
         CHECK(rk_command_find_by_id(unsupported[i]) == NULL);
@@ -221,7 +228,12 @@ static void test_command_table(void)
     CHECK(rk_command_find_by_name(NULL) == NULL);
     CHECK(rk_command_find_by_name("") == NULL);
     CHECK(rk_command_find_by_name("unknown-algorithm") == NULL);
-    CHECK(rk_command_find_by_name("idd_0") == NULL);
+    CHECK(rk_command_find_by_name("IDD_0") == NULL);
+    CHECK(rk_command_find_by_name("idd_2p") == NULL);
+    CHECK(rk_command_find_by_name("idd_2ps") == NULL);
+    CHECK(rk_command_find_by_name("idd_5ab") == NULL);
+    CHECK(rk_command_find_by_name("idd_6et") == NULL);
+    CHECK(rk_command_find_by_name("idd_0 ") == NULL);
 }
 
 /* 已知类型的宽度规则必须同时约束打包和接收；未知扩展仍按显式长度保留。
@@ -241,7 +253,9 @@ static void test_type_rules(void)
         {TLV_TYPE_RESULT_DIE,  1U, 0U},
         {TLV_TYPE_RESULT_TIME, 8U, 9U},
         {TLV_TYPE_PROGRESS,    1U, 0U},
-        {TLV_TYPE_RESULT_FAIL, 1U, 2U}
+        {TLV_TYPE_RESULT_FAIL, 1U, 2U},
+        {TLV_TYPE_PARAM_ACTION, 1U, 0U},
+        {TLV_TYPE_REGISTER_ADDRESS, 4U, 3U}
     };
     uint8_t value[9] = {0U}, wire[TLV_FRAME_MAX];
     tlv_frame_t frame, unchanged, decoded;
@@ -482,6 +496,81 @@ static void test_codec(void)
     tick += RK_BYTE_TIMEOUT_MS; CHECK(feed(&stream, golden, sizeof(golden)) == 1);
 }
 
+/* 动作接口仅组两TLV帧；独立黄金CRC约束它不能把action追加到5000内部。 */
+static void test_idd_action_codec(void)
+{
+    static const uint8_t golden[2][27] = {
+        {0x5A,0x00,0x0B,0x10,0x14,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+         0x50,0x00,0x00,0x02,0x15,0x00,0x10,0x1A,0x00,0x01,0x00,0x60,0x9C,0xA5},
+        {0x5A,0x00,0x0B,0x10,0x14,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+         0x50,0x00,0x00,0x02,0x15,0x00,0x10,0x1A,0x00,0x01,0x01,0xA1,0x5C,0xA5}
+    };
+    uint8_t wire[28], untouched[28];
+    tlv_frame_t frame;
+    for (uint8_t action = 0U; action < 2U; ++action) {
+        memset(wire, 0xCC, sizeof(wire));
+        CHECK(tlv_pack_idd_action(21U, action, UINT64_C(0x0102030405060708),
+                                  wire, 27U) == TLV_IDD_ACTION_FRAME_SIZE);
+        CHECK(memcmp(wire, golden[action], 27U) == 0 && wire[27] == 0xCC);
+        CHECK(tlv_unpack(wire, 27U, &frame) == 2 && frame.payload_used == 3U);
+        CHECK(frame.sequence == UINT64_C(0x0102030405060708));
+        CHECK(frame.units[0].type == TLV_TYPE_CMD && frame.units[0].data_len == 2U);
+        CHECK(frame.units[1].type == TLV_TYPE_PARAM_ACTION && frame.units[1].data_len == 1U);
+        CHECK(frame.payload[0] == 21U && frame.payload[1] == 0U && frame.payload[2] == action);
+        tlv_sm_t stream; tlv_sm_init(&stream);
+        CHECK(feed(&stream, wire, 27U) == 1U);
+        wire[24] ^= 1U;
+        CHECK(tlv_unpack(wire, 27U, &frame) == -1);
+    }
+    CHECK(tlv_pack_idd_action(36U, 0U, UINT64_MAX, wire, sizeof(wire)) == 27);
+    CHECK(tlv_unpack(wire, 27U, &frame) == 2 && frame.payload[0] == 36U);
+    /* 非法值、非IDD编号和短缓冲都必须在写输出之前失败。 */
+    memset(wire, 0xCC, sizeof(wire)); memcpy(untouched, wire, sizeof(wire));
+    CHECK(tlv_pack_idd_action(21U, 2U, 0U, wire, sizeof(wire)) == 0);
+    CHECK(tlv_pack_idd_action(21U, UINT8_MAX, 0U, wire, sizeof(wire)) == 0);
+    CHECK(tlv_pack_idd_action(20U, 1U, 0U, wire, sizeof(wire)) == 0);
+    CHECK(tlv_pack_idd_action(37U, 1U, 0U, wire, sizeof(wire)) == 0);
+    CHECK(tlv_pack_idd_action(21U, 1U, 0U, wire, 26U) == 0);
+    CHECK(tlv_pack_idd_action(21U, 1U, 0U, NULL, 27U) == 0);
+    CHECK(memcmp(wire, untouched, sizeof(wire)) == 0);
+    /* 接收端也拒绝CRC正确但bool值为2的动作帧。 */
+    memcpy(wire, golden[0], 27U); wire[23] = 2U;
+    unsigned length = seal(wire, 11U);
+    CHECK(length == 27U && tlv_unpack(wire, length, &frame) == -1);
+}
+
+/* 7018仅携带无符号32位地址；用最高位为1的黄金值约束小端编码，不执行寄存器读写。 */
+static void test_register_address_codec(void)
+{
+    static const uint8_t golden[] = {
+        0x5A,0x00,0x08,0x50,0x15,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+        0x70,0x18,0x00,0x04,0x98,0xBA,0xDC,0xFE,0x8D,0x58,0xA5
+    };
+    const uint32_t address = UINT32_C(0xFEDCBA98);
+    uint8_t value[5] = {(uint8_t)address, (uint8_t)(address >> 8),
+                        (uint8_t)(address >> 16), (uint8_t)(address >> 24), 0U};
+    uint8_t wire[28];
+    tlv_frame_t frame, decoded;
+    frame_init(&frame);
+    CHECK(tlv_pack(&frame, TLV_TYPE_REGISTER_ADDRESS, value, 4U) == 0);
+    CHECK(tlv_pack_frame(&frame, UINT64_C(0x0102030405060708), wire, sizeof(wire)) == 24);
+    CHECK(memcmp(wire, golden, sizeof(golden)) == 0);
+    CHECK(tlv_unpack(wire, 24U, &decoded) == 1);
+    CHECK(decoded.units[0].type == TLV_TYPE_REGISTER_ADDRESS && decoded.units[0].data_len == 4U);
+    const uint8_t *decoded_value = tlv_unit_get_data(&decoded, &decoded.units[0]);
+    uint32_t decoded_address = (uint32_t)decoded_value[0] | ((uint32_t)decoded_value[1] << 8) |
+                              ((uint32_t)decoded_value[2] << 16) | ((uint32_t)decoded_value[3] << 24);
+    CHECK(decoded_address == address);
+    tlv_frame_t unchanged = frame;
+    CHECK(tlv_pack(&frame, TLV_TYPE_REGISTER_ADDRESS, value, 5U) == -1);
+    CHECK(memcmp(&frame, &unchanged, sizeof(frame)) == 0);
+    /* 三字节宽度由通用规则用例覆盖；此处补五字节且CRC正确的接收拒绝。 */
+    memcpy(wire, golden, sizeof(golden)); wire[16] = 5U; wire[21] = 0U;
+    unsigned length = seal(wire, 9U);
+    CHECK(length == 25U && tlv_unpack(wire, length, &decoded) == -1);
+    CHECK(cleared(&decoded, sizeof(decoded)));
+}
+
 /* 覆盖56字节MATS结果的全部切分点、主动检查/继续收字节和tick回绕。
  * V2与B1门限均固定100ms，测试须直接约束两工程，防止独立工程漏同步。
  */
@@ -522,7 +611,7 @@ static void test_transaction(void)
     rk_request_t request = {3, 101, 5000};
     rk_response_t response;
     CHECK(rk_link_request(NULL) == -1);
-    request.command_id = 21; CHECK(rk_link_request(&request) == -1); request.command_id = 3;
+    request.command_id = 37; CHECK(rk_link_request(&request) == -1); request.command_id = 3;
     request.timeout_ms = UINT32_MAX; CHECK(rk_link_request(&request) == -1); request.timeout_ms = 5000;
     CHECK(rk_link_request(&request) == 0); process_request(); CHECK(sent == 1 && s_pending.waiting);
     tick += 600; process_request(); CHECK(sent == 1 && s_pending.waiting);
@@ -570,6 +659,34 @@ static void reset_task_test(void)
     resume_power_after = 0U;
     rx_mode = 0;
     rx_wire_length = 0U;
+}
+
+/* IDD当前按编号单次下发，沿用最终结果事务；不自动发送进入/退出或重试。 */
+static void test_idd_transactions(void)
+{
+    for (uint16_t command = 21U; command <= 36U; ++command) {
+        reset_task_test();
+        rk_request_t request = {command, 1000U + command, 0U};
+        CHECK(rk_link_request(&request) == 0);
+        process_request();
+        CHECK(sent == 1U && tx_attempts == 1U && s_pending.waiting);
+        CHECK(tx_log[0].type == TLV_TYPE_CMD && tx_log[0].command == command);
+        tlv_frame_t progress = progress_frame(s_pending.sequence, command, 50U);
+        accept_frame(&progress);
+        CHECK(s_pending.waiting && s_pending.progress_valid && s_pending.progress_percent == 50U);
+        tlv_frame_t result = task_result_frame(s_pending.sequence, 1U, 0U);
+        accept_frame(&result); CHECK(s_pending.waiting);
+        result = task_result_frame(s_pending.sequence, command, 0U);
+        accept_frame(&result); process_request();
+        rk_response_t response;
+        CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
+        CHECK(response.cookie == request.cookie && response.result.command_id == command);
+        CHECK(response.result.failed == 0U && response.result.failure_count == 0U);
+        CHECK(sent == 1U && !s_pending.waiting);
+        accept_frame(&result); process_request();
+        CHECK(rk_link_receive(&response) == 0 && sent == 1U);
+    }
+    reset_task_test();
 }
 
 /* 拒绝记录只增加可观测性；合法帧、窗口及最终结果交付必须维持原合同。 */
@@ -1073,7 +1190,7 @@ static void test_heartbeat(void)
 }
 
 /* 执行真实任务循环，由延时桩在指定轮次退出；不向生产代码添加测试钩子。
- * 持续RX或GAP每轮都耗尽8块配额，仍须推进超时、心跳、OTA健康和调度让步。
+ * 持续RX或GAP每轮都耗尽8块配额，仍须推进超时、心跳、任务存活上报和调度让步。
  */
 static void run_task_iterations(void)
 {
@@ -1320,5 +1437,7 @@ void test_main(void)
     test_timeout_recovery_backpressure();
     test_atomic_result(); test_latest_received_sequence(); test_result_stream();
     test_heartbeat(); test_ready_heartbeat(); test_task_fairness();
+    test_idd_action_codec(); test_idd_transactions(); test_register_address_codec();
+    message("PASS: FUNC/IDD categories, IDD number-only transactions, standalone action and register address codecs\n");
     message("PASS: RK protocol and transaction, empty heartbeat, progress, atomic dual-die result, actual C offline only\n"); finish(0);
 }

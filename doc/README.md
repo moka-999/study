@@ -10,12 +10,14 @@
 | 确认职责、编号、IP和运行边界 | [需求基线](requirements_baseline.md)；术语见[CONTEXT](../CONTEXT.md) |
 | 修改PC协议或业务 | [PC协议Markdown](pc_tcp_protocol_spec.md)、[PC协议Word](pc_tcp协议.docx)、[内部JSON合同](pc_json_contract.md) |
 | 修改RK协议 | [现行RK协议](protocol_spec.md)、[双颗粒结果解析](rk_dual_die_result_20261010.md)、[进度双TLV](rk_progress_dual_tlv_20261009.md) |
+| 联调PARA与IDD编号 | [接入范围及待办](para_integration_20261026.md)、[16项JSON及网络助手HEX](examples/para_start_packets_20261026.md) |
 | 修改B1–B2 SPI或动态IP | [SPI协议Markdown](b1_b2_spi_protocol.md)、[SPI协议Word](b1_b2_spi协议.docx)、[接入与调用链](b2_spi_integration_20261020.md) |
 | 用第二块V2模拟B2 | [裸机主机的接线、串口命令与构建](../tools/b2_spi_master/README.md) |
 | 单块V2双SPI回环验证 | [同级独立工程、Flash下载、4线接法、板载灯及协议日志](../../b2_spi_loopback/README.md) |
-| 调试B1电源、Boot、采样 | [B1业务初值](b1_power_business_20261013.md)、[电源硬件依据](b1_power_control_review.md)、[引脚表](b1_mcu_pinout.md) |
-| 修改OTA或Flash布局 | [OTA设计](ota_design.md)、[升级协议](pc_ota_protocol.md)、[Flash布局](flash_layout.md)、[完整Boot工程](../../bootloader/README.md) |
-| 日常下载、空白板首烧 | [日常下载](ota_daily_download.md)、[空白板首烧](../../bootloader/README.md#空白板首次部署v2--b1)、[独立网络工具](ota_standalone_tools_20261015.md) |
+| 调试B1电源、Boot、采样 | [B1业务初值](b1_power_business_20261013.md)、[电源硬件依据](b1_power_control_review.md)、[电压/电流独立采集](sampling_schedule_20261026.md)、[引脚表](b1_mcu_pinout.md) |
+| 图形窗口循环验板 | [三轨电压清单、Boot上下电循环及CSV记录](../tools/b1_debug/README.md)；复用050x/060x，不增加协议字段 |
+| 修改版本/FRU及外置Flash布局 | [Flash布局](flash_layout.md)、[直接烧录](direct_flash.md) |
+| 日常下载、空白板首烧及工厂交付 | [B1/V2直接烧录](direct_flash.md)；两板各自产出Boot＋App合并文件，一次下载 |
 | 查驱动修复和测试依据 | [驱动审查记录](driver_review_and_changes.md)、[近期修复](audit_fixes_20261015.md)、[测试报告目录](test_reports/) |
 
 RK Word `mcu_rk协议.docx`保留供历史查阅；其中早期四TLV结果示例不能替代现行3/5/7 TLV合同。需要对外发送前应先按现行Markdown核对，不能只凭文件名认作已同步。
@@ -29,7 +31,7 @@ RK Word `mcu_rk协议.docx`保留供历史查阅；其中早期四TLV结果示�
   - RK：`history/rk/mcu_rk协议_yyyyMMdd_HHmmss.docx`
   - SPI：`history/b1_b2_spi/b1_b2_spi协议_yyyyMMdd_HHmmss.docx`
 - 代码行为、协议约定与硬件实测是不同依据。发现不一致先定位差异，不把构建/Mock通过写成真板通过。
-- 已部署完整OTA的板卡按日常下载入口操作，禁止直接覆盖旧最小`boot.elf`或普通App ELF。
+- 2026-10-28恢复精简Boot＋单App；Boot=0x08000000、App=0x08020000，MCU升级仍停用。见[修改记录](minimal_boot_20261028.md)。旧OTA记录只作历史证据，不能套用其旧地址/命令。PC协议Word和飞书尚未同步本次090x停用说明，以本轮Markdown与源码为准。
 
 ## 历史资料与恢复
 

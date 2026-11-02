@@ -118,8 +118,7 @@
 #endif /* DUAL_CORE && CORE_CM4 */
 
 #if !defined(VECT_TAB_OFFSET)
-#define VECT_TAB_OFFSET         0x020000U /*!< App 区偏移 (Bootloader 128KB @ 0x08000000) */       /*!< Vector Table base offset field.
-                                                       This value must be a multiple of 0x400. */
+#define VECT_TAB_OFFSET         0x000000U /* 模板备用偏移；本工程M7使用实际向量符号。 */
 #endif /* VECT_TAB_OFFSET */
 
 #endif /* USER_VECT_TAB_ADDRESS */
@@ -306,13 +305,9 @@ void SystemInit (void)
 
   /* Configure the Vector Table location -------------------------------------*/
 #if defined(USER_VECT_TAB_ADDRESS)
-#if defined(OTA_RELOCATION_PROBE)
-  /* 实验App使用向量表符号，让VTOR地址一起进入修正表；正常镜像仍按原配置。 */
+  /* App跟随链接地址设置中断表，避免Boot跳转后又指回首扇区。 */
   extern const uint32_t g_pfnVectors[];
   SCB->VTOR = (uint32_t)g_pfnVectors;
-#else
-  SCB->VTOR = VECT_TAB_BASE_ADDRESS | VECT_TAB_OFFSET; /* Vector Table Relocation in Internal D1 AXI-RAM or in Internal FLASH */
-#endif
 #endif /* USER_VECT_TAB_ADDRESS */
 
 #endif /*DUAL_CORE && CORE_CM4*/

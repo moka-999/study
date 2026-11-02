@@ -76,11 +76,11 @@ def run(host: str, port: int) -> None:
         assert body == {"requestCommandId": 0x0106, "status": "completed"}
         mcu_seq += 1; pc_seq += 1
 
-        # 轮内仅发不支持的PARA名称，不能启动真实RK算法或电源。
+        # 故意把PARA发到FUNC入口，验证串类拒绝，不能启动真实RK算法或电源。
         start_request = {
             "algorithmType": "parametric", "algorithmName": "idd_0", "algorithmIndex": 7,
             "power": {"memoryType": "LPDDR4X", "vdd1": "1800", "vdd2": "1100", "vddq": "600"},
-            "reboot": True, "bootMode": "emmc",
+            "reboot": True, "bootMode": "emmc", "TimingParameters": {},
         }
         body = send_json(connection, 0x0103, start_request, pc_seq, mcu_seq, 0x0006)
         assert body == {"requestCommandId": 259, "status": "failed", "errorCode": "notSupported", "algorithmIndex": 7}

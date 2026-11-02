@@ -31,13 +31,15 @@ CRC使用Modbus CRC16，初值0xFFFF，右移多项式0xA001；不含Length或HC
 | Type | Value | 说明 |
 |---|---|---|
 | 无TLV | 无 | 普通心跳，Length=0；接收仍兼容0x0000空Value |
-| 0x5000 | 命令号u16LE＋可选参数 | 任务当前仅发送1..20，无参数、每帧一个命令 |
+| 0x5000 | 命令号u16LE＋可选参数 | 正式任务发送1..20 FUNC或21..36 IDD；当前均只发编号 |
 | 0x5001 | 命令号u16LE | 进度或结果所属算法 |
 | 0x9001 | 首错地址u64LE | 失败颗粒首错地址，0也原样保留；必须紧跟所属0x3001 |
 | 0x3001 | die u8 | DDR标志，0=第一颗、1=第二颗；原值写入PC mirrorIndex，不作偏移 |
 | 0x9002 | 耗时u64LE | 毫秒 |
 | 0x3016 | uint8，1字节，0..100 | 测试进度，与0x5001同帧；不是ASCII字符串 |
 | 0x1017 | bool，1字节，0/1 | 整体结论，0=两颗PASS、1=至少一颗FAIL；必须在完整结果包中 |
+| 0x7018 | 寄存器地址u32LE，4字节 | tag24，编解码已准备；读写操作及正式下发待定 |
+| 0x101A | bool，1字节，0/1 | tag26，1进入、0退出；独立组帧已准备，正式任务尚不附带 |
 
 RK所有上行（普通心跳、进度和最终结果）填最近收到的MCU Seq；MCU下行命令/心跳共用递增u64序号，接收按本次命令至最近成功入UART队列Seq过滤，不要求精确等于最新值。
 
@@ -70,7 +72,7 @@ RK按自身定时器发送，窗口内落后1～2个Seq、连续两三帧同Seq�
 | 9 | gtest-seqinc | 19 | marchc- |
 | 10 | gtest-solidbits | 20 | marchc+ |
 
-参考文档将21..36的IDD列为未实现，MCU请求接口拒绝这些编号；不能仅凭编号存在宣称可执行。上述名称用于对照RK资料，不自动冻结PC的算法名称白名单。
+2026-10-26按用户确认接入21..36的IDD编号下发，名称使用`idd_0`等原始大小写，完整映射见[PARA接入](para_integration_20261026.md)。PC FUNC与PARA按类别分别匹配；MCU编号接入不代表真实RK算法或标准IDD条件已经验收。动作101A和地址7018仅准备编解码，不自动添加到算法帧，也不允许混入当前最终结果包。
 
 黄金帧：命令3、Seq2，总长22字节。
 
@@ -98,7 +100,7 @@ RK按自身定时器发送，窗口内落后1～2个Seq、连续两三帧同Seq�
 
 ## 4. 实施边界
 
-正式V2支持用户确认的外部已启动模式（power/bootMode均null，reboot=false），由pc_test_service下发真实算法并转换最终结果；操作者须先让RK进入算法服务，不从心跳推断ready。带电压/启动要求的完整B1业务仍拒绝，不能凭协议解析成功直接上电。真实路径不打开`ENABLE_RK_GATEWAY_TEST`。
+正式V2支持用户确认的外部已启动模式（power/bootMode均null，reboot=false），由pc_test_service下发真实FUNC/PARA编号并转换最终结果；操作者须先让RK进入算法服务。B1完整电源启动已配置可调初值并以本轮普通心跳确认就绪，电气及时序待验收。真实路径不打开`ENABLE_RK_GATEWAY_TEST`。
 
 每算法一个包含两颗DDR的最终包，共享siteId、testTimeMs和measurementData；失败明细按die匹配，physicalAddr保留为空。启动/安全下电/取消和IDD合同仍待冻结；离线回放不证明真实RK算法与现场串口通过。
 
@@ -110,8 +112,8 @@ RK按自身定时器发送，窗口内落后1～2个Seq、连续两三帧同Seq�
 
 | 查表位置 | 表名 | 实际作用 |
 |---|---|---|
-| `App/protocol/pc/pc_dispatch.c` | `s_command_table` | PC CommandID → 处理函数，例如0x0103进入`handle_start_test` |
-| `App/tasks/rk/rk_link.c` | `s_command_table` | RK算法编号1..20 ↔ 参考名称；统一请求合法性检查与临时联调名称映射 |
+| `App/protocol/pc/pc_dispatch.c` | `s_command_table` | PC CommandID → 处理函数，0x0103/0x0108进入`handle_start_test` |
+| `App/tasks/rk/rk_link.c` | `s_command_table` | RK编号1..36 ↔ 名称及FUNC/PARA类别；统一请求合法性检查 |
 | `App/protocol/rk/state_machine.c` | `s_state_handlers` | 当前接收状态 → 单字节处理函数，替代状态`switch` |
 | `App/protocol/rk/frame.c` | `s_tlv_rules` | TLV Type → Value长度/范围、报告栏位；编码、解码共用 |
 
@@ -121,4 +123,4 @@ RK按自身定时器发送，窗口内落后1～2个Seq、连续两三帧同Seq�
 
 **仅V2隔离联调镜像**（ENABLE_RK_GATEWAY_TEST=ON，默认OFF）：复用同一RK任务和双颗JSON组包，固定RK_SIM站点、无测量、10秒时限；本次安装未启用，B1禁止。
 
-RK收发任务、心跳、单在途及真实算法结果交付已接入外部已启动模式；完整B1电源/RK-ready闭环仍未完成。操作、改动与本轮验证见[真实RK接入](rk_real_test_20260928.md)。
+RK收发任务、心跳、单在途及算法结果交付已接入；完整B1电源/就绪初版已实现，硬件验收仍待真板。PARA增量见[2026-10-26接入](para_integration_20261026.md)，早期实测见[真实RK接入](rk_real_test_20260928.md)。

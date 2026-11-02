@@ -16,6 +16,7 @@ static uint16_t vbus[4], vsense[4];
 static uint32_t power[4];
 static uint8_t product, manufacturer, corrupt_reg, corrupt_index;
 static int corrupt_enabled, adc_fails;
+static uint32_t adc_reads;
 static GPIO_TypeDef gpio;
 static spi_if_t spi;
 
@@ -119,6 +120,7 @@ static pac1934_t reset_case(void)
     busy_until = switch_at = 0U;
     calls = fail_at = writes = delayed_rate = 0U;
     corrupt_enabled = adc_fails = 0;
+    adc_reads = 0U;
     memset(config, 0, sizeof(config)); memset(active, 0, sizeof(active));
     memset(latched, 0, sizeof(latched)); memset(channel_reads, 0, sizeof(channel_reads));
     product = 0x5BU; manufacturer = 0x5DU;
@@ -276,6 +278,7 @@ int ad7124_read_all_mv(ad7124_t *d, int32_t *out, uint8_t count, uint8_t *got,
                        float ref, const uint8_t *gain, const uint8_t *bipolar)
 {
     (void)d; (void)ref; (void)gain; (void)bipolar;
+    ++adc_reads;
     if (adc_fails) { *got = 0U; return IF_ERR; }
     for (uint8_t i = 0U; i < count; ++i) out[i] = 1000;
     *got = count;
@@ -293,6 +296,11 @@ static void test_monitor_recovery(void)
     CHECK(monitor.pac.rsense_uohm == PAC1934_RSENSE_B1_UOHM);
     CHECK(memory_monitor_init(&monitor) == IF_OK);
     CHECK(memory_monitor_sample(&monitor, &sample) == IF_OK);
+    uint32_t previous_adc_reads = adc_reads;
+    int32_t previous_voltage = sample.voltage_mv[0];
+    CHECK(memory_monitor_read_current(&monitor, &sample) == IF_OK);
+    CHECK(adc_reads == previous_adc_reads && sample.voltage_mv[0] == previous_voltage);
+    CHECK(sample.idd[0].current_ua != 0U);
     fail_at = calls + 1U;
     CHECK(memory_monitor_sample(&monitor, &sample) == IF_ERR);
     CHECK(!monitor.pac_ready && !(sample.valid_mask & MEMORY_MONITOR_VALID_IDD));

@@ -13,7 +13,7 @@ def main():
                         help="仅B1控制台回归：0=MCU默认，1=RK默认")
     args = parser.parse_args()
     root = args.app_root.resolve()
-    boot = root.parent / "bootloader"
+    support = Path(__file__).resolve().parent / "support"
     is_b1 = (root / "b1.ioc").exists()
     build = root / ("build/uart-idd-test-rk-default" if is_b1 and args.log_default else "build/uart-idd-test")
     build.mkdir(parents=True, exist_ok=True)
@@ -53,14 +53,14 @@ uint32_t __get_IPSR(void);
     includes = [build] + [root / p for p in ("HAL_Drv", "BSP/AD7124", "BSP/PAC1934", "App/protocol/rk", "App/protocol/common")]
     sources = [Path(__file__).with_name("test_uart_idd.c")] + [root / p for p in (
         "HAL_Drv/uart_router.c", "HAL_Drv/idd_stats.c", "App/protocol/rk/frame.c",
-        "App/protocol/common/crc.c", "App/protocol/rk/state_machine.c")] + [boot / "tests/qemu_start.s"]
+        "App/protocol/common/crc.c", "App/protocol/rk/state_machine.c")] + [support / "qemu_start.s"]
     if is_b1:
         sources.append(root / "Core/Src/log_console.c")
         includes.append(root / "Core/Inc")
     command = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-ffunction-sections",
                "-fdata-sections", *["-I" + str(p) for p in includes], *map(str, sources),
-               "-nostartfiles", "--specs=nosys.specs", "-T" + str(boot / "tests/qemu_test.ld"),
+               "-nostartfiles", "--specs=nosys.specs", "-T" + str(support / "qemu_test.ld"),
                "-Wl,--gc-sections", "-o", str(build / "test.elf")]
     if is_b1:
         command += ["-DTEST_B1_LOG_CONSOLE=1", f"-DB1_LOG_DEFAULT_SOURCE={args.log_default}"]

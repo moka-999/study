@@ -50,7 +50,7 @@
 */
 
 /* Entry Point */
-ENTRY(Reset_Handler)
+ENTRY(Boot_Image_Reset)
 
 /* Specify the memory areas */
 MEMORY
@@ -60,11 +60,9 @@ RAM (xrw)      : ORIGIN = 0x24000000, LENGTH = 512K
 RAM_D2 (xrw)      : ORIGIN = 0x30000000, LENGTH = 288K
 RAM_D3 (xrw)      : ORIGIN = 0x38000000, LENGTH = 64K
 ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
-/* App 区: 0x08020000 起 (预留 128KB Bootloader @ 0x08000000, H743 扇区=128KB)
- * 在线升级方案见 doc/driver_tasks.md §11, Bootloader 待 B2 联调后开发 */
-/* 仅隔离实验由--defsym传入槽地址；正常App维持原A1布局和1920 KiB上限。 */
-FLASH (rx)      : ORIGIN = DEFINED(OTA_APP_BASE) ? OTA_APP_BASE : 0x08020000,
-                 LENGTH = DEFINED(OTA_APP_BASE) ? 896K : 1920K
+/* 首扇区128KiB为Boot，其余1920KiB为单App。 */
+BOOT (rx)       : ORIGIN = 0x08000000, LENGTH = 128K
+FLASH (rx)      : ORIGIN = 0x08020000, LENGTH = 1920K
 }
 
 /* Highest address of the user mode stack */
@@ -78,6 +76,9 @@ _Min_Stack_Size = 0x2000; /* required amount of stack (8KB: ISR 里 uart_msg_t[1
 SECTIONS
 {
   /* The startup code goes first into FLASH */
+  /* 首扇区嵌入独立Boot；App向量从第二扇区开始。 */
+  .boot_image : { KEEP(*(.boot_image)) } >BOOT
+  ASSERT(SIZEOF(.boot_image) >= 664, "缺少完整Boot")
   .isr_vector :
   {
     . = ALIGN(4);
@@ -183,6 +184,10 @@ SECTIONS
     PROVIDE(__data_end = .);
     PROVIDE(__tdata_end = .);
   } >DTCMRAM AT> FLASH
+
+  /* 链接时检查代码和RAM初始化载荷未超过内部Flash容量。 */
+  ASSERT(LOADADDR(.tdata) + SIZEOF(.tdata) <= ORIGIN(FLASH) + LENGTH(FLASH),
+         "Application exceeds internal Flash")
 
   PROVIDE( __tdata_start = ADDR(.tdata) );
   PROVIDE( __tdata_size = __tdata_end - __tdata_start );

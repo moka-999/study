@@ -2,24 +2,6 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "🔨 OTA 编译打包（不下载）",
-            "type": "process",
-            "command": "powershell.exe",
-            "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}/tools/dev.ps1",
-                "ota-build",
-                "-Version",
-                "${input:otaVersion}"
-            ],
-            "group": "build",
-            "problemMatcher": [],
-            "detail": "编译Debug槽限App，验证A1/A2，生成一个test.ota；不占用ST-Link"
-        },
-        {
             "label": "⚡ V2 一键编译烧录（ST-Link，会复位）",
             "type": "process",
             "command": "powershell.exe",
@@ -29,7 +11,7 @@
                 "Bypass",
                 "-File",
                 "${workspaceFolder}/tools/dev.ps1",
-                "ota-swd",
+                "flash",
                 "-ConfirmIdle",
                 "YES",
                 "-PowerSimulation",
@@ -39,30 +21,14 @@
                 "kind": "build",
                 "isDefault": true
             },
-            "runOptions": { "instanceLimit": 1 },
+            "runOptions": {
+                "instanceLimit": 1
+            },
             "problemMatcher": [],
-            "detail": "按下即确认RK/温控空闲、电源OFF且PC已断开：自动选唯一ST-Link、板上版本+1、编译打包下载；保留V2电源模拟/MATS第一颗假FAIL，不需网线，不覆盖B/原运行槽；空板另用first_flash"
+            "detail": "合并烧录Boot＋App，入口0x08000000、App位于0x08020000；空白板和日常下载使用同一入口。烧录任务会暂停、复位MCU，请先停止测试并断开PC。V2保留电源模拟及MATS第一颗假FAIL。"
         },
         {
-            "label": "🆕 V2 空白板 Boot+App 首烧（ST-Link）",
-            "type": "process",
-            "command": "powershell.exe",
-            "args": [
-                "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                "${workspaceFolder}/tools/first_flash.ps1", "-Action", "deploy",
-                "-Version", "${input:firstFlashVersion}", "-Configuration", "Debug",
-                "-PowerSimulation", "-MatsFailTest",
-                "-Serial", "${input:firstFlashSerial}",
-                "-ConfirmIdle", "${input:firstFlashConfirm}",
-                "-ConfirmBlank", "${input:firstFlashConfirm}"
-            ],
-            "group": "build",
-            "runOptions": { "instanceLimit": 1 },
-            "problemMatcher": [],
-            "detail": "仅空板：编译完整B/A1、备份并检查全空、初始化W25恢复包和日志、回读及健康确认；V2保留电源模拟/MATS第一颗假FAIL。无需网线，不自动擦除旧板。"
-        },
-        {
-            "label": "🌐 OTA 网络升级（会复位）",
+            "label": "🔨 V2 只编译（不下载）",
             "type": "process",
             "command": "powershell.exe",
             "args": [
@@ -71,59 +37,19 @@
                 "Bypass",
                 "-File",
                 "${workspaceFolder}/tools/dev.ps1",
-                "ota-net",
-                "-Version",
-                "${input:otaVersion}",
-                "-BoardIP",
-                "${input:otaIP}",
-                "-ConfirmIdle",
-                "${input:otaIdle}"
+                "build",
+                "-PowerSimulation",
+                "-MatsFailTest"
             ],
-            "group": "build",
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "runOptions": {
+                "instanceLimit": 1
+            },
             "problemMatcher": [],
-            "detail": "构建后复用正式0901/0902/0903升级，等待健康确认；不连接ST-Link"
-        }
-    ],
-    "inputs": [
-        {
-            "id": "firstFlashVersion",
-            "type": "promptString",
-            "description": "空白板首版固件版本（三段数字，不从空板自动推算）",
-            "default": "0.1.37"
-        },
-        {
-            "id": "firstFlashSerial",
-            "type": "promptString",
-            "description": "本次连接V2的ST-Link序列号（24位十六进制，确认板型后填写）"
-        },
-        {
-            "id": "firstFlashConfirm",
-            "type": "pickString",
-            "description": "确认空板、RK/温控空闲、PC已断开，允许烧写Boot+App并复位？NO取消",
-            "options": ["NO", "YES"],
-            "default": "NO"
-        },
-        {
-            "id": "otaVersion",
-            "type": "promptString",
-            "description": "新固件版本（必须大于板上版本；同版本代码修改也要递增）",
-            "default": "0.1.37"
-        },
-        {
-            "id": "otaIP",
-            "type": "promptString",
-            "description": "V2 IP地址；先关闭网络助手/PC软件的现有连接",
-            "default": "192.168.1.201"
-        },
-        {
-            "id": "otaIdle",
-            "type": "pickString",
-            "description": "已停止测试并协调温控，允许复位升级？YES继续，NO取消",
-            "options": [
-                "NO",
-                "YES"
-            ],
-            "default": "NO"
+            "detail": "合并烧录Boot＋App，入口0x08000000、App位于0x08020000；空白板和日常下载使用同一入口。烧录任务会暂停、复位MCU，请先停止测试并断开PC。V2保留电源模拟及MATS第一颗假FAIL。"
         }
     ]
 }

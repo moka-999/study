@@ -27,7 +27,7 @@ void test_assert(int truth) { CHECK(truth); }
 
 static struct { unsigned size; int full; uint8_t bytes[80]; } queues[2];
 static unsigned created, net_writes, mode_calls, published;
-static int connected, test_busy, power_busy, ota_state, network_ok = 1, led_ok = 1;
+static int connected, test_busy, power_busy, network_ok = 1, led_ok = 1;
 static uint8_t slot = 1U;
 static uint32_t now = 100U;
 static uint8_t last_reply[B2_RESPONSE_SIZE];
@@ -62,12 +62,11 @@ void vTaskDelete(void *task) { (void)task; fail("Unexpected task delete\n"); }
 uint32_t HAL_GetTick(void) { return now; }
 int pc_test_service_busy(void) { return test_busy; }
 int pc_power_service_busy(void) { return power_busy; }
-void ota_download_get_progress(ota_download_progress_t *p) { p->state = ota_state; }
 uint8_t b2_board_site_id(void) { return slot; }
 int network_config_set_tester(uint8_t tester, uint8_t site)
 {
     CHECK(tester >= 1U && tester <= 21U && site >= 1U && site <= 8U);
-    CHECK(!connected && !test_busy && !power_busy && !ota_state);
+    CHECK(!connected && !test_busy && !power_busy);
     ++net_writes; return network_ok;
 }
 int pc_test_round_update_modes(uint8_t mask, const uint8_t *modes)
@@ -225,10 +224,6 @@ static void business_checks(void)
     full.tester_id = 5U;
     test_busy = 1; CHECK(transact(5U, full).status == 2U); test_busy = 0;
     power_busy = 1; CHECK(transact(6U, full).status == 2U); power_busy = 0;
-    for (unsigned i = 1U; i <= 3U; ++i) {
-        ota_state = (int)i; CHECK(transact(6U + i, full).status == 2U);
-    }
-    ota_state = 0;
     master_state_t partial = {0U, 2U, {0U,1U,0U}};
     connected = 1; test_busy = 1;
     CHECK(transact(10U, partial).status == 0U && net_writes == 2U);

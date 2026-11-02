@@ -3,6 +3,15 @@
 #include "ddr_power.h"
 #include <string.h>
 
+/* 高精度三轨正常扫描约240ms；超过一秒仍不完整视为转换/通道故障。 */
+#define VOLTAGE_SCAN_TIMEOUT_MS 1000U
+
+static void voltage_scan_reset(memory_monitor_t *monitor)
+{
+    monitor->voltage_collecting = 0U;
+    monitor->voltage_mask = 0U;
+}
+
 void memory_monitor_configure(memory_monitor_t *monitor,
                               i2c_if_t *pac_bus, spi_if_t *adc_bus,
                               GPIO_TypeDef *adc_cs_port, uint16_t adc_cs_pin,
@@ -28,9 +37,18 @@ int memory_monitor_init(memory_monitor_t *monitor)
     if (!monitor->pac_ready && monitor->pac.bus)
         monitor->pac_ready = pac1934_init(&monitor->pac,
                                           PAC1934_CH_MASK_B1_RAILS, 0U) == IF_OK;
-    if (!monitor->adc_ready && monitor->adc.spi && monitor->adc.cs_port)
+    if (!monitor->adc_ready && monitor->adc.spi && monitor->adc.cs_port) {
+        voltage_scan_reset(monitor);
         monitor->adc_ready = ad7124_init(&monitor->adc) == IF_OK;
+    }
     return monitor->pac_ready && monitor->adc_ready ? IF_OK : IF_ERR;
+}
+
+uint8_t memory_monitor_ready_groups(const memory_monitor_t *monitor)
+{
+    if (!monitor) return 0U;
+    return (monitor->adc_ready ? MEMORY_MONITOR_VALID_VOLTAGE : 0U) |
+           (monitor->pac_ready ? MEMORY_MONITOR_VALID_IDD : 0U);
 }
 
 int memory_monitor_sample(memory_monitor_t *monitor,
@@ -54,6 +72,17 @@ int memory_monitor_sample(memory_monitor_t *monitor,
     if ((sample->valid_mask & MEMORY_MONITOR_VALID_VOLTAGE) == 0U)
         monitor->adc_ready = 0U;
 
+    (void)memory_monitor_read_current(monitor, sample);
+    (void)memory_monitor_read_status(monitor, sample);
+    voltage_scan_reset(monitor);
+    return sample->valid_mask == MEMORY_MONITOR_VALID_ALL ? IF_OK : IF_ERR;
+}
+
+int memory_monitor_read_current(memory_monitor_t *monitor,
+                                memory_monitor_sample_t *sample)
+{
+    if (!monitor || !sample) return IF_ERR;
+    sample->valid_mask &= (uint8_t)~MEMORY_MONITOR_VALID_IDD;
     /* PAC返回4通道数组，本项目只保存已启用的前3路。 */
     if (monitor->pac_ready) {
         pac1934_measurement_t all[4];
@@ -66,6 +95,54 @@ int memory_monitor_sample(memory_monitor_t *monitor,
         }
     }
 
+    return (sample->valid_mask & MEMORY_MONITOR_VALID_IDD) ? IF_OK : IF_ERR;
+}
+
+int memory_monitor_poll_voltage(memory_monitor_t *monitor,
+                                memory_monitor_sample_t *sample,
+                                uint32_t now_ms, uint32_t *begin_ms)
+{
+    uint32_t raw;
+    uint8_t channel;
+    int result = IF_ERR;
+    if (!monitor || !sample || !begin_ms) return IF_ERR;
+    *begin_ms = monitor->voltage_collecting ? monitor->voltage_begin_ms : now_ms;
+    if (!monitor->adc_ready) goto failed;
+    if (!monitor->voltage_collecting) {
+        monitor->voltage_begin_ms = now_ms;
+        monitor->voltage_collecting = 1U;
+    } else if ((uint32_t)(now_ms - monitor->voltage_begin_ms) >= VOLTAGE_SCAN_TIMEOUT_MS) {
+        result = IF_TIMEOUT;
+        goto failed;
+    }
+
+    result = ad7124_try_read_conversion(&monitor->adc, &raw, &channel);
+    if (result < 0) goto failed;
+    if (result == 0) return 0;
+    if (channel >= MEMORY_MONITOR_RAIL_COUNT) {
+        result = IF_ERR;
+        goto failed;
+    }
+    monitor->voltage_pending_mv[channel] = ad7124_raw_to_mv((int32_t)raw, 2.5f, 0U, 0U);
+    monitor->voltage_mask |= (uint8_t)(1U << channel);
+    if (monitor->voltage_mask != (1U << MEMORY_MONITOR_RAIL_COUNT) - 1U) return 0;
+    memcpy(sample->voltage_mv, monitor->voltage_pending_mv, sizeof(sample->voltage_mv));
+    sample->valid_mask |= MEMORY_MONITOR_VALID_VOLTAGE;
+    voltage_scan_reset(monitor);
+    return 1;
+
+failed:
+    sample->valid_mask &= (uint8_t)~MEMORY_MONITOR_VALID_VOLTAGE;
+    monitor->adc_ready = 0U;
+    voltage_scan_reset(monitor);
+    return result;
+}
+
+int memory_monitor_read_status(memory_monitor_t *monitor,
+                               memory_monitor_sample_t *sample)
+{
+    if (!monitor || !sample) return IF_ERR;
+    sample->valid_mask &= (uint8_t)~MEMORY_MONITOR_VALID_TPS_STATUS;
     for (uint8_t rail = 0U; rail < MEMORY_MONITOR_RAIL_COUNT; rail++) {
         if (ddr_power_read_status(rail, &sample->tps_status[rail]) != IF_OK)
             break;
@@ -73,7 +150,7 @@ int memory_monitor_sample(memory_monitor_t *monitor,
             sample->valid_mask |= MEMORY_MONITOR_VALID_TPS_STATUS;
     }
 
-    return sample->valid_mask == MEMORY_MONITOR_VALID_ALL ? IF_OK : IF_ERR;
+    return (sample->valid_mask & MEMORY_MONITOR_VALID_TPS_STATUS) ? IF_OK : IF_ERR;
 }
 
 void memory_monitor_invalidate(memory_monitor_t *monitor)
@@ -81,4 +158,5 @@ void memory_monitor_invalidate(memory_monitor_t *monitor)
     if (!monitor) return;
     monitor->pac_ready = 0U;
     monitor->adc_ready = 0U;
+    voltage_scan_reset(monitor);
 }

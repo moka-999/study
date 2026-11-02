@@ -41,7 +41,7 @@
 #include "pc_protocol.h"
 #include "monitor_task.h"
 #include "result_led.h"
-#include "ota_app.h"
+#include "task_watchdog.h"
 #include "flash_bsp.h"
 #include "b2_service.h"
 #include "b2_task.h"
@@ -109,7 +109,15 @@ void MX_FREERTOS_Init(void) {
    */
   pc_json_configure_allocator(pvPortMalloc, vPortFree);
   if (flash_transaction_prepare() != 0) Error_Handler();
-  ota_app_prepare();
+#if defined(ENABLE_FLASH_SELF_TEST) && ENABLE_FLASH_SELF_TEST || \
+    defined(ENABLE_DRIVER_MOCK_TEST) && ENABLE_DRIVER_MOCK_TEST || \
+    defined(ENABLE_AD7124_WAVE_TEST) && ENABLE_AD7124_WAVE_TEST
+  task_watchdog_prepare(0U);
+#elif defined(ENABLE_PC_PROTOCOL_NET_TEST) && ENABLE_PC_PROTOCOL_NET_TEST
+  task_watchdog_prepare(TASK_WATCHDOG_ALL & ~(1UL << TASK_WATCHDOG_RK));
+#else
+  task_watchdog_prepare(TASK_WATCHDOG_ALL);
+#endif
   if (!b2_service_prepare()) Error_Handler();
 #if (!defined(ENABLE_FLASH_SELF_TEST) || !ENABLE_FLASH_SELF_TEST) && \
     (!defined(ENABLE_DRIVER_MOCK_TEST) || !ENABLE_DRIVER_MOCK_TEST) && \
@@ -203,8 +211,8 @@ void MX_FREERTOS_Init(void) {
   rkRequestQueue = xQueueCreate(8, sizeof(rk_request_t));
   rkResponseQueue = xQueueCreate(8, sizeof(rk_response_t));
   if (rkRequestQueue == NULL || rkResponseQueue == NULL) Error_Handler();
-  /* OTA确认需读写256B日志及校验缓冲，留4KiB栈；不再无条件给卡死任务喂狗。 */
-  xTaskCreate(StartWdtFeedTask, "wdtFeed", 1024, NULL, 25, NULL);
+  /* 看门狗只检查任务进展，不访问Flash；保留1KiB栈。 */
+  xTaskCreate(StartWdtFeedTask, "wdtFeed", 256, NULL, 25, NULL);
 
 
 
@@ -256,7 +264,7 @@ void StartDefaultTask(void *argument)
   {
     /* 非阻塞推进电源状态机；未配置时保持 OFF，不产生 GPIO 翻转。 */
     monitor_power_process(HAL_GetTick());
-    ota_app_progress(OTA_TASK_DEFAULT);
+    task_watchdog_progress(TASK_WATCHDOG_DEFAULT);
 #if defined(ENABLE_V2_RESULT_LED) && ENABLE_V2_RESULT_LED
     /* 网络命令改变业务状态，本任务只负责推进共享500ms闪烁相位。 */
     result_led_process(HAL_GetTick());
@@ -270,12 +278,12 @@ void StartDefaultTask(void *argument)
 /* USER CODE BEGIN Application */
 /* 正式任务位于App/tasks/{pc,rk,common}，隔离验证任务位于App/tasks/test。 */
 
-/* 最高优先级每500ms检查关键任务进展；OTA失去健康后停止喂狗，交B统计失败。 */
+/* 每500ms检查必要任务进展，超期停止喂狗，由硬件看门狗复位MCU。 */
 void StartWdtFeedTask(void *argument)
 {
   (void)argument;
   for (;;) {
-    if (ota_app_watchdog_tick()) wdt_feed();
+    if (task_watchdog_can_feed()) wdt_feed();
     vTaskDelay(pdMS_TO_TICKS(500));
   }
 }

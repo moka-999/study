@@ -15,6 +15,7 @@
  */
 #include "quadspi.h"
 #include "qspi_hw.h"
+#include "board_storage_config.h"
 #include "hal_if.h"
 #include "cmsis_os2.h"
 #include <string.h>
@@ -30,6 +31,9 @@ extern QSPI_HandleTypeDef hqspi;
 /* ── 工具: 快速写使能 (单线) ── */
 static int _write_enable(void)
 {
+#if !APP_FLASH_WRITABLE
+    return IF_ERR;
+#else
     uint8_t status;
     if (qspi_wait_busy(BUSY_TO_MS) != IF_OK ||
         qspi_read_status(W25Q_CMD_READ_STATUS2, &status) != IF_OK ||
@@ -41,6 +45,7 @@ static int _write_enable(void)
         qspi_read_status(W25Q_CMD_READ_STATUS1, &status) != IF_OK ||
         (status & W25Q_SR1_WEL) == 0U) return IF_ERR;
     return IF_OK;
+#endif
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -49,6 +54,9 @@ static int _write_enable(void)
 
 int qspi_init(void)
 {
+#if !BOARD_W25_PRESENT
+    return IF_ERR;
+#else
     uint8_t status, id[3];
     QSPI_CommandTypeDef command = {0};
 
@@ -73,6 +81,10 @@ int qspi_init(void)
 
     if (qspi_read_status(W25Q_CMD_READ_STATUS2, &status) != IF_OK) return IF_ERR;
     if ((status & W25Q_SR2_QE) == 0U) {
+#if !APP_FLASH_WRITABLE
+        /* QE必须由Boot准备；正式App不写状态寄存器。 */
+        return IF_ERR;
+#else
         uint8_t wanted = status | W25Q_SR2_QE;
         if (_write_enable() != IF_OK) return IF_ERR;
         command.Instruction = W25Q_CMD_WRITE_STATUS2;
@@ -83,8 +95,10 @@ int qspi_init(void)
             qspi_wait_busy(100U) != IF_OK ||
             qspi_read_status(W25Q_CMD_READ_STATUS2, &status) != IF_OK ||
             status != wanted) return IF_ERR;
+#endif
     }
     return IF_OK;
+#endif
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -93,6 +107,8 @@ int qspi_init(void)
 
 int qspi_read_jedec_id(uint8_t *id)
 {
+    if (!BOARD_W25_PRESENT) return IF_ERR;
+
     if (id == NULL) return IF_ERR;
 
     QSPI_CommandTypeDef c = {0};
@@ -113,6 +129,8 @@ int qspi_read_jedec_id(uint8_t *id)
 
 int qspi_read_status(uint8_t cmd, uint8_t *sr)
 {
+    if (!BOARD_W25_PRESENT) return IF_ERR;
+
     if (sr == NULL || (cmd != W25Q_CMD_READ_STATUS1 &&
         cmd != W25Q_CMD_READ_STATUS2 && cmd != W25Q_CMD_READ_STATUS3)) return IF_ERR;
 
@@ -299,6 +317,8 @@ int qspi_write_page(uint32_t addr, const uint8_t *data, uint16_t len)
 
 int qspi_read_data(uint32_t addr, uint8_t *buf, uint32_t len)
 {
+    if (!BOARD_W25_PRESENT) return IF_ERR;
+
     if (len == 0U) return IF_OK;
     if (buf == NULL || addr >= W25Q_CAPACITY || len > W25Q_CAPACITY - addr) {
         return IF_ERR;

@@ -6,13 +6,20 @@
 #include "frame.h"
 #include <stdint.h>
 
-/* RK支持的无参数算法目录项，不是PC业务权限表。
+/* 算法类别供PC入口核对，禁止把IDD名称经FUNC命令下发；不是线上的TLV字段。 */
+typedef enum {
+    RK_COMMAND_CATEGORY_FUNCTIONAL = 0, /* 功能测试，命令号1..20。 */
+    RK_COMMAND_CATEGORY_PARAMETRIC     /* 参数测试，IDD命令号21..36。 */
+} rk_command_category_t;
+
+/* RK编号命令目录项，不是PC业务权限表。
  * command_id是0x5000 Value里的小端uint16；name是RK参考资料中的规范名称。
  * MCU把命令送到RK执行，不为每个算法实现一份本地执行函数。
  */
 typedef struct {
-    uint16_t command_id; /* 算法编号1..20；17=MATS，21..36的IDD不在本表。 */
+    uint16_t command_id; /* 算法编号1..36；17=MATS，21..36按IDD原文编号。 */
     const char *name;    /* 指向静态只读字符串，例如"gtest-xor"；不允许修改/释放。 */
+    rk_command_category_t category; /* 名称区分大小写；PC须同时核对算法类别。 */
 } rk_command_descriptor_t;
 
 /* 按编号或精确名称查只读命令表；未找到/名称为NULL返回NULL，无硬件副作用。
@@ -23,7 +30,7 @@ const rk_command_descriptor_t *rk_command_find_by_name(const char *name);
 
 /* 业务层投递的请求副本；发送帧由RK任务统一组装，调用者不操作UART。 */
 typedef struct {
-    uint16_t command_id;       /* 已实现的无参数功能测试1..20，含17=MATS。 */
+    uint16_t command_id;       /* FUNC 1..20或IDD 21..36；当前均只发送编号，不附带动作。 */
     uint32_t cookie;           /* 调用方关联令牌，不是任何一侧的线上Seq。 */
     uint32_t timeout_ms;       /* 结果等待毫秒数；0不限时，非0超时也不自动重发测试。 */
 } rk_request_t;

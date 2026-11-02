@@ -88,6 +88,10 @@ static int fail_start[3], fail_abort;
 static char console_output[8192];
 static size_t console_output_length;
 static int fail_console_send;
+static uint8_t rk_console_output[8192];
+static size_t rk_console_output_length;
+static int fail_rk_console_send;
+static unsigned protocol_send_count;
 #endif
 static int start_rx(uart_if_t *port, uint8_t *buffer, uint16_t length)
 {
@@ -100,7 +104,14 @@ static int start_rx(uart_if_t *port, uint8_t *buffer, uint16_t length)
 static int send_tx(uart_if_t *port, uint8_t *data, uint16_t length)
 {
 #if defined(TEST_B1_LOG_CONSOLE)
-    CHECK(port->handle != &uart[1]); /* 日志输入永远不能收到MCU发出的控制台字符。 */
+    if (port->handle == &uart[0]) ++protocol_send_count;
+    if (port->handle == &uart[1]) {
+        CHECK(!isr);
+        if (fail_rk_console_send) return IF_ERR;
+        CHECK(rk_console_output_length + length <= sizeof(rk_console_output));
+        memcpy(rk_console_output + rk_console_output_length, data, length);
+        rk_console_output_length += length;
+    }
     if (port->handle == &uart[2]) {
         CHECK(!isr && critical && length <= 128U);
         if (fail_console_send) return IF_ERR;
@@ -264,12 +275,12 @@ static void test_stats(void)
     CHECK(idd_stats_begin(&stats, 20U, 200U, 1U) == IF_ERR && stats.started_ms == 10U);
     sample.valid_mask = MEMORY_MONITOR_VALID_VOLTAGE | MEMORY_MONITOR_VALID_IDD;
     for (unsigned i = 0U; i < 3U; ++i) {
-        sample.voltage_mv[i] = 1000 + (int)i * 100; sample.idd[i].current_ma = i + 1U;
+        sample.voltage_mv[i] = 1000 + (int)i * 100; sample.idd[i].current_ua = (i + 1U) * 1000U;
     }
     CHECK(idd_stats_feed(&stats, 10U, 11U, &sample) == 1);
     CHECK(idd_stats_feed(&stats, 10U, 11U, &sample) == 0); /* 重复不累计。 */
     CHECK(idd_stats_feed(&stats, 8U, 9U, &sample) == 0 && stats.state == IDD_STATS_RUNNING);
-    for (unsigned i = 0U; i < 3U; ++i) { sample.voltage_mv[i] += 200; sample.idd[i].current_ma += 2U; }
+    for (unsigned i = 0U; i < 3U; ++i) { sample.voltage_mv[i] += 200; sample.idd[i].current_ua += 2000U; }
     CHECK(idd_stats_feed(&stats, 20U, 21U, &sample) == 1);
     for (unsigned i = 0U; i < 3U; ++i) {
         CHECK(stats.voltage[i].mean == 1100 + (int)i * 100);
@@ -296,7 +307,7 @@ static void test_stats(void)
     idd_stats_poll(&stats, 18U); CHECK(stats.state == IDD_STATS_RUNNING);
     idd_stats_poll(&stats, 19U); CHECK(stats.state == IDD_STATS_COMPLETE);
     CHECK(idd_stats_begin(&stats, 0U, INT32_MAX, 1U) == IF_OK);
-    sample.voltage_mv[0] = INT32_MIN; sample.idd[0].current_ma = UINT32_MAX;
+    sample.voltage_mv[0] = INT32_MIN; sample.idd[0].current_ua = UINT32_MAX;
     CHECK(idd_stats_feed(&stats, 0U, 0U, &sample) == 1);
     sample.voltage_mv[0] = INT32_MAX;
     CHECK(idd_stats_feed(&stats, 1U, 1U, &sample) == 1);
@@ -321,6 +332,71 @@ static void test_stats(void)
     idd_stats_finish(NULL);
 }
 
+/* 快电流和慢电压分别馈入，不因另一组的缓存valid位重复统计或误计采样失败。 */
+static void test_stats_groups(void)
+{
+    const uint8_t voltage = MEMORY_MONITOR_VALID_VOLTAGE;
+    const uint8_t current = MEMORY_MONITOR_VALID_IDD;
+    idd_stats_t stats = {0};
+    memory_monitor_sample_t sample = {0};
+    sample.valid_mask = voltage | current;
+    sample.idd[0].current_ua = 100U;
+    CHECK(idd_stats_begin(&stats, 100U, 10U, 1U) == IF_OK);
+    CHECK(idd_stats_feed_groups(NULL, 100U, 100U, &sample, current) == IF_ERR);
+    CHECK(idd_stats_feed_groups(&stats, 100U, 100U, NULL, current) == IF_ERR);
+    CHECK(idd_stats_feed_groups(&stats, 100U, 100U, &sample, MEMORY_MONITOR_VALID_TPS_STATUS) == IF_ERR);
+    CHECK(idd_stats_feed_groups(&stats, 100U, 100U, &sample, 0U) == 0 && stats.attempts == 0U);
+    CHECK(idd_stats_feed_groups(&stats, 100U, 100U, &sample, current) == 1);
+    CHECK(stats.voltage[0].valid_count == 0U && stats.voltage[0].failed_count == 0U);
+    sample.idd[0].current_ua = 900U;
+    CHECK(idd_stats_feed_groups(&stats, 101U, 101U, &sample, current) == 1);
+    CHECK(stats.current[0].mean == 500 && stats.current[0].minimum == 100 && stats.current[0].maximum == 900);
+    CHECK(idd_stats_feed_groups(&stats, 100U, 101U, &sample, voltage) == 1);
+    CHECK(stats.voltage[0].valid_count == 1U && stats.current[0].valid_count == 2U);
+    CHECK(idd_stats_feed_groups(&stats, 100U, 101U, &sample, voltage | current) == 0);
+    CHECK(idd_stats_feed_groups(&stats, 100U, 100U, &sample, voltage | current) == 0);
+    CHECK(idd_stats_feed_groups(&stats, 103U, 102U, &sample, voltage) == 0);
+    CHECK(idd_stats_feed_groups(&stats, 99U, 102U, &sample, voltage) == 0);
+    CHECK(stats.voltage[0].failed_count == 0U && stats.current[0].failed_count == 0U);
+    sample.valid_mask = 0U;
+    CHECK(idd_stats_feed_groups(&stats, 102U, 102U, &sample, current) == 1);
+    CHECK(stats.current[0].failed_count == 1U && stats.voltage[0].failed_count == 0U);
+    /* 同一时间电流已处理；双组包装只接纳尚未处理的电压组。 */
+    sample.valid_mask = voltage | current;
+    CHECK(idd_stats_feed_groups(&stats, 102U, 102U, &sample, voltage | current) == 1);
+    CHECK(stats.current[0].valid_count == 2U && stats.current[0].failed_count == 1U);
+    CHECK(stats.voltage[0].valid_count == 2U && stats.attempts == 5U);
+    CHECK(idd_stats_feed_groups(&stats, 109U, 110U, &sample, current) == 0);
+    CHECK(stats.state == IDD_STATS_COMPLETE);
+
+    /* 只对越界轨记失败；其他轨仍有效，UINT64_MAX不得强转成负数或小电流。 */
+    CHECK(idd_stats_begin(&stats, 0U, INT32_MAX, 1U) == IF_OK);
+    sample.idd[0].current_ua = (uint64_t)UINT32_MAX + 1U;
+    sample.idd[1].current_ua = UINT64_MAX;
+    sample.idd[2].current_ua = UINT32_MAX;
+    CHECK(idd_stats_feed_groups(&stats, 0U, 0U, &sample, current) == 1);
+    CHECK(stats.current[0].valid_count == 0U && stats.current[0].failed_count == 1U);
+    CHECK(stats.current[1].valid_count == 0U && stats.current[1].failed_count == 1U);
+    CHECK(stats.current[2].valid_count == 1U && stats.current[2].sum == UINT32_MAX);
+    /* 等价构造窗口末尾前的最大合法累加值，只执行最后一次，检查int64边界。 */
+    stats.current[2].valid_count = INT32_MAX - 1U;
+    stats.current[2].sum = (int64_t)UINT32_MAX * (INT32_MAX - 1U);
+    stats.current_offset_ms = INT32_MAX - 2U;
+    CHECK(idd_stats_feed_groups(&stats, INT32_MAX - 1U, INT32_MAX - 1U, &sample, current) == 1);
+    CHECK(stats.current[2].valid_count == INT32_MAX);
+    CHECK(stats.current[2].sum == (int64_t)UINT32_MAX * INT32_MAX);
+    CHECK(stats.current[2].mean == UINT32_MAX && stats.current[2].sum > 0);
+    idd_stats_cancel(&stats);
+    CHECK(idd_stats_begin(&stats, UINT32_MAX - 1U, 10U, 1U) == IF_OK);
+    sample.idd[0].current_ua = 100U;
+    CHECK(idd_stats_feed_groups(&stats, UINT32_MAX, 0U, &sample, current) == 1);
+    CHECK(idd_stats_feed_groups(&stats, UINT32_MAX, 0U, &sample, voltage) == 1);
+    CHECK(stats.current[0].valid_count == 1U && stats.voltage[0].valid_count == 1U);
+    stats.discarded = UINT32_MAX;
+    CHECK(idd_stats_feed_groups(&stats, UINT32_MAX, 0U, &sample, current) == 0);
+    CHECK(stats.discarded == UINT32_MAX);
+}
+
 #if defined(TEST_B1_LOG_CONSOLE)
 /* 实际日志模块加实际三槽路由；只替代队列、DMA及TX出口，不另写选择器模型。 */
 int _write(int file, char *data, int length);
@@ -331,6 +407,17 @@ static void console_input(const char *text)
     receive_port(UART_PORT_CONSOLE, (const uint8_t *)text, (uint16_t)strlen(text), HAL_UART_RXEVENT_IDLE);
     log_console_process();
 }
+static void console_bytes(const uint8_t *bytes, uint16_t length)
+{
+    receive_port(UART_PORT_CONSOLE, bytes, length, HAL_UART_RXEVENT_IDLE);
+    log_console_process();
+}
+static void clear_rk_console_output(void) { rk_console_output_length = 0U; }
+static void check_rk_console_output(const void *bytes, size_t length)
+{
+    CHECK(rk_console_output_length == length);
+    CHECK(length == 0U || memcmp(rk_console_output, bytes, length) == 0);
+}
 static void rk_log_input(const char *text)
 {
     receive_port(UART_PORT_RK_DEBUG, (const uint8_t *)text, (uint16_t)strlen(text), HAL_UART_RXEVENT_IDLE);
@@ -339,6 +426,7 @@ static void rk_log_input(const char *text)
 static void test_log_console(void)
 {
     uint8_t buffer[UART_RX_BUF_SIZE];
+    unsigned saved_protocol_sends = protocol_send_count;
     CHECK(log_console_write("early", 5U) == 0U);
     fail_start[1] = 0; tick += 100U;
     (void)uart_poll_rx(UART_PORT_RK_DEBUG, buffer, sizeof(buffer));
@@ -358,6 +446,7 @@ static void test_log_console(void)
     clear_console_output();
     console_input("k\r"); console_input("\n");
     CHECK(strcmp(console_output, "\r\n[log] source=rk\r\n") == 0);
+    check_rk_console_output(NULL, 0U); /* 本地切换CRLF不能把LF漏给RK。 */
     clear_console_output();
     CHECK(log_console_write("hidden", 6U) == 6U && console_output_length == 0U);
     /* RK输出即使包含命令文字，也必须原样转发而不能解释。 */
@@ -368,29 +457,97 @@ static void test_log_console(void)
 
     clear_console_output();
     console_input("log unknown\n");
-    CHECK(strstr(console_output, "use: log mcu | log rk") != NULL);
+    CHECK(console_output_length == 0U);
+    check_rk_console_output("log unknown\n", 12U);
+    clear_rk_console_output();
+    console_input("status\r\n");
+    check_rk_console_output("status\r\n", 8U);
+    CHECK(log_console_take_status_request() == 0);
+    clear_rk_console_output();
     clear_console_output();
     static const uint8_t bad_nul[] = {'l','o','g',' ','m','c','u',0,'\n'};
-    receive_port(UART_PORT_CONSOLE, bad_nul, sizeof(bad_nul), HAL_UART_RXEVENT_IDLE);
-    log_console_process();
+    console_bytes(bad_nul, sizeof(bad_nul));
     CHECK(strstr(console_output, "source=mcu") == NULL);
-    memset(buffer, 'x', 40U);
-    memcpy(buffer + 40U, "log mcu\n", 8U);
-    receive_port(UART_PORT_CONSOLE, buffer, 48U, HAL_UART_RXEVENT_IDLE);
-    log_console_process();
+    check_rk_console_output(bad_nul, sizeof(bad_nul));
+    clear_rk_console_output();
+    memset(buffer, 'x', sizeof(buffer) - 8U);
+    memcpy(buffer + sizeof(buffer) - 8U, "log mcu\n", 8U);
+    console_bytes(buffer, sizeof(buffer));
+    check_rk_console_output(buffer, sizeof(buffer)); /* 长行及行中退出字样原样发送。 */
     CHECK(strstr(console_output, "source=mcu") == NULL);
+    clear_rk_console_output();
+    /* 最坏块边界：上一块保留7字节候选，下一块满长且首字节失配。 */
+    console_input("log mcu");
+    check_rk_console_output(NULL, 0U);
+    memset(buffer, 'x', sizeof(buffer)); buffer[sizeof(buffer) - 1U] = '\n';
+    console_bytes(buffer, sizeof(buffer));
+    CHECK(rk_console_output_length == sizeof(buffer) + 7U);
+    CHECK(memcmp(rk_console_output, "log mcu", 7U) == 0);
+    CHECK(memcmp(rk_console_output + 7U, buffer, sizeof(buffer)) == 0);
+    clear_rk_console_output();
     clear_console_output();
     rk_log_input("still-rk");
     CHECK(strcmp(console_output, "still-rk") == 0);
+
+    /* 任意控制字节原样发送，退出命令仅在新行首识别。 */
+    static const uint8_t controls[] = {'x',0x08,0x7F,0x03,0x09,0x1B,'[','A',0,0x80,0xFF,'\r','\n'};
+    console_bytes(controls, sizeof(controls));
+    check_rk_console_output(controls, sizeof(controls));
+    clear_rk_console_output();
+    console_input("log m");
+    check_rk_console_output(NULL, 0U);
+    tick += 60000U; log_console_process();
+    check_rk_console_output(NULL, 0U); /* 输入停顿不把候选前缀送给RK。 */
+    console_input("cu\r"); console_input("\n");
+    CHECK(strstr(console_output, "source=mcu") != NULL);
+    check_rk_console_output(NULL, 0U);
+    console_input("log rk\r\n"); clear_console_output();
+    /* 暂存的退出候选支持退格；Ctrl+C放弃候选并立即发往RK。 */
+    console_input("log mc\bcu\n");
+    CHECK(strstr(console_output, "source=mcu") != NULL);
+    check_rk_console_output(NULL, 0U);
+    console_input("log rk\n"); clear_console_output();
+    console_input("log mc\x7F" "cu\n");
+    CHECK(strstr(console_output, "source=mcu") != NULL);
+    console_input("log rk\n"); clear_console_output();
+    console_input("log m");
+    static const uint8_t interrupt[] = {0x03};
+    console_bytes(interrupt, sizeof(interrupt));
+    check_rk_console_output(interrupt, sizeof(interrupt));
+    clear_rk_console_output();
+    console_input("log mcu\n");
+    CHECK(strstr(console_output, "source=mcu") != NULL);
+    check_rk_console_output(NULL, 0U);
+    console_input("log rk\n"); clear_console_output();
+
+    /* RK TX背压保留当前块；停止消费后续输入，但RK日志仍持续处理。 */
+    fail_rk_console_send = 1;
+    console_input("printenv\r\n");
+    check_rk_console_output(NULL, 0U);
+    receive_port(UART_PORT_CONSOLE, (const uint8_t *)"version\n", 8U, HAL_UART_RXEVENT_IDLE);
+    unsigned pending_input_blocks = queues[2].count;
+    CHECK(pending_input_blocks == 1U);
+    rk_log_input("rk-during-backpressure");
+    CHECK(queues[2].count == pending_input_blocks);
+    CHECK(strstr(console_output, "rk-during-backpressure") != NULL);
+    check_rk_console_output(NULL, 0U);
+    fail_rk_console_send = 0;
+    for (unsigned i = 0U; i < 4U; ++i) log_console_process();
+    check_rk_console_output("printenv\r\nversion\n", 18U);
+    log_console_process();
+    check_rk_console_output("printenv\r\nversion\n", 18U); /* 恢复不重复排队。 */
+    clear_rk_console_output();
 
     /* 控制台断流不能把后续命令尾部拼成有效切换；协议队列始终不被消费。 */
     console_input("log m");
     uart[2].ErrorCode = 8U;
     isr = 1; HAL_UART_ErrorCallback(&uart[2]); isr = 0;
-    tick += 100U; log_console_process();
     clear_console_output();
+    tick += 100U; log_console_process();
+    CHECK(console_output_length != 0U); /* 输入断流必须通知调试台。 */
     console_input("cu\n");
     CHECK(strstr(console_output, "source=mcu") == NULL);
+    check_rk_console_output(NULL, 0U);
     uint8_t heartbeat[16];
     CHECK(tlv_pack_heartbeat(77U, heartbeat, sizeof(heartbeat)) == 16);
     receive(heartbeat, sizeof(heartbeat), HAL_UART_RXEVENT_IDLE);
@@ -424,12 +581,47 @@ static void test_log_console(void)
     CHECK(_write(0, "no", 2) == -1 && _write(1, NULL, 1) == -1);
     CHECK(_write(2, NULL, 0) == 0 && _write(1, "no", -1) == -1);
     isr = 1; CHECK(log_console_write("no-isr", 6U) == 0U); isr = 0;
-    console_input("log rk\n"); clear_console_output();
+    /* 状态查询只触发本地只读请求，分片、拥塞和来源切换不能误执行。 */
+    CHECK(log_console_take_status_request() == 0);
+    console_input("sta");
+    CHECK(log_console_take_status_request() == 0);
+    console_input("tus\r\n");
+    CHECK(log_console_take_status_request() == 1);
+    CHECK(log_console_take_status_request() == 0);
+    console_input("status\nstatus\n");
+    CHECK(log_console_take_status_request() == 1);
+    CHECK(log_console_take_status_request() == 0);
+    fail_console_send = 1;
+    console_input("status\n");
+    CHECK(log_console_take_status_request() == 0);
+    CHECK(log_console_write_status("report", 6U) == 0);
+    fail_console_send = 0;
+    log_console_process();
+    CHECK(log_console_take_status_request() == 1);
+    clear_console_output();
+    CHECK(log_console_write_status("report", 6U) == 1);
+    CHECK(strcmp(console_output, "report") == 0);
+    fail_console_send = 1;
+    CHECK(log_console_write_status("retry", 5U) == 0);
+    fail_console_send = 0;
+    CHECK(log_console_write_status(NULL, 1U) == -1);
+    CHECK(log_console_write_status(big, sizeof(big)) == -1);
+    isr = 1; CHECK(log_console_write_status("isr", 3U) == -1); isr = 0;
+    console_input("status\nlog rk\n");
+    CHECK(log_console_take_status_request() == 0);
+    CHECK(log_console_write_status("cancel", 6U) == -1);
+    clear_console_output();
+    console_input("status\n");
+    CHECK(log_console_take_status_request() == 0);
+    CHECK(console_output_length == 0U);
+    check_rk_console_output("status\n", 7U);
+    clear_rk_console_output();
     CHECK(_write(2, "hidden", 6) == 6 && console_output_length == 0U);
     /* 默认值在重新初始化后恢复，两种编译配置各执行一次本用例。 */
     log_console_start(); clear_console_output();
     CHECK(log_console_write("mcu", 3U) == 3U); rk_log_input("rk");
     CHECK(strcmp(console_output, B1_LOG_DEFAULT_SOURCE == 0 ? "mcu" : "rk") == 0);
+    CHECK(protocol_send_count == saved_protocol_sends); /* 调试双向转发绝不能写UART4。 */
     CHECK(!critical && !isr);
     message("PASS: B1 selectable log console\n");
 }
@@ -437,7 +629,7 @@ static void test_log_console(void)
 
 void test_main(void)
 {
-    test_frames(); test_uart(); test_stats();
+    test_frames(); test_uart(); test_stats(); test_stats_groups();
 #if defined(TEST_B1_LOG_CONSOLE)
     test_log_console();
 #endif

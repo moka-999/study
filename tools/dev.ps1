@@ -1,27 +1,20 @@
 ﻿param(
-    [ValidateSet('build', 'rebuild', 'style-test', 'protocol-test', 'b2-protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build', 'ota-probe', 'ota-build', 'ota-swd', 'ota-net')]
+    [ValidateSet('build', 'rebuild', 'flash', 'style-test', 'protocol-test', 'b2-protocol-test', 'pc-protocol-test', 'pc-net-test-build', 'pwr-test', 'lpddr-test', 'boot-test', 'pwr-wave-build', 'led-test', 'led-wave-build', 'flash-test', 'flash-self-test-build', 'driver-mock-build', 'ad-wave-build')]
     [string]$Task = 'build',
     [string]$Version = '',
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
     [string]$Serial = '',
-    [string]$BoardIP = '192.168.1.201',
-    [int]$Port = 8888,
     [ValidateSet('NO', 'YES')][string]$ConfirmIdle = 'NO',
-    [switch]$LegacyOtaActions,
     [switch]$PowerSimulation,
     [switch]$MatsFailTest
 )
 
 $ErrorActionPreference = 'Stop'
-if ($MatsFailTest -and (-not $PowerSimulation -or $Task -notin @('ota-build', 'ota-swd', 'ota-net'))) {
-    throw '-MatsFailTest 仅允许配合 -PowerSimulation 生成或安装V2联调镜像。'
+if (($PowerSimulation -or $MatsFailTest) -and $Task -notin @('build', 'rebuild', 'flash')) {
+    throw '电源模拟/假FAIL选项仅允许普通构建或直接下载。'
 }
-if ($PowerSimulation -and $Task -notin @('ota-build', 'ota-swd', 'ota-net')) {
-    throw '-PowerSimulation 仅用于V2的OTA构建/下载入口，RK必须已经独立启动。'
-}
-if ($LegacyOtaActions -and $Task -ne 'ota-net') {
-    throw '-LegacyOtaActions 仅用于 ota-net 对旧版固件进行协议迁移。'
-}
+if ($MatsFailTest -and -not $PowerSimulation) { throw '-MatsFailTest 必须同时指定 -PowerSimulation。' }
+if ($Task -eq 'flash' -and $ConfirmIdle -ne 'YES') { throw '请先停止测试并断开PC；允许复位后加 -ConfirmIdle YES。' }
 # 本文件保留UTF-8 BOM，避免Windows PowerShell 5按本地编码误读中文注释。
 $repo = Split-Path -Parent $PSScriptRoot
 $buildDirName = if ($Task -eq 'pwr-wave-build') {
@@ -37,7 +30,7 @@ $buildDirName = if ($Task -eq 'pwr-wave-build') {
 } elseif ($Task -eq 'pc-net-test-build') {
     'build_pc_net_test'
 } else {
-    'build_debug'
+    "build/standalone/$Configuration"
 }
 $buildDir = Join-Path $repo $buildDirName
 
@@ -67,56 +60,6 @@ function Find-Python {
     if (Test-Path -LiteralPath $codexPython) { return $codexPython }
 
     throw 'Python not found. Install Python 3 or add python.exe to PATH.'
-}
-
-if ($Task -in @('ota-build', 'ota-swd', 'ota-net')) {
-    # 日常修改仍走完整B的安装/校验，不直接覆盖App，也不改启动记录的CRC。
-    $python = Find-Python
-    $action = switch ($Task) {
-        'ota-build' { 'build' }
-        'ota-swd' { 'swd' }
-        'ota-net' { 'network' }
-    }
-    # 一键SWD先读取板上W25记录，再递增patch；构建/网络仍要求显式版本。
-    if ($action -eq 'swd' -and -not $Version) { $Version = 'auto' }
-    $otaArgs = @(
-        '-B', '-X', 'utf8', (Join-Path $repo 'tools\ota_dev.py'), $action,
-        '--version', $Version, '--configuration', $Configuration,
-        '--compiler', (Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe'),
-        '--cmake', (Find-BundledExe 'cmake' 'cmake.exe'),
-        '--ninja', (Find-BundledExe 'ninja' 'ninja.exe')
-    )
-    if ($PowerSimulation) { $otaArgs += '--power-simulation' }
-    if ($MatsFailTest) { $otaArgs += '--mats-fail-test' }
-    if ($action -ne 'build') {
-        if ($ConfirmIdle -ne 'YES') { throw '请先停止测试并协调B2温控；确认允许复位后加 -ConfirmIdle YES。' }
-        $otaArgs += '--confirm-idle'
-    }
-    if ($action -eq 'swd') {
-        # PowerShell 5调用原生程序会省略空字符串；未指定时不传--serial，由Python选唯一探针。
-        if ($Serial) { $otaArgs += @('--serial', $Serial) }
-        $otaArgs += @('--server', (Find-BundledExe 'stlink-gdbserver' 'ST-LINK_gdbserver.exe'),
-            '--programmer', (Find-BundledExe 'programmer' 'STM32_Programmer_CLI.exe'))
-    } elseif ($action -eq 'network') {
-        $otaArgs += @('--host', $BoardIP, '--port', $Port)
-        if ($LegacyOtaActions) { $otaArgs += '--legacy-ota-actions' }
-    }
-    & $python @otaArgs
-    exit $LASTEXITCODE
-}
-
-if ($Task -eq 'ota-probe') {
-    # App双地址验证归App工程；独立B工程不再携带App、RTOS、网络及业务源码。
-    $python = Find-Python
-    $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe'
-    $cmake = Find-BundledExe 'cmake' 'cmake.exe'
-    $ninja = Find-BundledExe 'ninja' 'ninja.exe'
-    foreach ($probeConfig in @('Debug', 'Release')) {
-        & $python -B -X utf8 (Join-Path $repo 'tests\verify_ota_relocation.py') `
-            --compiler $compiler --cmake $cmake --ninja $ninja --build-type $probeConfig
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    }
-    exit 0
 }
 
 if ($Task -eq 'style-test') {
@@ -200,7 +143,7 @@ $adWaveOption = if ($Task -eq 'ad-wave-build') { '-DENABLE_AD7124_WAVE_TEST=ON' 
 $pcNetTestOption = if ($Task -eq 'pc-net-test-build') { '-DENABLE_PC_PROTOCOL_NET_TEST=ON' } else { '-DENABLE_PC_PROTOCOL_NET_TEST=OFF' }
 $cmakeArgs = @(
     '-S', $repo, '-B', $buildDir, '-G', 'Ninja',
-    '-DCMAKE_BUILD_TYPE=Debug',
+    "-DCMAKE_BUILD_TYPE=$Configuration",
     "-DCMAKE_MAKE_PROGRAM=$ninja",
     $pwrWaveOption,
     $ledWaveOption,
@@ -209,9 +152,19 @@ $cmakeArgs = @(
     $adWaveOption
     $pcNetTestOption
     '-DENABLE_RK_GATEWAY_TEST=OFF'
-    '-DENABLE_V2_POWER_SIMULATION=OFF'
-    '-DENABLE_V2_MATS_FAIL_TEST=OFF'
+    "-DENABLE_V2_POWER_SIMULATION=$(if ($PowerSimulation) { 'ON' } else { 'OFF' })"
+    "-DENABLE_V2_MATS_FAIL_TEST=$(if ($MatsFailTest) { 'ON' } else { 'OFF' })"
 )
+$python = Find-Python
+$compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe'
+$env:PATH = "$(Split-Path -Parent $compiler);$env:PATH"
+$cmakeArgs += "-DPython3_EXECUTABLE=$python"
+if ($Version) {
+    if ($Version -notmatch '^(\d+)\.(\d+)\.(\d+)$') { throw 'Version格式为major.minor.patch。' }
+    $parts = @($Matches[1], $Matches[2], $Matches[3])
+    foreach ($part in $parts) { if ([long]$part -gt 65535) { throw '版本各段最大65535。' } }
+    $cmakeArgs += @("-DFIRMWARE_VERSION_MAJOR=$($parts[0])", "-DFIRMWARE_VERSION_MINOR=$($parts[1])", "-DFIRMWARE_VERSION_PATCH=$($parts[2])")
+}
 if (-not (Test-Path -LiteralPath $cache)) {
     $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$repo\cmake\gcc-arm-none-eabi.cmake"
 }
@@ -224,4 +177,16 @@ if ($Task -eq 'rebuild') {
 }
 
 & $ninja -C $buildDir
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$image = Join-Path $buildDir 'test.bin'
+& $python -B -X utf8 (Join-Path $PSScriptRoot 'direct_flash.py') --image $image --target apollo-v2-h743 --check-only
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if ($Task -eq 'flash') {
+    $download = @('-B', '-X', 'utf8', (Join-Path $PSScriptRoot 'direct_flash.py'),
+        '--image', $image, '--target', 'apollo-v2-h743', '--confirm-idle', 'YES',
+        '--programmer', (Find-BundledExe 'programmer' 'STM32_Programmer_CLI.exe'))
+    if ($Serial) { $download += @('--serial', $Serial) }
+    & $python @download
+    exit $LASTEXITCODE
+}
+exit 0

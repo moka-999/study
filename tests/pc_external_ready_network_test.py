@@ -4,14 +4,13 @@ import json
 from pathlib import Path
 import socket
 
-from pc_ota_network_test import Client
+from pc_test_client import Client
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="192.168.1.201")
     parser.add_argument("--port", type=int, default=8888)
-    parser.add_argument("--version", required=True)
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     if args.report.exists():
@@ -21,15 +20,14 @@ def main():
         with socket.create_connection((args.host, args.port), timeout=3) as sock:
             sock.settimeout(5)
             client = Client(sock, report["events"])
-            _, state = client.call({"action": "mcu_query"})
-            assert state["confirmed"] and state["firmwareVersion"] == args.version, state
             client.call({}, command=0x0002, expect=0x0001)
             client.call({}, command=0x0101, expect=0x0102)
             _, result = client.call({}, command=0x0106, expect=6)
             assert result.get("status") == "completed", result
             # 故意使用不存在的名字，即使后续字段放行，也不能查表下发真实算法。
             body = dict(algorithmType="functional", algorithmName="__NO_SUCH_ALGORITHM__",
-                        algorithmIndex=123, power=None, reboot=False, bootMode=None)
+                        algorithmIndex=123, power=None, reboot=False, bootMode=None,
+                        TimingParameters={})
             client.call(body, command=0x0103, expect=6, error="notSupported")
             client.call(dict(body, algorithmType="parametric"), command=0x0103,
                         expect=6, error="notSupported")
@@ -48,7 +46,7 @@ def main():
             _, result = client.call({"errorchip": []}, command=0x0107, expect=6)
             assert result.get("status") == "completed", result
             report["passed"] = True
-            print("PASS: 版本/健康、心跳、W25信息、轮次与拒绝路径；三灯保留汇总PASS")
+            print("PASS: 心跳、W25信息、轮次与拒绝路径；三灯保留汇总PASS")
             print("未下发RK算法，真实执行和结果回传仍待操作者发起")
     except BaseException as error:
         report["error"] = repr(error)

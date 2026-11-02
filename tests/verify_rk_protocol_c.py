@@ -29,7 +29,7 @@ typedef void *QueueHandle_t;
 #define taskEXIT_CRITICAL() ((void)0)
 #define UART_RX_BUF_SIZE 1024
 #define UART_RX_GAP (-1)
-#define OTA_TASK_RK 3
+#define TASK_WATCHDOG_RK 3
 #define LED_HEARTBEAT 0
 #define PWR_CTRL_STATE_ON 4
 uint32_t xTaskGetTickCount(void);
@@ -38,11 +38,11 @@ int xQueueSend(QueueHandle_t, const void *, uint32_t);
 int xQueueReceive(QueueHandle_t, void *, uint32_t);
 int uart_send(int, uint8_t *, uint16_t);
 int uart_poll_rx(int, uint8_t *, uint16_t);
-void ota_app_progress(int);
+void task_watchdog_progress(int);
 void led_toggle(int);
 int pwr_ctrl_get_state(void);
 ''', encoding='utf-8')
-    for name in ('FreeRTOS', 'task', 'queue', 'uart_router', 'ota_app', 'led', 'pwr_ctrl'):
+    for name in ('FreeRTOS', 'task', 'queue', 'uart_router', 'task_watchdog', 'led', 'pwr_ctrl'):
         (build / (name + '.h')).write_text('#include "port.h"\n', encoding='utf-8')
     # 包含目标板的任务文件以执行内部事务状态，不另写一份Python业务模型。
     (build / 'rk_task_under_test.h').write_text(
@@ -55,9 +55,9 @@ int pwr_ctrl_get_state(void);
     command += [str(Path(__file__).with_name('test_rk_protocol.c'))]
     command += [str(root / p) for p in ('App/protocol/rk/frame.c', 'App/protocol/rk/state_machine.c',
                                        'App/protocol/common/crc.c', 'App/tasks/rk/rk_link.c')]
-    boot = root.parent / 'bootloader/tests'
-    command += [str(boot / 'qemu_start.s'), '-nostartfiles', '--specs=nosys.specs',
-                '-T' + str(boot / 'qemu_test.ld'), '-Wl,--gc-sections', '-o', str(build / 'test.elf')]
+    support = Path(__file__).resolve().parent / 'support'
+    command += [str(support / 'qemu_start.s'), '-nostartfiles', '--specs=nosys.specs',
+                '-T' + str(support / 'qemu_test.ld'), '-Wl,--gc-sections', '-o', str(build / 'test.elf')]
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / 'build.log').write_text(result.stdout + result.stderr, encoding='utf-8')
     if result.returncode:

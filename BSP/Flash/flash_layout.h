@@ -4,7 +4,7 @@
  * ============================================================================
  *
  * 设计原则：
- *   1. 本模块只负责版本信息和FRU；OTA下载/启动记录归App/ota，安装/回滚归B。
+ *   1. 本模块提供版本/FRU记录接口；正式业务仅使用FRU，不自动写固件版本。
  *   2. 每类关键记录各占两个独立 4 KiB 扇区。更新时只改旧副本，另一个
  *      有效副本始终保留，因此写入中断电后仍可恢复最近一次完整记录。
  *   3. 所有整数按 STM32H743 的小端格式存储；字符数组使用 UTF-8/ASCII，
@@ -13,8 +13,7 @@
  *
  * 32 MiB 空间分配：
  *   0x00000000 - 0x0000FFFF  元数据区（版本 A/B、FRU A/B、后续扩展）
- *   0x00010000 - 0x0020FFFF  OTA下载区（2 MiB，完整.ota包）
- *   0x00210000 - 0x0040FFFF  稳定版包（2 MiB，只由授权维护/量产写入）
+ *   0x00010000 - 0x0040FFFF  固件扩展预留区（4 MiB，当前不读写或擦除）
  *   0x00410000 - 0x00C0FFFF  RK固件空间A（8 MiB，仅预留）
  *   0x00C10000 - 0x0140FFFF  RK固件空间B（8 MiB，仅预留）
  *   0x01410000 - 0x01FEFFFF  预留数据区（日志/标定等用途尚未冻结）
@@ -51,10 +50,9 @@
 #define FLASH_LAYOUT_FRU_SLOT_B             0x00003000UL
 #endif
 
-/* 保留既有宏名：A是外部下载区，B是外部稳定区，并非内部A1/A2。每区2MiB。 */
-#define FLASH_LAYOUT_OTA_SLOT_A_BASE        0x00010000UL
-#define FLASH_LAYOUT_OTA_SLOT_B_BASE        0x00210000UL
-#define FLASH_LAYOUT_OTA_SLOT_SIZE          0x00200000UL
+/* 取消MCU升级后保留原地址，不重新分配或自动清除其中已有内容。 */
+#define FLASH_LAYOUT_RESERVED_FIRMWARE_BASE 0x00010000UL
+#define FLASH_LAYOUT_RESERVED_FIRMWARE_SIZE 0x00400000UL
 
 /*
  * RK的两个独立固件存放空间，每块8 MiB；此处只保留地址，不读写或擦除。
@@ -99,8 +97,8 @@ typedef struct {
 
 /*
  * 固件版本载荷（固定 76 字节）。字段严格保持精简，不保存构建编号、
- * Git提交号或工作区状态。image_length/image_crc32由链接后的打包步骤填写；
- * 运行固件内建结构中的这两个字段为0，表示尚未打包写入W25Q256。
+ * Git提交号或工作区状态。内建结构的image_length/image_crc32为0；
+ * 版本记录接口用于介质自检，正式App启动和PC查询不读写此记录。
  */
 typedef struct {
     uint16_t schema_version;
@@ -163,10 +161,10 @@ typedef enum {
 } flash_store_status_t;
 
 /**
- * @brief 获取当前镜像编译期身份，仅供打包、首次写入和自检。
+ * @brief 获取当前镜像编译期身份，供调试定位与介质自检。
  * @return 静态只读结构，整个运行期有效，不可修改或释放。
- * @note 不读取Flash；image_length/image_crc32为0待打包填写。PC信息响应
- *       必须使用firmware_version_load，不能直接用此结构组帧。
+ * @note 不读写Flash，image_length/image_crc32固定为0。PC测试仪信息
+ *       读取FRU；testerVersion表示硬件版本，不使用此结构组帧。
  */
 const firmware_version_info_t *firmware_version_current(void);
 
@@ -179,7 +177,7 @@ void fru_info_init(fru_info_t *fru);
 
 /**
  * @brief 从A/B副本加载CRC及字段合法、generation最新的固件版本记录。
- * @param[in,out] flash 已初始化的同步Flash接口，须提供read/write回调。
+ * @param[in,out] flash 已初始化的同步Flash接口，只要求read回调。
  * @param[out] info 非NULL输出结构；仅返回FLASH_STORE_OK时有效。
  * @param[out] generation 可为NULL；选中记录的代数，不是输入期望版本。
  * @return FLASH_STORE_OK成功；ERR_PARAM参数无效；ERR_IO无可用副本且访问
@@ -206,7 +204,7 @@ int firmware_version_save(flash_if_t *flash, const firmware_version_info_t *info
 
 /**
  * @brief 从A/B副本加载CRC及字段合法、generation最新的FRU v2记录。
- * @param[in,out] flash 已初始化的同步Flash接口，须提供read/write回调。
+ * @param[in,out] flash 已初始化的同步Flash接口，只要求read回调。
  * @param[out] fru 非NULL输出结构；仅返回FLASH_STORE_OK时有效。
  * @param[out] generation 可为NULL；选中记录的代数，不是输入期望版本。
  * @return FLASH_STORE_OK成功；ERR_PARAM参数无效；ERR_IO无可用副本且访问
@@ -232,7 +230,7 @@ int fru_info_save(flash_if_t *flash, const fru_info_t *fru,
 
 /**
  * @brief 读取旧160/192字节FRU v1并转换成RAM中的v2结构。
- * @param[in,out] flash 已初始化且提供read/write回调的Flash接口。
+ * @param[in,out] flash 已初始化且提供read回调的Flash接口。
  * @param[out] fru 非NULL输出；成功时保留旧身份/网络/保留字段，新字段为空。
  * @param[out] generation 可为NULL；成功时返回选中旧记录的代数。
  * @return FLASH_STORE_OK成功；其他FLASH_STORE_ERR_*区分参数、IO、空白、
@@ -261,13 +259,11 @@ _Static_assert(offsetof(fru_info_t, test_board) == 170U,
                "FRU test_board offset changed");
 _Static_assert(offsetof(fru_info_t, reserved) == 202U,
                "FRU reserved offset changed");
-_Static_assert(FLASH_LAYOUT_OTA_SLOT_A_BASE + FLASH_LAYOUT_OTA_SLOT_SIZE ==
-               FLASH_LAYOUT_OTA_SLOT_B_BASE, "OTA slots must be adjacent");
 /* 按地址连续性与扇区对齐锁定预留边界，防止后续扩展覆盖既有MCU或自检区。 */
 _Static_assert(FLASH_LAYOUT_METADATA_BASE + FLASH_LAYOUT_METADATA_SIZE ==
-               FLASH_LAYOUT_OTA_SLOT_A_BASE, "元数据区必须与MCU下载区相邻");
-_Static_assert(FLASH_LAYOUT_OTA_SLOT_B_BASE + FLASH_LAYOUT_OTA_SLOT_SIZE ==
-               FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE, "RK空间不得覆盖MCU稳定区");
+               FLASH_LAYOUT_RESERVED_FIRMWARE_BASE, "元数据区必须与固件扩展预留区相邻");
+_Static_assert(FLASH_LAYOUT_RESERVED_FIRMWARE_BASE + FLASH_LAYOUT_RESERVED_FIRMWARE_SIZE ==
+               FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE, "RK空间不得覆盖固件扩展预留区");
 _Static_assert(FLASH_LAYOUT_RK_FIRMWARE_SLOT_A_BASE + FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE ==
                FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE, "两个RK固件空间必须相邻");
 _Static_assert(FLASH_LAYOUT_RK_FIRMWARE_SLOT_B_BASE + FLASH_LAYOUT_RK_FIRMWARE_SLOT_SIZE ==

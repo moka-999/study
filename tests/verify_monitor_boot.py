@@ -8,7 +8,6 @@ import subprocess
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app-root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--boot-root", type=Path, default=Path(__file__).resolve().parents[2] / "bootloader")
     parser.add_argument("--compiler", type=Path, required=True)
     parser.add_argument("--qemu", type=Path, default=Path("D:/qemu/qemu-system-arm.exe"))
     args = parser.parse_args()
@@ -41,18 +40,18 @@ uint32_t HAL_GetTick(void);
     env = dict(os.environ)
     env["PATH"] = str(args.compiler.parent) + os.pathsep + env.get("PATH", "")
     includes = [build] + [root / part for part in (
-        "App/tasks/common", "App/ota", "HAL_Drv", "BSP/MCP4725",
+        "App/tasks/common", "HAL_Drv", "BSP/MCP4725",
         "BSP/AD7124", "BSP/PAC1934", "BSP/TPS62868")]
     sources = [Path(__file__).with_name("test_monitor_boot.c"),
                root / "App/tasks/common/monitor_task.c", root / "BSP/MCP4725/mcp4725.c",
                root / "HAL_Drv/idd_stats.c",
-               args.boot_root / "tests/qemu_start.s"]
+               Path(__file__).resolve().parent / "support/qemu_start.s"]
     command = [str(args.compiler), "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
-               "-g", "-O1", "-DENABLE_OTA_BOOT=1", "-Wall", "-Wextra", "-Werror",
+               "-g", "-O1", "-Wall", "-Wextra", "-Werror",
                "-ffunction-sections", "-fdata-sections", *["-I" + str(p) for p in includes],
                *(["-DMONITOR_TEST_B1=1"] if (root / "b1.ioc").exists() else []),
                *map(str, sources), "-nostartfiles", "--specs=nosys.specs",
-               "-T" + str(args.boot_root / "tests/qemu_test.ld"), "-Wl,--gc-sections",
+               "-T" + str(Path(__file__).resolve().parent / "support/qemu_test.ld"), "-Wl,--gc-sections",
                "-o", str(build / "test.elf")]
     result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")

@@ -8,7 +8,6 @@ import subprocess
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app-root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--boot-root", type=Path, default=Path(__file__).resolve().parents[2] / "bootloader")
     parser.add_argument("--compiler", default=shutil.which("arm-none-eabi-gcc") or "arm-none-eabi-gcc")
     parser.add_argument("--qemu", default=shutil.which("qemu-system-arm") or "D:/qemu/qemu-system-arm.exe")
     args = parser.parse_args()
@@ -25,13 +24,13 @@ void HAL_Delay(uint32_t);
 ''', encoding="utf-8")
     includes = [build] + [root / p for p in ("HAL_Drv", "BSP/AD7124", "BSP/PAC1934", "BSP/TPS62868")]
     sources = [Path(__file__).with_name("test_ad7124.c"), root / "BSP/AD7124/ad7124.c",
-               root / "HAL_Drv/memory_monitor.c", args.boot_root / "tests/qemu_start.s"]
+               root / "HAL_Drv/memory_monitor.c", Path(__file__).resolve().parent / "support/qemu_start.s"]
     command = [str(args.compiler), "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-std=c11", "-g", "-O1", "-Wall", "-Wextra", "-Werror",
                "-ffunction-sections", "-fdata-sections", *["-I" + str(p) for p in includes],
                *(["-DAD_TEST_B1=1"] if (root / "b1.ioc").exists() else []),
                *map(str, sources), "-nostartfiles", "--specs=nosys.specs",
-               "-T" + str(args.boot_root / "tests/qemu_test.ld"), "-Wl,--gc-sections",
+               "-T" + str(Path(__file__).resolve().parent / "support/qemu_test.ld"), "-Wl,--gc-sections",
                "-o", str(build / "test.elf")]
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")

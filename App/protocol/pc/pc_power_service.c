@@ -12,7 +12,7 @@ static pc_power_rk_adapter_t s_rk;
 static pc_power_diagnostic_t s_diag;
 static pc_power_target_t s_target, s_ready_target;
 static uint8_t s_configured, s_ready_valid;
-static pc_power_action_t s_ready_action; /* 成功配置的用途，SLT完成不等价于FUNC就绪。 */
+static pc_power_action_t s_ready_action; /* 成功配置用途；SLT完成不等价于RK算法就绪。 */
 
 static int prepares_test(pc_power_action_t action)
 {
@@ -142,7 +142,7 @@ const char *pc_power_service_start(pc_power_action_t action,
             (target && (unsigned)target->boot_mode >= BOOT_MODE_COUNT)) return "invalidArgument";
         if (!pwr_ctrl_is_configured()) return "notConfigured";
     }
-    /* SLT须重新走服务器下载启动流程；只有FUNC可以复用相同的成功配置。 */
+    /* SLT须重新走服务器下载启动流程；FUNC/PARA可以复用相同的成功配置。 */
     int reuse = action == PC_POWER_PREPARE_TEST && target && !reboot &&
                 state == PWR_CTRL_STATE_ON && s_ready_valid &&
                 s_ready_action == action &&

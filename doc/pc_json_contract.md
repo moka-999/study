@@ -1,5 +1,7 @@
 # PC–MCU JSON业务合同
 
+2026-10-26：0108/0109已接入PARA，包体复用FUNC字段，类别固定`parametric`、名称按双方定义匹配；RK只下发21～36编号，进入/退出和时序寄存器仅准备编解码。FUNC/PARA/SLT的`TimingParameters`统一为必填对象，默认用`{}`，缺失或null回invalidArgument，子字段仍可部分提供字符串。当前统计为全程统计，不是IDD有效窗口或判限。详见[本轮接入与验证](para_integration_20261026.md)；以下带日期的历史状态不覆盖本条。
+
 2026-10-20：按飞书809版及本轮确认，0103/010A增加可选`TimingParameters`对象，11项均可单独提供字符串；0103允许null，010A提供时必须是对象。MCU仅校验、保存本次已受理请求的RAM副本，尚不向RK下发，也不将受理解释为时序已应用。单位、有效取值及RK映射待商量；SLT仍严格匹配`slt/memtest86`。见[时序字段接入记录](pc_timing_parameters_20261020.md)。下方旧日期描述不覆盖本轮结论。
 
 2026-10-14协议及代码以[PC协议](pc_tcp_protocol_spec.md)和[实现记录§10](pc_test_round_protocol_20261014.md#10-整轮slt及070x删除实现2026-10-14未烧录)为准：0106空对象建轮，之后执行FUNC 0103/0105或SLT 010A/010B，最后0107提交errorchip数组。镜像0/1/2映射两组LPDDR/eMCP；SLT固定slt/memtest86、index=null，只做电源/Boot准备，完成由PC回送。0108/0109 PARA预留；070x已从V2/B1源码删除，合法旧请求回notSupported。B2加热/灯态获取尚无报文合同，默认常温仅为显示初值。两板代码已构建/离线验证，V2已安装0.1.35并通过网络检查，B1未烧录；Word/飞书停留在此前621版，待补齐固定名称及灯映射等后续细化。
@@ -15,12 +17,14 @@
 
 ## 1. 算法下发与芯片测试结果
 
-现有固件的FUNC命令映射（源码常量名尚未随新目录重命名）：
+现有固件的算法命令映射：
 
 | 方向 | CommandID | JSON用途 |
 |---|---:|---|
 | PC → MCU | `PC_COMMAND_START_TEST = 0x0103` | 一次提交FUNC名称、计划项index、训练目标mV及重启/启动模式 |
 | MCU → PC | `PC_COMMAND_TEST_RESULT_REPORT = 0x0105` | 上报该FUNC算法的双颗粒测试结果 |
+| PC → MCU | `PC_COMMAND_PARA_START = 0x0108` | 同格式提交PARA名称、计划index、训练目标及重启/启动模式 |
+| MCU → PC | `PC_COMMAND_PARA_RESULT = 0x0109` | 上报该PARA算法的双颗粒结果及共享统计 |
 
 `ServiceID`固定填0，不参与分发。PC和MCU在每条连接中分别维护自己的发送Seq，每发送一个应用帧本端加1；收到对方报文不改变本端发送计数，不回显对方Seq，与MCU–RK的u64 Seq无关。两个方向允许数值相同且可以同时发送。Seq不用于匹配业务请求；首值1、重连归1、u32回绕及发送失败规则见协议框架第2节。新开始测试按4.7节串行提交，不靠算法名称或Seq区分并发请求。
 
@@ -37,6 +41,7 @@
   "algorithmType": "functional",
   "algorithmName": "mats",
   "algorithmIndex": 1,
+  "TimingParameters": {},
   "power": {
     "memoryType": "LPDDR4X",
     "vdd1": "1800",
@@ -52,15 +57,15 @@
 `power`为训练期间的绝对电压mV字符串，重复发送不累加；不是运行期拉偏。步进为10/5/5mV，旧steps不再接受。PC确认DDR安全范围与三轨组合，MCU严格校验格式、内存类型、TPS可编码范围和原生步进，不取整或钳位。
 与上一份成功生效且仍有效的配置相比，只要内存类型或任一目标电压改变，就必须受控冷重启，不能由`reboot=false`取消；
 Boot改变或配置状态未知/失效也需重新建立启动状态。`reboot`控制是否主动重启，重启统一采用受控断电方式；`bootMode`表示启动模式，不单列重启类型。
-FUNC以`algorithmType/algorithmName`标识，0103固定为functional；SLT另用010A/010B且algorithmIndex=null，PARA的0108/0109先保留。FUNC的`algorithmIndex`为PC当前计划中的算法项编号，同名算法可出现多次并用不同index区分。编号由PC提供，MCU在开始测试执行响应和最终结果中原样带回，不自增、不当作RK算法ID。现有0x0506/0x0509保留，不改变各自包体。
+FUNC以`algorithmType/algorithmName`标识，0103固定为functional；PARA的0108固定为parametric，结果用0109；SLT另用010A/010B且algorithmIndex=null。FUNC/PARA的`algorithmIndex`为PC当前计划中的算法项编号，同名算法可出现多次并用不同index区分。编号由PC提供，MCU在开始测试执行响应和最终结果中原样带回，不自增、不当作RK算法ID。现有0x0506/0x0509保留，不改变各自包体。
 
-上述完整B1请求严格校验原六个根字段及power四字段，不接受缺失、重复、未知键或错误类型；timeoutMs与TimingParameters为可选根字段。TimingParameters内只接受已定义的11项字符串，允许部分项和空字符串，不继承上一请求；合法请求受理后复制保存，失败请求不覆盖。
+上述完整B1请求严格校验七个根字段及power四字段，不接受缺失、重复、未知键或错误类型；timeoutMs仅FUNC/PARA可选。TimingParameters对象必填，使用默认时序传{}；内层只接受已定义的12项字符串，其中CASReadLatency和CASWriteLatency分别保存读、写延迟，不接受旧CASLatency。允许部分项和空字符串，不继承上一请求；合法请求受理后复制保存，失败请求不覆盖。
 三路电压复用TPS编码范围检查，但不代表已批准安全训练范围。参数非法回0006
 `failed/invalidArgument`；OTA未健康时回`otaNotReady`，在途冲突回`busy`。
 根对象的index唯一且为合法u32整数时，失败响应原样携带，即使其它字段非法；不合法时省略。
-B1完整路径已接DAC、上/下电、训练目标写入和本轮RK心跳等待；必要时直接断电重启，不等RK关机应答。PC/RK负责保证可直接切电。受理回accepted，启动准备及算法入队后回completed，最终结果用0105。当前仅支持FUNC，SLT/IDD仍回notSupported；详见[初版配置及验收边界](b1_power_business_20261013.md)。
+B1完整路径已接DAC、上/下电、训练目标写入和本轮RK心跳等待；必要时直接断电重启，不等RK关机应答。PC/RK负责保证可直接切电。受理回accepted，启动准备及算法入队后回completed，FUNC最终结果用0105、PARA用0109；SLT只做启动准备，由PC回送总结果。电气验收见[初版配置](b1_power_business_20261013.md)，PARA边界见[接入记录](para_integration_20261026.md)。
 
-V2外部已启动模式使用`{"algorithmType":"functional","algorithmName":"mats","algorithmIndex":1,"power":null,"reboot":false,"bootMode":null}`。这两个null明确表示不设置电压/Boot，不是标称档位0；只接受功能算法。timeoutMs省略或0表示无限等待，非零1..86400000毫秒。详细响应与保护规则见协议4.7节及[操作记录](rk_real_test_20260928.md)。
+V2外部已启动模式使用`{"algorithmType":"functional","algorithmName":"mats","algorithmIndex":1,"TimingParameters":{},"power":null,"reboot":false,"bootMode":null}`。这两个null明确表示不设置电压/Boot，不是标称档位0；PARA同样允许该模式，但必须用0108及parametric/IDD名称。timeoutMs省略或0表示无限等待，非零1..86400000毫秒。详细响应与保护规则见协议4.7/4.12节及[操作记录](rk_real_test_20260928.md)。
 
 ### TEST_RESULT_REPORT包体
 

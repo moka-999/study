@@ -29,6 +29,7 @@ static void sample_now(uint32_t now)
     for (unsigned rail = 0U; rail < 3U; ++rail) {
         s_latest.memory.voltage_mv[rail] = (int32_t)s_mv[rail] + step * 10;
         s_latest.memory.idd[rail].current_ma = (uint32_t)((int32_t)current_base[rail] + step * (int32_t)current_swing[rail]);
+        s_latest.memory.idd[rail].current_ua = (uint64_t)s_latest.memory.idd[rail].current_ma * 1000U;
         s_latest.memory.idd[rail].power_mw =
             (uint32_t)s_latest.memory.voltage_mv[rail] * s_latest.memory.idd[rail].current_ma / 1000U;
     }

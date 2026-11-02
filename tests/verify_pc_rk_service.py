@@ -69,12 +69,12 @@ uint32_t HAL_GetTick(void);
         sources += [root / path for path in ("App/tasks/test/v2_power_sim.c", "BSP/MCP4725/mcp4725.c")]
     includes = [build, *[root / path for path in (
         "App/protocol/pc", "App/protocol/rk", "App/protocol/b2", "App/tasks/b2",
-        "App/tasks/rk", "App/tasks/common", "App/tasks/test", "App/ota", "HAL_Drv",
+        "App/tasks/rk", "App/tasks/common", "App/tasks/test", "HAL_Drv",
         "BSP/TPS62868", "BSP/PAC1934", "BSP/AD7124", "BSP/MCP4725", "BSP/Flash",
         "Middlewares/Third_Party/cJSON", "Core/Inc")]]
-    boot = root.parent / "bootloader/tests"
+    support = Path(__file__).resolve().parent / "support"
     command = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
-               "-std=c11", "-O1", "-g", "-DENABLE_OTA_BOOT=1", "-DCJSON_NESTING_LIMIT=16",
+               "-std=c11", "-O1", "-g", "-DCJSON_NESTING_LIMIT=16",
                "-Wall", "-Wextra", "-Werror", "-ffunction-sections", "-fdata-sections"]
     if args.b1_guard or root.name == "b1":
         command += ["-DB1_RK_UART=4"]
@@ -87,8 +87,8 @@ uint32_t HAL_GetTick(void);
     if args.round:
         command += ["-DPC_TEST_ROUND_TEST=1"]
     command += ["-I" + str(path) for path in includes]
-    command += [*map(str, sources), str(boot / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
-                "-T" + str(boot / "qemu_test.ld"), "-Wl,--gc-sections", "-o", str(build / "test.elf")]
+    command += [*map(str, sources), str(support / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
+                "-T" + str(support / "qemu_test.ld"), "-Wl,--gc-sections", "-o", str(build / "test.elf")]
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode:

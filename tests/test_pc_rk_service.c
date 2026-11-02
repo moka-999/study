@@ -1,10 +1,8 @@
-/* QEMU执行正式PC分发、RK业务及命令表；平台队列/FRU/OTA状态由本文件控制。 */
+/* QEMU执行正式PC分发、RK业务及命令表；平台队列/FRU状态由本文件控制。 */
 #include "pc_test_service.h"
 #include "pc_tester_info.h"
-#include "pc_ota.h"
 #include "monitor_task.h"
 #include "result_led.h"
-#include "ota_app.h"
 #include "rk_link.h"
 #include "pc_power_service.h"
 #include "b2_service.h"
@@ -45,15 +43,16 @@ int monitor_idd_get(idd_stats_t *out)
 }
 #endif
 #include <stddef.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define S1(x) #x
 #define S(x) S1(x)
 #define CHECK(c) do { if (!(c)) fail("FAIL " S(__LINE__) ": " #c "\n"); } while (0)
-#define START_JSON "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":null,\"reboot\":false,\"bootMode\":null}"
-static int confirmed = 1, fru_error, queue_full, response_ready;
-static unsigned queue_calls, fru_calls, ota_calls;
+#define START_JSON "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":null,\"reboot\":false,\"bootMode\":null,\"TimingParameters\":{}}"
+static int fru_error, queue_full, response_ready;
+static unsigned queue_calls, fru_calls;
 static result_led_state_t led_states[RESULT_LED_TARGET_COUNT];
 static unsigned led_writes;
 static int led_failure;
@@ -61,7 +60,6 @@ static uint8_t b2_modes[3], b2_known = 7U, b2_site;
 uint8_t b2_service_thermal_modes(uint8_t modes[3])
 { memcpy(modes, b2_modes, sizeof(b2_modes)); return b2_known; }
 uint8_t b2_service_site_id(void) { return b2_site; }
-static ota_download_state_t download_state;
 static char site_label[16] = "SITE-7";
 static rk_request_t queued_request;
 static rk_response_t queued_response;
@@ -99,11 +97,6 @@ size_t log_console_write(const char *text, size_t length)
 { CHECK(text && length < 144U); return length; }
 #endif
 
-int ota_app_is_confirmed(void) { return confirmed; }
-void ota_download_get_progress(ota_download_progress_t *out)
-{ memset(out, 0, sizeof(*out)); out->state = download_state; }
-void ota_download_poll(void) { }
-void ota_download_disconnected(void) { }
 int pc_tester_info_load(fru_info_t *out)
 {
     ++fru_calls;
@@ -219,17 +212,6 @@ HAL_StatusTypeDef result_led_set_all(const result_led_state_t states[RESULT_LED_
     ++led_writes;
     return HAL_OK;
 }
-pc_dispatch_result_t pc_ota_handle(const pc_protocol_frame_t *request, uint32_t sequence,
-                                  const cJSON *root, pc_dispatch_response_t *response)
-{
-    const cJSON *action = cJSON_GetObjectItemCaseSensitive(root, "action");
-    CHECK(request->command_id == PC_COMMAND_FIRMWARE_UPGRADE_REQUEST);
-    CHECK(cJSON_IsString(action) && strcmp(action->valuestring, "mcu_query") == 0);
-    ++ota_calls;
-    CHECK(pc_protocol_build_response(PC_COMMAND_FIRMWARE_UPGRADE_RESP, sequence,
-        (const uint8_t *)"{}", 2U, response->data, sizeof(response->data), &response->length) == 0);
-    return PC_DISPATCH_RESPONSE_READY;
-}
 
 /* 核对完整18字节头及严格JSON；使用MCU本端序号，不接受请求序号99或RK序号。 */
 static cJSON *decode(const pc_dispatch_response_t *response, uint16_t command, uint32_t sequence)
@@ -282,8 +264,7 @@ static void start_expect(const char *json, const char *error)
     /* 既有FUNC回归现在在显式整轮内运行；0106重复请求的busy不修改该轮。
      * 新增整轮回归使用dispatch直接调用，另行核对缺少0106必拒绝。
      */
-    if (confirmed && !pc_test_service_busy() && !pc_power_service_busy() &&
-        download_state == OTA_DOWNLOAD_IDLE) {
+    if (!pc_test_service_busy() && !pc_power_service_busy()) {
         CHECK(dispatch(PC_COMMAND_ROUND_BEGIN, "{}", 16U, &response) == PC_DISPATCH_RESPONSE_READY);
         cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 16U);
         const cJSON *status = cJSON_GetObjectItemCaseSensitive(body, "status");
@@ -466,8 +447,8 @@ static void delivery_retry_check(void)
 }
 
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
-#define POWER_START "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\"}"
-#define CHANGED_START "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1810\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\"}"
+#define POWER_START "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\",\"TimingParameters\":{}}"
+#define CHANGED_START "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1810\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\",\"TimingParameters\":{}}"
 static cJSON *query(uint16_t command, uint16_t reply)
 {
     pc_dispatch_response_t response;
@@ -536,10 +517,7 @@ static void power_simulation_check(void)
     CHECK(cJSON_GetArrayItem(voltage, 2)->valueint == 610 + delta);
     cJSON_Delete(body);
     control(PC_COMMAND_SET_DDR_CONFIG, "{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"11790\",\"vdd2\":\"1100\",\"vddq\":\"600\"}", "failed", "invalidArgument");
-    control(PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, "{\"action\":\"mcu_begin\"}", "failed", "invalidState");
-    download_state = OTA_DOWNLOAD_RECEIVING;
-    control(PC_COMMAND_POWER_OFF, "{}", "failed", "busy");
-    download_state = OTA_DOWNLOAD_IDLE;
+    control(PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, "{\"action\":\"mcu_begin\"}", "failed", "notSupported");
 
     uint32_t cycles = v2_power_sim_cycles();
     start_expect(POWER_START, NULL);
@@ -615,7 +593,8 @@ static void power_simulation_check(void)
     body = query(PC_COMMAND_QUERY_POWER_MONITOR, PC_COMMAND_POWER_MONITOR_RESP);
     stats = cJSON_GetObjectItemCaseSensitive(body, "statistics");
     string_is(stats, "state", "running");
-    CHECK(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(stats, "currentAvgMa"), 0)->valuedouble == 299.0);
+    CHECK(fabs(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(stats, "currentAvgMa"), 0)->valuedouble -
+               (300.0 - 30.0 / 57601.0)) < 1e-9);
     cJSON_Delete(body);
     result_is(0U, NULL, site_label);
     message("PASS: PC RK service power simulation: polling while busy, 18 metrics, freeze/reset, real RK queue, no hardware calls\n");
@@ -640,6 +619,7 @@ static void b1_sample(uint8_t valid, int32_t mv, uint32_t ma)
     for (unsigned rail = 0; rail < 3U; ++rail) {
         measured_latest.memory.voltage_mv[rail] = mv;
         measured_latest.memory.idd[rail].current_ma = ma;
+        measured_latest.memory.idd[rail].current_ua = (uint64_t)ma * 1000U;
     }
     CHECK(idd_stats_feed(&measured_stats, mock_tick, mock_tick, &measured_latest.memory) == 1);
 }
@@ -691,7 +671,7 @@ static void b1_measurement_check(void)
     /* 最大整数、最长转义标签和64位错误/耗时仍必须装入完整响应，不能断连。 */
     memset(site_label, 1, sizeof(site_label) - 1U); site_label[15] = 0;
     start_expect(START_JSON, NULL);
-    b1_sample(3U, INT32_MIN, UINT32_MAX);
+    b1_sample(3U, INT32_MIN, UINT32_MAX / 1000U);
     result_is(UINT64_MAX, "0xFFFFFFFFFFFFFFFF", site_label);
     memcpy(site_label, "SITE-7", 7U);
     message("PASS: PC RK service B1 real-path guards, 100 queries, 18 metrics, partial samples and freeze/reset\n");
@@ -703,9 +683,6 @@ static void b1_measurement_check(void)
 static void mats_fail_scope_check(void)
 {
     pc_dispatch_response_t response;
-    confirmed = 0;
-    start_expect(START_JSON, "otaNotReady");
-    confirmed = 1;
     for (uint16_t id = 1U; id <= 20U; ++id) {
         const rk_command_descriptor_t *algorithm = rk_command_find_by_id(id);
         CHECK(algorithm != NULL);
@@ -782,8 +759,8 @@ static const pc_power_config_t sequence_config = {
     .transition_timeout_ms = 100U, .ready_timeout_ms = 100U,
     .off_hold_ms = 10U, .boot_settle_ms = 5U,
 };
-#define COLD_START "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\"}"
-#define COLD_CHANGED "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1810\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\"}"
+#define COLD_START "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\",\"TimingParameters\":{}}"
+#define COLD_CHANGED "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1810\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\",\"TimingParameters\":{}}"
 static uint32_t armed_token;
 static uint64_t heartbeat_seq = 100U;
 static int arm_error;
@@ -957,20 +934,6 @@ static void power_sequence_check(void)
     CHECK(pc_power_service_configure(&sequence_config, NULL) == 0);
     start_expect(COLD_START, "notReady");
     configure_power();
-    /* OTA维护期间真实电源也互斥，但查询和心跳保持可用。 */
-    const ota_download_state_t maintenance_states[] = {
-        OTA_DOWNLOAD_RECEIVING, OTA_DOWNLOAD_READY, OTA_DOWNLOAD_COMMIT_UNKNOWN
-    };
-    for (unsigned i = 0U; i < sizeof(maintenance_states) / sizeof(maintenance_states[0]); ++i) {
-        download_state = maintenance_states[i];
-        start_expect(COLD_START, "busy");
-        power_command(PC_COMMAND_POWER_ON, "failed", "busy");
-        power_command(PC_COMMAND_POWER_OFF, "failed", "busy");
-        power_command(PC_COMMAND_RESET_RK, "failed", "busy");
-        CHECK(dispatch(PC_COMMAND_QUERY_POWER_STATUS, "{}", 2U, &response) == 1);
-        CHECK(dispatch(PC_COMMAND_CLIENT_HEARTBEAT, "{}", 3U, &response) == 1);
-    }
-    download_state = OTA_DOWNLOAD_IDLE;
     CHECK(!power_on_calls && !power_off_calls && !boot_calls && !queue_calls);
     boot_io_ms = 400U; /* 模拟I2C耗时，后续5ms稳定时间必须从写完开始算。 */
     start_expect(COLD_START, NULL);
@@ -980,7 +943,7 @@ static void power_sequence_check(void)
     power_command(PC_COMMAND_POWER_OFF, "failed", "busy");
     CHECK(dispatch(PC_COMMAND_CLIENT_HEARTBEAT, "{}", 1U, &response) == 1);
     CHECK(dispatch(PC_COMMAND_QUERY_POWER_STATUS, "{}", 2U, &response) == 1);
-    power_command(PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, "failed", "busy");
+    power_command(PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, "failed", "notSupported");
     cold_to_ready();
     /* 未发出本轮MCU心跳前，旧心跳不能放行；旧内部令牌同样失效。 */
     tlv_frame_t stale = {0};
@@ -1112,7 +1075,7 @@ static void power_sequence_check(void)
 #endif
 
 #if defined(PC_TEST_ROUND_TEST)
-#define SLT_START "{\"algorithmType\":\"slt\",\"algorithmName\":\"memtest86\",\"algorithmIndex\":null,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\"}"
+#define SLT_START "{\"algorithmType\":\"slt\",\"algorithmName\":\"memtest86\",\"algorithmIndex\":null,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\",\"TimingParameters\":{}}"
 #define SLT_RESULT "{\"siteId\":\"SITE-7\",\"algorithmType\":\"slt\",\"algorithmName\":\"memtest86\",\"algorithmIndex\":null,\"testTimeMs\":null,\"testResults\":[{\"mirrorIndex\":0,\"testStatus\":0,\"resultDesc\":null,\"physicalAddr\":\"\"},{\"mirrorIndex\":1,\"testStatus\":1,\"resultDesc\":null,\"physicalAddr\":\"\"}],\"measurementData\":null}"
 
 static void round_command(uint16_t command, const char *json, const char *status, const char *error)
@@ -1133,6 +1096,166 @@ static void round_begin(void) { round_command(PC_COMMAND_ROUND_BEGIN, "{}", "com
 static void round_end(void)
 {
     round_command(PC_COMMAND_ROUND_END, "{\"errorchip\":[]}", "completed", NULL);
+}
+
+/* 构造PC实际请求文本；返回后cJSON源树已销毁，业务不能借用临时字段。 */
+static char *para_json(const char *type, const char *name, uint32_t index)
+{
+    cJSON *root = cJSON_Parse(START_JSON); CHECK(root);
+    CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmType", cJSON_CreateString(type)));
+    CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmName", cJSON_CreateString(name)));
+    CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmIndex", cJSON_CreateNumber(index)));
+    cJSON *timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters"); CHECK(cJSON_IsObject(timing));
+    CHECK(cJSON_AddStringToObject(timing, "Freq", "1600"));
+    CHECK(cJSON_AddStringToObject(timing, "tRCD", ""));
+    CHECK(cJSON_AddStringToObject(timing, "CASReadLatency", "20"));
+    CHECK(cJSON_AddStringToObject(timing, "CASWriteLatency", "12"));
+    char *json = cJSON_PrintUnformatted(root); CHECK(json);
+    cJSON_Delete(root);
+    return json;
+}
+
+static void para_command(uint16_t command, const char *json, uint32_t index, const char *error)
+{
+    pc_dispatch_response_t response;
+    unsigned calls = queue_calls;
+    CHECK(dispatch(command, json, 61U, &response) == PC_DISPATCH_RESPONSE_READY);
+    cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 61U);
+    number_is(body, "requestCommandId", command);
+    number_is(body, "algorithmIndex", index);
+    string_is(body, "status", error ? "failed" : "accepted");
+    if (error) {
+        string_is(body, "errorCode", error);
+        CHECK(queue_calls == calls);
+    } else CHECK(!cJSON_GetObjectItemCaseSensitive(body, "errorCode"));
+    cJSON_Delete(body);
+}
+
+/* 只验证编号下发与最终帧转发；这里没有伪造RK进入确认或JEDEC有效测量窗口。 */
+static void para_flow_check(void)
+{
+    static const char *const names[] = {
+        "idd_0", "idd_2P", "idd_2PS", "idd_2N", "idd_2NS", "idd_3P", "idd_3PS", "idd_3N",
+        "idd_3NS", "idd_4R", "idd_4W", "idd_5", "idd_5AB", "idd_5PB", "idd_6", "idd_6ET"
+    };
+    pc_dispatch_response_t response;
+    char *json = para_json("parametric", "idd_0", 91U);
+    CHECK(!pc_test_service_busy());
+    para_command(PC_COMMAND_PARA_START, json, 91U, "invalidState");
+    round_begin();
+    para_command(PC_COMMAND_START_TEST, json, 91U, "notSupported");
+    cJSON_free(json);
+    const struct { uint16_t command; const char *type; const char *name; } rejected[] = {
+        {PC_COMMAND_START_TEST, "functional", "idd_0"},
+        {PC_COMMAND_PARA_START, "functional", "idd_0"},
+        {PC_COMMAND_PARA_START, "functional", "mats"},
+        {PC_COMMAND_PARA_START, "parametric", "mats"},
+        {PC_COMMAND_PARA_START, "parametric", "idd_2p"},
+        {PC_COMMAND_PARA_START, "parametric", "IDD_0"}
+    };
+    for (size_t i = 0U; i < sizeof(rejected) / sizeof(rejected[0]); ++i) {
+        json = para_json(rejected[i].type, rejected[i].name, 91U);
+        para_command(rejected[i].command, json, 91U, "notSupported");
+        cJSON_free(json);
+        CHECK(!pc_test_service_busy());
+    }
+    for (size_t i = 0U; i < sizeof(names) / sizeof(names[0]); ++i) {
+        json = para_json("parametric", names[i], 100U + i);
+        unsigned calls = queue_calls;
+        para_command(PC_COMMAND_PARA_START, json, 100U + i, NULL);
+        CHECK(queue_calls == calls + 1U && queued_request.command_id == 21U + i);
+        CHECK(queued_request.timeout_ms == 0U && pc_test_service_busy());
+        para_command(PC_COMMAND_PARA_START, json, 100U + i, "busy");
+        round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "busy");
+        cJSON_free(json);
+        string_is(pc_test_service_timing_parameters(), "Freq", "1600");
+        string_is(pc_test_service_timing_parameters(), "tRCD", "");
+        uint8_t mask = i % 4U;
+        inject_mask(RK_RESPONSE_COMPLETE, mask, UINT64_C(0x1234), UINT64_C(0x9876));
+        CHECK(pc_dispatch_next_response(62U, &response) == 1 && !pc_test_service_busy());
+        cJSON *body = decode(&response, PC_COMMAND_PARA_RESULT, 62U);
+        string_is(body, "algorithmType", "parametric");
+        string_is(body, "algorithmName", names[i]);
+        string_is(body, "siteId", site_label);
+        number_is(body, "algorithmIndex", 100U + i);
+        number_is(body, "testTimeMs", 42000U);
+        CHECK(cJSON_GetObjectItemCaseSensitive(body, "measurementData"));
+        const cJSON *chips = cJSON_GetObjectItemCaseSensitive(body, "testResults");
+        CHECK(cJSON_GetArraySize(chips) == 2);
+        for (unsigned die = 0U; die < 2U; ++die) {
+            const cJSON *chip = cJSON_GetArrayItem(chips, die);
+            number_is(chip, "mirrorIndex", die);
+            number_is(chip, "testStatus", mask & (1U << die) ? 0U : 1U);
+            const cJSON *desc = cJSON_GetObjectItemCaseSensitive(chip, "resultDesc");
+            string_is(desc, "errorType", "");
+            if (mask & (1U << die))
+                string_is(desc, "firstErrorAddress", die ? "0x0000000000009876" : "0x0000000000001234");
+            else CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(desc, "firstErrorAddress")));
+        }
+        cJSON_Delete(body);
+    }
+
+#if defined(PC_POWER_SEQUENCE_TEST)
+    /* 完整PARA启动同样等待本轮RK心跳，异步completed仍须关联0108，不能串到0103。 */
+    power_fixture = 1;
+    configure_power();
+    cJSON *cold = cJSON_Parse(COLD_START); CHECK(cold);
+    CHECK(cJSON_ReplaceItemInObjectCaseSensitive(cold, "algorithmType", cJSON_CreateString("parametric")));
+    CHECK(cJSON_ReplaceItemInObjectCaseSensitive(cold, "algorithmName", cJSON_CreateString("idd_0")));
+    CHECK(cJSON_ReplaceItemInObjectCaseSensitive(cold, "algorithmIndex", cJSON_CreateNumber(91)));
+    json = cJSON_PrintUnformatted(cold); CHECK(json); cJSON_Delete(cold);
+    unsigned queued = queue_calls;
+    para_command(PC_COMMAND_PARA_START, json, 91U, NULL);
+    cJSON_free(json);
+    CHECK(queue_calls == queued);
+    cold_to_ready(); confirm_power(1); step_power(0U);
+    CHECK(pc_dispatch_next_response(62U, &response) == 1);
+    cJSON *completed = decode(&response, PC_COMMAND_COMMAND_RESP, 62U);
+    number_is(completed, "requestCommandId", PC_COMMAND_PARA_START);
+    number_is(completed, "algorithmIndex", 91U);
+    string_is(completed, "status", "completed"); cJSON_Delete(completed);
+    CHECK(queue_calls == queued + 1U && queued_request.command_id == 21U);
+    inject(RK_RESPONSE_COMPLETE, 0U);
+    CHECK(pc_dispatch_next_response(62U, &response) == 1 && !pc_test_service_busy());
+    completed = decode(&response, PC_COMMAND_PARA_RESULT, 62U); cJSON_Delete(completed);
+#endif
+
+    /* 传输异常不能被写成IDD芯片FAIL；超时未知状态仍等待真实恢复事件。 */
+    json = para_json("parametric", "idd_0", 91U);
+    const rk_response_status_t errors[] = {RK_RESPONSE_TX_FAILED, RK_RESPONSE_TIMEOUT};
+    const char *const error_names[] = {"txFailed", "timeout"};
+    for (size_t i = 0U; i < sizeof(errors) / sizeof(errors[0]); ++i) {
+        para_command(PC_COMMAND_PARA_START, json, 91U, NULL);
+        inject(errors[i], 0U);
+        CHECK(pc_dispatch_next_response(63U, &response) == 1);
+        cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 63U);
+        number_is(body, "requestCommandId", PC_COMMAND_PARA_START);
+        number_is(body, "algorithmIndex", 91U);
+        string_is(body, "status", "failed"); string_is(body, "errorCode", error_names[i]);
+        CHECK(!cJSON_GetObjectItemCaseSensitive(body, "testResults"));
+        cJSON_Delete(body);
+        if (errors[i] == RK_RESPONSE_TIMEOUT) {
+            CHECK(pc_test_service_busy());
+            inject(RK_RESPONSE_RECOVERED, 0U);
+            CHECK(pc_dispatch_next_response(64U, &response) == 0);
+        }
+        CHECK(!pc_test_service_busy());
+    }
+    /* 原连接离开或整轮结束，只废弃结果，不能提前解除RK占用。 */
+    para_command(PC_COMMAND_PARA_START, json, 91U, NULL);
+    pc_dispatch_disconnected(); CHECK(pc_test_service_busy());
+    para_command(PC_COMMAND_PARA_START, json, 91U, "busy");
+    inject(RK_RESPONSE_COMPLETE, 0U);
+    CHECK(pc_dispatch_next_response(65U, &response) == 0 && !pc_test_service_busy());
+    round_begin();
+    para_command(PC_COMMAND_PARA_START, json, 91U, NULL);
+    round_end(); CHECK(pc_test_service_busy());
+    unsigned writes = led_writes;
+    inject(RK_RESPONSE_COMPLETE, UINT64_C(0x1234));
+    CHECK(pc_dispatch_next_response(66U, &response) == 0 && !pc_test_service_busy());
+    CHECK(led_writes == writes);
+    cJSON_free(json);
+    message("PASS: PC RK service PARA 16 names, category isolation, 0108/0109 routing, ownership and errors\n");
 }
 
 static void round_flow_check(void)
@@ -1170,10 +1293,10 @@ static void round_flow_check(void)
         round_command(PC_COMMAND_ROUND_END, bad_lists[i], "failed", "invalidArgument");
         CHECK(led_writes == writes);
     }
-    /* 旧070x不论方向都不执行；PARA保留方向，不能冒充已接入IDD。 */
+    /* 旧070x不论方向都不执行；PARA开始必须携带完整字段，结果仍仅允许MCU发送。 */
     for (uint16_t command = 0x0701U; command <= 0x0703U; ++command)
         round_command(command, "{}", "failed", "notSupported");
-    round_command(PC_COMMAND_PARA_START, "{}", "failed", "notSupported");
+    round_command(PC_COMMAND_PARA_START, "{}", "failed", "invalidArgument");
     round_command(PC_COMMAND_PARA_RESULT, "{}", "failed", "invalidDirection");
     round_command(PC_COMMAND_TEST_RESULT_REPORT, "{}", "failed", "invalidDirection");
     CHECK(led_writes == writes);
@@ -1196,7 +1319,7 @@ static void round_flow_check(void)
     CHECK(pc_test_service_busy());
     round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "busy");
     round_command(PC_COMMAND_POWER_OFF, "{}", "failed", "busy");
-    round_command(PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, "{\"action\":\"mcu_begin\"}", "failed", "busy");
+    round_command(PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, "{\"action\":\"mcu_begin\"}", "failed", "notSupported");
     CHECK(dispatch(PC_COMMAND_CLIENT_HEARTBEAT, "{}", 77U, &response) == 1);
     inject(RK_RESPONSE_COMPLETE, UINT64_C(0x123456789ABCDEF0));
     CHECK(pc_dispatch_next_response(78U, &response) == 0 && !pc_test_service_busy());
@@ -1248,22 +1371,62 @@ static void timing_free(void *memory)
     free(memory);
 }
 
+/* 缺失/null时序必须在受理之前拒绝，三类请求均不能改变已有时序、电源或RK队列。 */
+static void timing_required_check(void)
+{
+    const uint16_t commands[] = {PC_COMMAND_START_TEST, PC_COMMAND_PARA_START, PC_COMMAND_SLT_START};
+    const cJSON *saved = pc_test_service_timing_parameters();
+    unsigned calls = queue_calls, reads = fru_calls, writes = led_writes;
+    unsigned on = power_on_calls, off = power_off_calls, boot = boot_calls, config = config_set_calls;
+    pwr_ctrl_state_t power_state = mock_power_state;
+#if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
+    uint32_t cycles = v2_power_sim_cycles();
+#endif
+    for (size_t kind = 0U; kind < sizeof(commands) / sizeof(commands[0]); ++kind) {
+        for (unsigned null_value = 0U; null_value < 2U; ++null_value) {
+            cJSON *root = cJSON_Parse(kind == 2U ? SLT_START : START_JSON); CHECK(root);
+            if (kind == 1U) {
+                CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmType", cJSON_CreateString("parametric")));
+                CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmName", cJSON_CreateString("idd_0")));
+            }
+            if (null_value)
+                CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "TimingParameters", cJSON_CreateNull()));
+            else cJSON_DeleteItemFromObjectCaseSensitive(root, "TimingParameters");
+            char *json = cJSON_PrintUnformatted(root); CHECK(json);
+            round_command(commands[kind], json, "failed", "invalidArgument");
+            cJSON_free(json); cJSON_Delete(root);
+            CHECK(!pc_test_service_busy() && !pc_power_service_busy());
+            CHECK(queue_calls == calls && fru_calls == reads && led_writes == writes);
+            CHECK(power_on_calls == on && power_off_calls == off && boot_calls == boot && config_set_calls == config);
+            CHECK(mock_power_state == power_state && pc_test_service_timing_parameters() == saved);
+#if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
+            CHECK(v2_power_sim_cycles() == cycles);
+#endif
+        }
+    }
+    message("PASS: missing/null timing in FUNC/PARA/SLT rejected without hardware or queue effects\n");
+}
+
 /* 输入JSON会在dispatch内释放；校验副本寿命、拒绝不覆盖以及逐分配点失败无副作用。 */
 static void timing_storage_check(void)
 {
     pc_dispatch_response_t response;
     cJSON *root = cJSON_Parse(START_JSON); CHECK(root);
-    cJSON *timing = cJSON_AddObjectToObject(root, "TimingParameters"); CHECK(timing);
+    cJSON *timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters"); CHECK(cJSON_IsObject(timing));
     CHECK(cJSON_AddStringToObject(timing, "Freq", "1600"));
     CHECK(cJSON_AddStringToObject(timing, "tRCD", ""));
+    CHECK(cJSON_AddStringToObject(timing, "CASReadLatency", "20"));
+    CHECK(cJSON_AddStringToObject(timing, "CASWriteLatency", "12"));
     char *json = cJSON_PrintUnformatted(root); CHECK(json);
     round_begin();
+    timing_required_check();
     unsigned calls = queue_calls;
     round_command(PC_COMMAND_START_TEST, json, "accepted", NULL);
     CHECK(queue_calls == calls + 1U && queued_request.command_id == 17U);
     const cJSON *saved = pc_test_service_timing_parameters();
     CHECK(saved && saved != timing);
     string_is(saved, "Freq", "1600"); string_is(saved, "tRCD", "");
+    string_is(saved, "CASReadLatency", "20"); string_is(saved, "CASWriteLatency", "12");
     CHECK(!cJSON_GetObjectItemCaseSensitive(saved, "tRC"));
     round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "busy");
     CHECK(pc_test_service_timing_parameters() == saved);
@@ -1283,7 +1446,7 @@ static void timing_storage_check(void)
         delivery_allocations = 0U; delivery_fail_at = failure;
         timing_allocation_balance = 0;
         pc_json_configure_allocator(timing_allocator, timing_free);
-        int result = pc_test_service_start(&start, 17U, &response);
+        int result = pc_test_service_start(PC_COMMAND_START_TEST, &start, 17U, &response);
         pc_json_configure_allocator(NULL, NULL);
         if (result == PC_DISPATCH_RESPONSE_READY) break;
         CHECK(result == PC_DISPATCH_ERROR && !pc_test_service_busy());
@@ -1294,14 +1457,32 @@ static void timing_storage_check(void)
     CHECK(failure < 64U && queue_calls == calls + 1U);
     cJSON_free(json); cJSON_Delete(root);
     string_is(pc_test_service_timing_parameters(), "Freq", "1600");
+    string_is(pc_test_service_timing_parameters(), "CASReadLatency", "20");
+    string_is(pc_test_service_timing_parameters(), "CASWriteLatency", "12");
     inject(RK_RESPONSE_COMPLETE, 0U);
     CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
 
-    /* 新请求未填时序时不沿用上一次；保持RK原有无参数命令格式。 */
+    /* 新请求显式空对象恢复默认时序，不沿用上一次；保持RK原有无参数命令格式。 */
     round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
-    CHECK(!pc_test_service_timing_parameters() && queued_request.command_id == 17U);
+    CHECK(cJSON_IsObject(pc_test_service_timing_parameters()) &&
+          pc_test_service_timing_parameters()->child == NULL && queued_request.command_id == 17U);
     inject(RK_RESPONSE_COMPLETE, 0U);
     CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
+    /* PARA单独提供写延迟时，只保存本次值，不从上一请求补出读延迟。 */
+    root = cJSON_Parse(START_JSON); CHECK(root);
+    CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmType", cJSON_CreateString("parametric")));
+    CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmName", cJSON_CreateString("idd_0")));
+    timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters"); CHECK(cJSON_IsObject(timing));
+    CHECK(cJSON_AddStringToObject(timing, "CASWriteLatency", "8"));
+    json = cJSON_PrintUnformatted(root); CHECK(json); cJSON_Delete(root);
+    para_command(PC_COMMAND_PARA_START, json, 37U, NULL); cJSON_free(json);
+    CHECK(cJSON_IsObject(pc_test_service_timing_parameters()) &&
+          cJSON_GetArraySize(pc_test_service_timing_parameters()) == 1 && queued_request.command_id == 21U);
+    string_is(pc_test_service_timing_parameters(), "CASWriteLatency", "8");
+    CHECK(!cJSON_GetObjectItemCaseSensitive(pc_test_service_timing_parameters(), "CASReadLatency"));
+    inject(RK_RESPONSE_COMPLETE, 0U);
+    CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
+    root = decode(&response, PC_COMMAND_PARA_RESULT, 78U); cJSON_Delete(root);
     round_end();
     message("PASS: timing RAM copy lifetime, partial values, rejection preservation, allocation faults, unchanged RK command\n");
 }
@@ -1365,11 +1546,13 @@ static void slt_flow_check(void)
     CHECK(!pc_test_service_busy());
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
     cJSON *timed = cJSON_Parse(SLT_START); CHECK(timed);
-    cJSON *timing = cJSON_AddObjectToObject(timed, "TimingParameters"); CHECK(timing);
-    CHECK(cJSON_AddStringToObject(timing, "CASLatency", "20"));
+    cJSON *timing = cJSON_GetObjectItemCaseSensitive(timed, "TimingParameters"); CHECK(cJSON_IsObject(timing));
+    CHECK(cJSON_AddStringToObject(timing, "CASReadLatency", "20"));
+    CHECK(cJSON_AddStringToObject(timing, "CASWriteLatency", "12"));
     pc_test_start_view_t timed_start;
     CHECK(pc_slt_start_parse(timed, &timed_start) == PC_TEST_JSON_OK);
     unsigned previous_on = power_on_calls, previous_off = power_off_calls, previous_boot = boot_calls;
+    const cJSON *previous_timing = pc_test_service_timing_parameters();
     unsigned failure;
     for (failure = 0U; failure < 64U; ++failure) {
         delivery_allocations = 0U; delivery_fail_at = failure; timing_allocation_balance = 0;
@@ -1380,11 +1563,12 @@ static void slt_flow_check(void)
         CHECK(result == PC_DISPATCH_ERROR && timing_allocation_balance == 0);
         CHECK(!pc_test_service_busy() && !pc_power_service_busy());
         CHECK(power_on_calls == previous_on && power_off_calls == previous_off && boot_calls == previous_boot);
-        CHECK(!pc_test_service_timing_parameters());
+        CHECK(pc_test_service_timing_parameters() == previous_timing);
     }
     CHECK(failure < 64U);
     cJSON_Delete(timed);
-    string_is(pc_test_service_timing_parameters(), "CASLatency", "20");
+    string_is(pc_test_service_timing_parameters(), "CASReadLatency", "20");
+    string_is(pc_test_service_timing_parameters(), "CASWriteLatency", "12");
     CHECK(!cJSON_GetObjectItemCaseSensitive(pc_test_service_timing_parameters(), "Freq"));
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
     slt_complete(0);
@@ -1419,6 +1603,8 @@ static void slt_flow_check(void)
         CHECK(cJSON_ReplaceItemInObjectCaseSensitive(start, "reboot", cJSON_CreateBool(reboot)));
         char *json = cJSON_PrintUnformatted(start); CHECK(json);
         round_command(PC_COMMAND_SLT_START, json, "accepted", NULL);
+        CHECK(cJSON_IsObject(pc_test_service_timing_parameters()) &&
+              pc_test_service_timing_parameters()->child == NULL);
         round_command(PC_COMMAND_SLT_START, json, "failed", "busy");
         cJSON_free(json); cJSON_Delete(start);
         slt_complete(0);
@@ -1494,6 +1680,7 @@ void test_main(void)
 {
 #if defined(PC_TEST_ROUND_TEST)
     round_flow_check();
+    para_flow_check();
     timing_storage_check();
 #if defined(PC_POWER_SEQUENCE_TEST) || (defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION)
     slt_flow_check();
@@ -1511,12 +1698,8 @@ void test_main(void)
 #endif
     pc_dispatch_response_t response;
     CHECK(!pc_test_service_busy());
-    confirmed = 0;
-    start_expect(START_JSON, "otaNotReady");
-    CHECK(fru_calls == 0U && queue_calls == 0U);
-    confirmed = 1;
 #if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
-    start_expect("{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":true,\"bootMode\":\"emmc\"}", "notConfigured");
+    start_expect("{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":true,\"bootMode\":\"emmc\",\"TimingParameters\":{}}", "notConfigured");
     fru_calls = 0U;
 #endif
 #if defined(B1_RK_UART)
@@ -1535,15 +1718,8 @@ void test_main(void)
     measurement_start_error = 0;
     fru_calls = 0U;
 #endif
-    start_expect("{\"algorithmType\":\"functional\",\"algorithmName\":\"unknown\",\"algorithmIndex\":37,\"power\":null,\"reboot\":false,\"bootMode\":null}", "notSupported");
-    start_expect("{\"algorithmType\":\"parametric\",\"algorithmName\":\"idd_0\",\"algorithmIndex\":37,\"power\":null,\"reboot\":false,\"bootMode\":null}", "notSupported");
-    const ota_download_state_t locked[] = {OTA_DOWNLOAD_RECEIVING, OTA_DOWNLOAD_READY, OTA_DOWNLOAD_COMMIT_UNKNOWN};
-    for (unsigned i = 0U; i < sizeof(locked) / sizeof(locked[0]); ++i) {
-        download_state = locked[i];
-        start_expect(START_JSON, "busy");
-        CHECK(fru_calls == 0U && queue_calls == 0U && !pc_test_service_busy());
-    }
-    download_state = OTA_DOWNLOAD_IDLE;
+    start_expect("{\"algorithmType\":\"functional\",\"algorithmName\":\"unknown\",\"algorithmIndex\":37,\"power\":null,\"reboot\":false,\"bootMode\":null,\"TimingParameters\":{}}", "notSupported");
+    start_expect("{\"algorithmType\":\"parametric\",\"algorithmName\":\"idd_0\",\"algorithmIndex\":37,\"power\":null,\"reboot\":false,\"bootMode\":null,\"TimingParameters\":{}}", "notSupported");
     fru_error = 1;
     start_expect(START_JSON, "flashError");
     CHECK(queue_calls == 0U && !pc_test_service_busy());
@@ -1562,7 +1738,7 @@ void test_main(void)
     CHECK(pc_test_start_parse(root, &view) == PC_TEST_JSON_OK);
     unsigned before = queue_calls;
     pc_json_configure_allocator(no_memory, free);
-    CHECK(pc_test_service_start(&view, 17U, &response) == PC_DISPATCH_ERROR);
+    CHECK(pc_test_service_start(PC_COMMAND_START_TEST, &view, 17U, &response) == PC_DISPATCH_ERROR);
     CHECK(queue_calls == before && !pc_test_service_busy());
     pc_json_configure_allocator(NULL, NULL);
     cJSON_Delete(root);
@@ -1575,9 +1751,9 @@ void test_main(void)
     CHECK(queue_calls == before);
     CHECK(pc_dispatch_next_response(18U, &response) == 0);
 
-    /* 在途时电源/Boot/OTA写入全部拒绝；心跳与OTA只读查询仍可使用。 */
+    /* 在途时电源/Boot修改拒绝；心跳可用，历史升级编号始终不支持。 */
     const uint16_t commands[] = {PC_COMMAND_POWER_ON, PC_COMMAND_POWER_OFF, PC_COMMAND_RESET_RK,
-        PC_COMMAND_SET_BOOT_MODE, PC_COMMAND_SET_DDR_CONFIG, PC_COMMAND_FIRMWARE_UPGRADE_REQUEST};
+        PC_COMMAND_SET_BOOT_MODE, PC_COMMAND_SET_DDR_CONFIG};
     for (unsigned i = 0U; i < sizeof(commands) / sizeof(commands[0]); ++i) {
         CHECK(dispatch(commands[i], "{}", 18U, &response) == PC_DISPATCH_RESPONSE_READY);
         cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 18U);
@@ -1590,13 +1766,14 @@ void test_main(void)
         char *json = cJSON_PrintUnformatted(root); CHECK(json);
         CHECK(dispatch(PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, json, 18U, &response) == PC_DISPATCH_RESPONSE_READY);
         cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 18U);
-        string_is(body, "errorCode", "busy"); cJSON_Delete(body); cJSON_free(json); cJSON_Delete(root);
+        string_is(body, "errorCode", "notSupported"); cJSON_Delete(body); cJSON_free(json); cJSON_Delete(root);
     }
-    CHECK(ota_calls == 0U);
     CHECK(dispatch(PC_COMMAND_CLIENT_HEARTBEAT, "{}", 18U, &response) == PC_DISPATCH_RESPONSE_READY);
     root = decode(&response, PC_COMMAND_SERVER_HEARTBEAT, 18U); CHECK(root->child == NULL); cJSON_Delete(root);
     CHECK(dispatch(PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, "{\"action\":\"mcu_query\"}", 18U, &response) == PC_DISPATCH_RESPONSE_READY);
-    CHECK(ota_calls == 1U && pc_test_service_busy());
+    root = decode(&response, PC_COMMAND_COMMAND_RESP, 18U);
+    string_is(root, "errorCode", "notSupported"); cJSON_Delete(root);
+    CHECK(pc_test_service_busy());
 
     /* 错误cookie、无连接轮询均不能偷走当前连接的合法结果。 */
     inject(RK_RESPONSE_COMPLETE, 0U); queued_response.cookie++;
@@ -1651,7 +1828,7 @@ void test_main(void)
     inject(RK_RESPONSE_COMPLETE, 0U); pc_dispatch_poll(); CHECK(!pc_test_service_busy());
 
     /* 显式有限等待超时不是芯片FAIL；只有RECOVERED解除未知执行状态。 */
-    start_expect("{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":null,\"reboot\":false,\"bootMode\":null,\"timeoutMs\":1200000}", NULL);
+    start_expect("{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":null,\"reboot\":false,\"bootMode\":null,\"timeoutMs\":1200000,\"TimingParameters\":{}}", NULL);
     CHECK(queued_request.timeout_ms == 1200000U);
     inject(RK_RESPONSE_TIMEOUT, 0U);
     CHECK(pc_dispatch_next_response(19U, &response) == 1); status_is(&response, "timeout", 19U);

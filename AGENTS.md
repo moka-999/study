@@ -40,10 +40,11 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 - 初版固定`Version=1`、`Flag=8`、`ServiceID=0`。非法头前缀逐字节丢弃并有界寻找下一头；两次完整帧消费之间累计丢弃超过4096字节才关闭连接。完整帧的UTF-8/JSON错误回`0006 failed/invalidArgument`并继续；认可长度后不扫描正文内部。仍无法收齐的半帧超过500ms字节间空闲则断连，正常空闲不受此限制。详见[TCP接收恢复](doc/pc_tcp_recovery_20260929.md)。
 - 每条连接中PC和MCU分别维护发送u32 Seq，每发一帧本端加1，不回显请求Seq；接收不改变本端发送计数，两个方向允许同号且可同时发送。Seq仅是发送流水号，业务关联另行定义；绝不能把内部RK Seq写入PC响应头。ServiceID保留2字节但固定0、不参与分发。首值、重连初始化和回绕边界仍待PC双方最终确认，暂定实现与验证状态见任务清单，测试通过不等于批准。
 - 心跳固定为PC主动发送`CMD_CLIENT_HEART_BEAT(0x0002)+{}`，MCU返回`CMD_SERVER_HEART_BEAT(0x0001)+{}`，新合同使用MCU本端递增Seq；心跳不承载其他状态。
-- 测试须先0106 `{}`建立当前连接的整轮，再串行0103/0105 FUNC或010A/010B SLT，最后0107提交errorchip失败数组。mirrorIndex 0/1/2映射两组LPDDR/eMCP灯，未知编号整包拒绝；0701/0702/0703已从固件删除，合法旧请求回0006/notSupported。0108 PARA预留，0109仅MCU方向。提前0107只废弃结果、不取消RK或提前解除busy；未入RK队列的FUNC不再投递。SLT固定slt/memtest86、index=null，只准备电源/Boot，不等RK心跳或检查EDK；同连接010B回收占用，断线不自动认领或释放SLT。0106按B2已知模式显示常温/高温闪，未知镜像灭；轮内允许B2部分更新，0107后只缓存模式、不覆盖最终结果。
+- 测试须先0106 `{}`建立当前连接的整轮，再串行0103/0105 FUNC、0108/0109 PARA或010A/010B SLT，最后0107提交errorchip失败数组。mirrorIndex 0/1/2映射两组LPDDR/eMCP灯，未知编号整包拒绝；0701/0702/0703已从固件删除，合法旧请求回0006/notSupported。0108按FUNC格式接入16项IDD名称，0109仅MCU方向；先只向RK下发21..36编号，标准IDD窗口/判限待接。提前0107只废弃结果、不取消RK或提前解除busy；未入RK队列的FUNC/PARA不再投递。SLT固定slt/memtest86、index=null，只准备电源/Boot，不等RK心跳或检查EDK；同连接010B回收占用，断线不自动认领或释放SLT。0106按B2已知模式显示常温/高温闪，未知镜像灭；轮内允许B2部分更新，0107后只缓存模式、不覆盖最终结果。
 - TCP解析必须支持半包、粘包和连续多包；第一组测试JSON已确认，其余命令与字段分批冻结。
 - 已固定引入cJSON v1.7.19，使用FreeRTOS堆、递归深度16；完整PDU上限4096字节。
-- 固件升级沿用0x0901–0x0903，MCU动作统一`mcu_begin/mcu_write/mcu_finish/mcu_query/mcu_cancel`；对应五个`rk_*`仅保留并回notSupported，不访问Flash/RK。W25Q256为RK预留0x00410000和0x00C10000起始的两块8MiB，不定义RK包体。旧版首次迁移须显式旧动作选项，见`doc/ota_daily_download.md`。
+- FUNC0103、PARA0108、SLT010A均必须携带`TimingParameters`对象；默认时序传`{}`，缺失或null回invalidArgument。12个子字段可部分提供字符串，读/写延迟分别使用`CASReadLatency`/`CASWriteLatency`，不再接受`CASLatency`，不继承上次请求；当前只复制到RAM，尚不写RK寄存器。旧包补字段后必须重算Length。
+- MCU升级已移除；两板恢复128KiB精简Boot（0x08000000）＋单App（0x08020000），合并文件一次烧录，不含OTA/回滚。0x0901～0x0903仅保留编号，合法旧请求回0006/notSupported，不访问Flash/RK。W25仍保留0x00410000和0x00C10000起始的两块8MiB RK空间；见[直接烧录](doc/direct_flash.md)。
 
 ### MCU–RK（2026-09-23替换后的协议）
 
@@ -52,14 +53,14 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 ```
 - CRC = Modbus CRC-16（多项式0x8005，右移实现0xA001，初值0xFFFF）。HCRC覆盖前3字节；FCRC仅覆盖Seq及TLV，不含Length。
 - TLV 单元：`[Type:2B BE][TLV_Len:2B BE][Value]`；Value内多字节整数为小端。
-- 命令容器`0x5000`的前两字节是小端CmdID，任务仅发送无参数命令1..20；17=MATS，21..36的IDD不宣称支持。普通心跳为Length=0、零TLV的16字节完整帧；接收仍兼容0x0000空Value。
+- 命令容器`0x5000`的前两字节是小端CmdID，任务发送无参数编号1..20（FUNC，17=MATS）或21..36（PARA，名称按idd_0等精确匹配）。101A动作bool（1进入/0退出）和7018寄存器地址u32LE仅准备编解码，正式任务尚不附带。普通心跳为Length=0、零TLV的16字节完整帧；接收仍兼容0x0000空Value。
 - RK所有上行帧统一填写RK最近收到的MCU Seq，不回显原测试命令Seq、不使用RK自身心跳计数；MCU下行命令/心跳仍共用递增u64流水号。
 - 测试中进度帧同帧携带`0x5001`算法号u16LE和`0x3016`进度u8（0..100），各一次；先检查Seq窗口和在途算法号，单独0x3016无效。RK按定时器发送，允许窗口内Seq滞后及多帧同Seq；仅保存参考值，不作为完成/ready或自动恢复依据，不增加PC JSON字段。
 - 最终结果为单个3/5/7 TLV包：5001算法u16LE、1017整体FAIL位u8、9002耗时u64LE各一次；0～2组相邻9001地址u64LE＋3001 die u8为失败明细。die仅0/1且唯一，1017=0无失败、1有失败；零地址原样保留。三个标量和失败对可換序，地址必须紧跟所属die；旧四详情/独立FAIL不再拼接完成。
 - 帧内TLV数量为0..16；Length仅允许0或4..1024，1..3仍非法。新合同及验证见[增量记录](doc/rk_protocol_update_20260930.md)。
 - 状态机 5 态：IDLE→HEADER→DATA→CRC→FOOTER；仅用于MCU–RK串口链路。
 
-> 旧PC–TLV `dispatch.c/.h`已删除。RK参考工程中的POSIX/UART演示代码不直接移植，复用本工程串口/FreeRTOS并补齐边界。V2正式0103支持用户确认的外部已启动模式：power/bootMode均null、reboot=false，仅执行功能算法，不接管电源/启动；默认不设算法等待超时。B1也已接入该模式，但额外要求真实电源状态ON，测量用实际采样。B1完整上电/冷重启已装载可调初值，采用本轮普通心跳就绪与直接关电；训练安全范围交由PC确认，MCU仍校验TPS范围和步进。默认OFF，V2真实电源配置仍空；见[当前业务配置与验收](doc/b1_power_business_20261013.md)。`ENABLE_RK_GATEWAY_TEST`仅保留旧隔离模拟用途，真实RK接入不打开该开关。外部已启动模式见[真实RK接入](doc/rk_real_test_20260928.md)及[B1同步记录](../b1/docs/real_test_sync_20260929.md)。
+> 旧PC–TLV `dispatch.c/.h`已删除。RK参考工程中的POSIX/UART演示代码不直接移植，复用本工程串口/FreeRTOS并补齐边界。V2正式0103支持用户确认的外部已启动模式：power/bootMode均null、reboot=false，仅执行FUNC/PARA算法，不接管电源/启动；默认不设算法等待超时。B1也已接入该模式，但额外要求真实电源状态ON，测量用实际采样。B1完整上电/冷重启已装载可调初值，采用本轮普通心跳就绪与直接关电；训练安全范围交由PC确认，MCU仍校验TPS范围和步进。默认OFF，V2真实电源配置仍空；见[当前业务配置与验收](doc/b1_power_business_20261013.md)。`ENABLE_RK_GATEWAY_TEST`仅保留旧隔离模拟用途，真实RK接入不打开该开关。外部已启动模式见[真实RK接入](doc/rk_real_test_20260928.md)及[B1同步记录](../b1/docs/real_test_sync_20260929.md)。
 
 V2可显式启用`ENABLE_V2_POWER_SIMULATION`：沿用上述正式任务及真实RK，仅电源/Boot/测量改用内存模型，PC响应不附加`simulation`字段；0601在测试中只读且不因算法在途回busy。是否模拟以构建配置与安装记录为准，不能因无标记就认作实测。默认关闭、B1禁止，与旧网关联调开关互斥，不作为真实电源/IDD验收。详见[V2电源模拟](doc/v2_power_simulation_20260928.md)。
 
@@ -78,6 +79,7 @@ V2可显式启用`ENABLE_V2_POWER_SIMULATION`：沿用上述正式任务及真�
 | `App/tasks/b2/` | 独立B2任务及请求/应答队列；IP和整轮灯态由TCP上下文顺序应用，不混入RK任务 |
 | `App/tasks/common/` | LED、采样监控等不隶属单一通信对象的正式任务 |
 | `App/tasks/test/` | Mock、自检和逻辑分析仪波形任务；不代表生产业务 |
+| `boot/` | 独立精简Boot、FRU准备和跳转；由本工程合并构建，无OTA |
 | `BSP/` | 板级驱动：AD7124 / Flash / IIC / LED / PCF8574 / WDT |
 | `HAL_Drv/` | 硬件抽象：uart_router.c（串口路由）等 |
 | `Core/` `Drivers/` `Middlewares/` | 生成代码/第三方不作无关修改；允许USER CODE区及第八节列明的已有恢复项，修改后运行相关构建检查 |
@@ -98,22 +100,20 @@ powershell -ExecutionPolicy Bypass -File tools/dev.ps1 build
 # MCP4725 Boot电压/DAC码离线合同：powershell -ExecutionPolicy Bypass -File tools/dev.ps1 boot-test
 ```
 
-### 烧录（SWD）— 下列仅适用于非OTA旧布局
+### 直接烧录（SWD）
 
-空白板首部署选择VS Code非默认“🆕 V2/B1 空白板 Boot+App 首烧”任务，或`tools/first_flash.ps1 -Action deploy -Version <版本> -Serial <序列号> -ConfirmIdle YES -ConfirmBlank YES`：先构建精确包再烧写；仅构建交付仍用`-Action build`及包内`flash.ps1`。V2任务保留电源模拟/MATS第一颗假FAIL，B1真实且固定UART4；共用`../bootloader/tools/first_flash.py`。备份、全空检查、B/A1/恢复包回读通过后才由C接口提交初始日志，不提供force或自动清空旧板。与日常Ctrl+Shift+B分开，空板实测仍待；见[首烧及J5接线说明](../bootloader/README.md#空白板首次部署v2--b1)。
+2026-10-28起B1/V2为精简Boot＋单App：Boot位于`0x08000000`占128KiB，App位于`0x08020000`占1920KiB；最终ELF/BIN合并两者，不生成A1/A2或`.ota`。两工程各自Ctrl+Shift+B自动编译、检查、备份内部Flash、直接写入BIN并回读、复位运行；空白板和原OTA板使用同一入口。按快捷键即确认RK/温控空闲、PC断开并允许MCU复位。B1复位仍在RAM初始化前关闭RK/DDR。
 
-日常修改App，两板各自VS Code默认Ctrl+Shift+B均为一键ST-Link下载：固定各自板型、自动选择唯一烧录器、读取W25已确认版本后patch+1，自动构建/打包/备份/下载并由完整B安装。按快捷键即确认RK/温控空闲、电源OFF且PC断开；V2默认保留电源模拟/MATS第一颗假FAIL，B1使用真实驱动。CLI为`ota-swd -ConfirmIdle YES`，可选`-Version`/`-Serial`，V2模拟选项仍须显式传入。只构建用`ota-build -Version <新版本>`，V2网络入口`ota-net`保持不变。B1复用同级test/bootloader脚本，不用于空板首部署；新SWD编排尚待真板验收。操作、故障记录与边界见[日常下载说明](doc/ota_daily_download.md)。
-
-独立电脑端工具：V2用`tools/v2_ota.py`/`start_v2_ota.cmd`，B1用其工程的`tools/b1_ota.py`/`start_b1_ota.cmd`；复用`tools/ota_client.py`，分别固定板型。两工程各自的`ota-build`生成含公共实现与.ota的独立ZIP，运行只需Python 3.10+。查询只读；升级需人工确认空闲、健康及OFF，不自动关电/清busy/重试finish，无跨连接续传。源码侧B1复用同级test工具，交付ZIP不依赖源码树；不能用V2包升级B1。见[独立工具说明](doc/ota_standalone_tools_20261015.md)。
-
-> 已部署完整OTA的板卡禁止用下面的`build_debug/boot.elf`覆盖B，或绕过启动日志直接覆盖App。OTA使用同级`../bootloader`完整B及`ENABLE_OTA_BOOT=ON`的槽限App；构建、备份、安装与当前板卡状态见[OTA网络验证](doc/ota_network_validation_20260916.md)。
-```bash
-STM32_Programmer_CLI.exe -c port=SWD -w build_debug/boot.elf   # Bootloader @ 0x08000000
-STM32_Programmer_CLI.exe -c port=SWD -w build_debug/test.elf   # App @ 0x08020000
-STM32_Programmer_CLI.exe -c port=SWD -rst                      # 复位运行
+```powershell
+# 只构建，不访问设备
+.\tools\dev.ps1 build
+# B1直接烧录；V2不带模拟参数时构建实际驱动配置
+.\tools\dev.ps1 flash -ConfirmIdle YES
+# V2日常联调与默认快捷键配置
+.\tools\dev.ps1 flash -ConfirmIdle YES -PowerSimulation -MatsFailTest
 ```
-> Bootloader = 最小跳转 (boot/boot.s, 校验 App 向量表后跳转, 无升级逻辑)。
-> 上述普通App编译在0x08020000。完整OTA另外限制A1/A2共同容量为896KiB，发布一个带地址修正表的`.ota`包；不依赖B2实现烧录，但升级前PC须独立协调B2维护。
+
+产物位于`build/standalone/Debug/`（可选Release），V2为test.elf/bin，B1为b1.elf/bin。版本不自动递增，可显式指定-Version；多探针指定-Serial。各工程自带`tools/direct_flash.py`，不依赖同级Bootloader。默认SWD Normal/SWrst/950kHz，不要求B1 J5引出NRST；不改Option Bytes、不全擦、不操作W25。原OTA板会替换为精简Boot＋单App，不再回滚。下载工具不访问W25；有器件时Boot在复位后维护FRU。失败保留备份，不自动重试。工厂GUI及接线见[直接烧录说明](doc/direct_flash.md)。
 
 ### 工具链路径
 ```
@@ -123,16 +123,18 @@ C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.
 ### 串口 / 网络
 - 串口：2026-09-23实测COM5 = CH340 → USART1（阿波罗阶段接PC模拟RK3588）；每次先枚举确认，不硬编码旧COM3。
 - 当前测试MCU IP：`192.168.1.201:8888`，继续使用本地配置。
-- 正式B1 IP由B2 MCU通知testerId，再与槽位码加1组合：PC=`192.168.210.9`，B2末段=`10*T`，B1末段=`10*T+S`（T=1～21，S=1～8）。10号/18号B2分别为`.100`/`.180`。0004收到不同tester/slot后在无已接受PC连接、无测试/电源/OTA在途时动态切换，否则整包busy；同IP不重配。联调掩码255.255.255.0、网关0.0.0.0，RAM保存、不改FRU；首次配置前保留本地测试地址。真实八槽上线、首次发现及默认IP冲突隔离仍待系统验收，见[需求基线§1.1](doc/requirements_baseline.md)。
+- 正式B1 IP由B2 MCU通知testerId，再与槽位码加1组合：PC=`192.168.210.9`，B2末段=`10*T`，B1末段=`10*T+S`（T=1～21，S=1～8）。10号/18号B2分别为`.100`/`.180`。0004收到不同tester/slot后在无已接受PC连接、无测试/电源在途时动态切换，否则整包busy；同IP不重配。联调掩码255.255.255.0、网关0.0.0.0，RAM保存、不改FRU；首次配置前保留本地测试地址。真实八槽上线、首次发现及默认IP冲突隔离仍待系统验收，见[需求基线§1.1](doc/requirements_baseline.md)。
 
 ### 崩溃诊断（HardFault 排查）
 - 诊断地址随链接变化，读写前必须从**实际烧录的同一份ELF**用`arm-none-eabi-nm -S -n`查询`crash_log`（16×uint32）和`tcp_diag`（8×uint32）。禁止把历史地址的`-w32`命令直接套用到新镜像。`.crash_log`为NOLOAD，复位不清零。
 - 反汇编：`arm-none-eabi-objdump -d --start-address=<pc-0x100> --stop-address=<pc+0x100> test.elf`
 - **判断异常栈**：用 `EXC_RETURN(LR) bit2`（1=PSP线程 / 0=MSP handler），**不要**用 `__get_CONTROL()&2`（进异常时硬件已清 SPSEL，判断必错）
 
-### App 偏移启动坑（20260817 实测发现）
-- **`system_stm32h7xx.c` 的 `USER_VECT_TAB_ADDRESS` 必须解除注释**，否则 `SCB->VTOR` 设置代码被 `#if defined(...)` 编译掉 → 向量表留在 0x08000000（bootloader 空白区）→ 任何中断触发即 IACCVIOL 跑飞。CubeMX 重生成会把它注释回去，须恢复（VECT_TAB_OFFSET=0x020000 已设）。
-- 诊断手法：`-coreReg PC LR MSP XPSR` 读 PC 定位跑飞点；`-r32 0xE000ED28 1`（CFSR）看故障类型；`-r32 0xE000ED08 1` 看 VTOR。
+### Boot＋单App启动与向量
+
+- Boot向量位于`0x08000000`；App向量位于`0x08020000`，`SCB->VTOR`使用`g_pfnVectors`。CubeMX重生成后核对实际链接位置，不使用手写固定偏移。
+- B1的`Reset_Handler`在RAM初始化前拉低PC6/PC7/PG11；不能因删除MCU Boot而删除耦合复位关电。
+- 诊断用实际烧录同份ELF的符号；硬件运行及Option Bytes仍需实板核验。
 
 ### 运行测试
 ```bash
@@ -169,14 +171,14 @@ python -B -X utf8 tests/rk_gateway_network_test.py --serial COM5 --report build/
 2. **RK背压**：`rkRequestQueue`与`rkResponseQueue`各8槽，但只允许一个已发出的测试在途。结果队列满时保留待交付副本，不取下一请求。`uart_send`整帧入队失败返回TX_FAILED，不自动回插或重发。
 3. **RK结果匹配**：RK填最近收到的MCU Seq，仅按本次命令至最新成功入UART队列Seq窗口过滤，允许滞后/重复。完整3/5/7 TLV包原子校验、算法匹配才交付一次；残缺/矛盾/重复die拒绝并保持等待。完成后重复包忽略，无自动ACK/重发；同算法旧结果被重标当前窗口Seq无法区分，不宣称执行实例级防重放。
 4. **超时**：timeout_ms=0表示不限制算法等待（用户确认十几分钟算法不设时限）；非零仍为显式最终结果时限。超时只报一次TIMEOUT，RK状态未知时暂停后续命令。匹配迟到结果/B1确定掉电通过内部RECOVERED解除未知，不再报成功；恢复通知不得覆盖尚未交付的TIMEOUT。无自动重试，心跳不代表算法完成或超时恢复；B1启动编排按新约定使用本轮普通心跳确认初始化。
-5. **正式业务门禁**：外部已启动模式仅下发功能算法；B1完整电源/Boot路径采用可调初值，PC确认训练安全范围，MCU校验TPS编码并等待本轮有效普通心跳，保留notReady/otaNotReady、互斥及故障处理。0105每算法一包、两颗mirrorIndex=0/1，siteId/measurementData顶层共享；缺失编号/测量如实留空。断线不取消算法，新测试/电源改动/升级写在途busy，handler不阻塞等结果。V2显式MATS假FAIL只改第一颗PC视图，第二颗真实；B1禁止。
+5. **正式业务门禁**：外部已启动模式只下发FUNC/PARA算法编号；B1完整电源/Boot路径采用可调初值，PC确认训练安全范围，MCU校验TPS编码并等待本轮有效普通心跳，保留notReady、互斥及故障处理。0105/0109每算法一包、两颗mirrorIndex=0/1，siteId/measurementData顶层共享；缺失编号/测量如实留空。断线不取消算法，新测试/电源改动在途busy，handler不阻塞等结果。V2显式MATS假FAIL只改第一颗PC视图，第二颗真实；B1禁止。
 6. **D-Cache 已关** → 无 cache 一致性顾虑，**勿再加 `SCB_InvalidateDCache_by_Addr`**（否则 UsageFault 升级 HardFault）。
 7. **DMA 够不到 DTCMRAM**（DMA 在 D2 域），DMA 缓冲放 AXI SRAM (RAM, 0x24000000)。
 8. **FreeRTOS 堆(128KB)手动挪到 AXI SRAM**（`heap_4.c` 的 `.heap` section + linker），不是 CubeMX 默认位置。
 9. **SPI按板型分配**：Apollo V2的SPI2仅给AD7124开发（Mode 3），B2链路另用SPI3（PA15/PB3/PB4/PB5）；B1用SPI2从机接B2、SPI4主机接AD7124。B2任务独立于RK，DMA1 Stream3/4与`.b2_dma` AXI缓冲专用，禁止占用UART的Stream0～2。
 10. **自定义接口归属**：总线实例统一由`board_interfaces.h`声明，UART内部钩子只在`uart_hw.h`；RK任务用`rk_link_next_sequence()`分配独立序号，禁止外部直接修改计数器。`uart_start_all()`在调度前初始化TX互斥锁；分配失败拒绝发送。注释/风格及剩余耦合约束见`doc/code_quality_review.md`。
 11. **RK解析错误必须上送调用方**：tlv_sm_feed完成后还须检查tlv_sm_get_frame；负数失败、0为零TLV心跳。Length为0或4..1024，最多16 TLV；底层保留未知TLV，最终业务只接受3/5/7合同，不能部分交付。tlv_unpack输入从5A起的完整帧和真实长度。V2/B1字节间门限均100ms，连续完整帧无需外部reset。
-12. **信息类响应的数据源**：固件版本、FRU和测试仪信息响应每次通过加载接口读取W25Q256持久化记录，禁止直接使用`firmware_version_current()`或编译期常量组帧。完整OTA由B同步运行槽版本，OTA查询每次加载并与启动记录交叉核对；普通镜像/FRU的首次初始化兼容路径另行保留，不能借OTA接入擅自删除。OTA接入范围与硬件验收状态见任务清单。
+12. **信息类响应的数据源**：0101/0102加载W25Q256的FRU，返回测试仪名称、硬件版本及测试板名称；testerVersion不是MCU固件版本。FRU首次初始化/旧格式迁移由Boot完成，正式App只读。2026-11-02用户确认B1已焊MCU W25Q256，B1/V2的`board_storage_config.h`默认`BOARD_W25_PRESENT=1`；无器件板须改0并重编完整Boot＋App，才跳过器件并使用常量。B1启用镜像已构建，QSPI及首启待实板验收；器件/FRU失败会停在Boot。App启动不读写固件版本、镜像CRC或升级状态；旧版本区、MCU包/启动日志和RK预留地址均不访问或擦除。详见[Flash布局](doc/flash_layout.md)。
 
 ---
 
@@ -194,7 +196,7 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 
 关键硬件边界：
 
-- B1 UART4（PA11/PA12）固定经RS0102对接RK UART0_M0跑协议；USART2（PD5/PD6）经RS0102只接收RK UART2_M0_DEBUG日志，USART1（PA9/PA10）输出所选MCU/RK日志。编译指定默认、运行时本地`log mcu`/`log rk`加换行切换，不写Flash、不转发输入给RK；当前115200/8N1仍待真板核对。V2的USART1仍是协议口，不能照搬B1日志分配。
+- B1 UART4（PA11/PA12）固定经RS0102对接RK UART0_M0跑协议；USART2（PD5/PD6）经RS0102双向连接RK UART2_M0_DEBUG，USART1（PA9/PA10）输出所选MCU/RK日志。MCU模式处理本地命令，`log rk`加换行后转发输入；RK模式只截获行首完整`log mcu`加换行返回MCU，控制字符原样转发，切换不写Flash。当前115200/8N1及双向电气仍待真板验收。V2的USART1仍是协议口，不能照搬B1日志分配。
 - PC6控制`VCC4V0_SYS`，同时给RK806和三颗TPS供电；PC7控制独立的`VCC3V3_SYS`，不能作为暂停RK训练的开关。0831图PG11到TPS EN的串联位为NC，TPS经10kΩ上拉随4V启动，不能把PG11动作当成真实三轨开关。MCU由独立`3V3_MCU`供电，可先运行再启动RK。按用户确认初版直接关电，不等待RK关机应答，故障强制关断保留；这不保证RK写盘已结束。顺序/延时及RK806复位释放前的调压窗口仍须真板验证，旧波形不是批准值。
 - B1初值集中在`../b1/Core/Inc/board_power_config.h`：PC7先开→10ms→PC6开→5ms后写TPS；反序下电间隔10ms；OFF停留500ms、Boot稳定10ms、切换上限2s、RK启动心跳上限60s。main绑定心跳适配器但保持OFF，V2真实电源配置未启用。初值不是硬件验收；PC负责DDR安全范围，MCU只校验TPS物理范围/步进；直接关电不等待RK写盘完成，见`doc/b1_power_business_20261013.md`。
 - `power`表示DDR初始化/训练目标，不能偷换为训练后拉偏。底层训练目标与运行拉偏缓存分离；业务通过`monitor_request_training_power_on`在OFF时选择目标并上电，默认/只选类型时仍为标称。用户接受“天然启动窗口内赶得上”作为开发预设，非硬件验收结论；寄存器可写范围不等于安全训练范围。新PC字段、MCU安全校验、配置变化强制冷重启和RK-ready闭环见任务清单，不绕过缺失的配置门禁，不预设必须依赖B2。
@@ -216,7 +218,7 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 |------|------|--------|
 | RK启动就绪、下电与取消 | 初版按本轮普通心跳就绪、直接关电；RK须确认发心跳时已初始化，取消/超时恢复仍不自动化 | B1/RK实板验收及后续业务评审 |
 | DDR颗粒标志 | 0105固定mirrorIndex=0/1；失败明细由相邻9001+3001配对，未列者PASS；siteId/共轨测量顶层共享，physicalAddr为空 | RK保证0/1实际对应，MCU不按地址猜测 |
-| IDD命令21..36、测量窗口、真实算法时长 | 参考文档标未实现 | RK算法接入时 |
+| IDD进入/保持/退出、有效测量窗口、判限及真实算法 | 21..36编号和0108/0109已接；101A/7018仅编解码准备；全程统计不等于标准窗口 | RK算法实板联调时，见[PARA接入](doc/para_integration_20261026.md) |
 
 旧Type/CRC/0x5002分歧已按用户指示由`tlv_proto`替换；多TLV打包与四TLV结果聚合已实现，旧待定表不再作为开发基线。
 
@@ -229,11 +231,11 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 2. `heap_4.c` 的 `.heap` section → 重加；长期用 `configAPPLICATION_ALLOCATED_HEAP=1`
 3. `stm32h7xx_it.c` 的 `HardFault_Handler_C` → USER CODE 区恢复
 4. USART TX drain → 已用 HAL `TxISR` 钩子根治，it.c 无自定义代码
-5. **`system_stm32h7xx.c`**：`USER_VECT_TAB_ADDRESS` 解除注释 + `VECT_TAB_OFFSET=0x020000`（CubeMX 无对应 UI，重生成后必复位 → 手动恢复，见"App 偏移启动坑"）
-6. **`STM32H743xx_FLASH.ld`**：`FLASH ORIGIN=0x08020000, LENGTH=1920K`（CubeMX 无对应 UI，重生成后复位 0x08000000/2048K → 手动恢复）
+5. **`system_stm32h7xx.c`**：两板VTOR使用实际`g_pfnVectors`；App向量为0x08020000，CubeMX重生成后不得恢复独立App首地址或手写偏移。
+6. **`STM32H743xx_FLASH.ld`**：`BOOT=0x08000000/128K`、`FLASH=0x08020000/1920K`，入口`Boot_Image_Reset`；保留AXI堆、DMA、ETH、崩溃段和实际镜像边界符号。
 7. **`STM32H743xx_FLASH.ld`**：`.rodata`中的`KEEP(*(.firmware_version))`必须保留，否则未接入PC查询前版本元数据会被`--gc-sections`回收
 
-> ✅ 已入 .ioc 自动保留：`SPI2.CPolarity=HIGH + ClockPhase=2EDGE`（**AD7124 模式 3** CPOL=1/CPHA=1，手册 P8 明确"operates in SPI Mode 3"，20260819 修正——此前误判为模式1）；`freertos.c` StartTestTask 自检在 USER CODE 区；boot/ 与顶层 CMakeLists 不受 CubeMX 影响。
+> ✅ 已入 .ioc 自动保留：`SPI2.CPolarity=HIGH + ClockPhase=2EDGE`（**AD7124 模式 3** CPOL=1/CPHA=1，手册 P8 明确"operates in SPI Mode 3"，20260819 修正——此前误判为模式1）；`freertos.c` StartTestTask 自检在 USER CODE 区；顶层 CMakeLists 不受 CubeMX 影响。
 
 ### 测试脚本坑
 - 清串口缓冲前必须确认无在途测试；等待时间过去不等于RK已结束，超时后的RK仍可能执行。
@@ -241,7 +243,7 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 
 ### 内存布局
 - 任务栈：rk 32KB（含心跳）/ tcp 16KB，不再创建独立hb任务；堆128KB，实际余量须以当前镜像运行时测量为准。
-- OTA健康观察对象为默认任务、TCP、监测和RK共四项，B1 OFF时RK仍须推进；不得恢复已删除的HB健康要求或用RK伪报两项进度。
+- 看门狗监测默认任务、TCP、监测和RK四项存活，B1 OFF时RK仍须推进；它不再承担升级健康确认，不阻塞PC业务等待30秒。
 - 确认堆余量用 `xPortGetFreeHeapSize()`
 
 ---

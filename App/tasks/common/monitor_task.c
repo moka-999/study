@@ -7,7 +7,7 @@
  */
 #include "monitor_task.h"
 #include "device_wait.h"
-#include "ota_app.h"
+#include "task_watchdog.h"
 #include "board_interfaces.h"
 #include "mcp4725.h"
 #include "FreeRTOS.h"
@@ -24,10 +24,15 @@ static SemaphoreHandle_t s_memory_io_mutex;
 static mcp4725_t s_boot_dac;
 static boot_mode_t s_boot_mode;
 static uint8_t s_boot_mode_valid;
-static uint8_t s_ota_maintenance;
 static idd_stats_t s_idd_stats; /* 统计独立于最新快照；只在短临界区访问，不含器件IO。 */
 
 #define MEMORY_IO_LOCK_TIMEOUT_MS 500U
+/* 以下是软件调度/失效期限，不是器件已验收的实际采样率。 */
+#define MONITOR_ADC_POLL_MS       10U
+#define MONITOR_STATUS_PERIOD_MS 1000U
+#define MONITOR_INIT_RETRY_MS    1000U
+#define MONITOR_SAMPLE_STALE_MS  1000U
+#define MONITOR_IDLE_DELAY_MS    20U
 
 static void monitor_wait_ms(uint32_t milliseconds)
 {
@@ -66,8 +71,7 @@ int monitor_idd_start(uint32_t duration_ms, uint32_t minimum_samples)
         minimum_samples > duration_ms) return IF_ERR;
     if (!memory_io_take(pdMS_TO_TICKS(MEMORY_IO_LOCK_TIMEOUT_MS))) return IF_TIMEOUT;
     int result = IF_ERR;
-    if (!s_ota_maintenance && ota_app_is_confirmed() &&
-        pwr_ctrl_get_state() == PWR_CTRL_STATE_ON) {
+    if (pwr_ctrl_get_state() == PWR_CTRL_STATE_ON) {
         taskENTER_CRITICAL();
         idd_stats_poll(&s_idd_stats, HAL_GetTick());
         result = idd_stats_begin(&s_idd_stats, HAL_GetTick(), duration_ms, minimum_samples);
@@ -101,26 +105,6 @@ int monitor_idd_get(idd_stats_t *out)
     return 1;
 }
 
-int monitor_ota_enter(void)
-{
-    if (!memory_io_take(pdMS_TO_TICKS(MEMORY_IO_LOCK_TIMEOUT_MS))) return -1;
-    int result = -1;
-    if (!s_ota_maintenance && pwr_ctrl_get_state() == PWR_CTRL_STATE_OFF) {
-        monitor_idd_cancel();
-        s_ota_maintenance = 1U;
-        result = 0;
-    }
-    xSemaphoreGive(s_memory_io_mutex);
-    return result;
-}
-
-void monitor_ota_leave(void)
-{
-    if (!memory_io_take(pdMS_TO_TICKS(MEMORY_IO_LOCK_TIMEOUT_MS))) return;
-    s_ota_maintenance = 0U;
-    xSemaphoreGive(s_memory_io_mutex);
-}
-
 /*
  * 请求的now_ms由调用方在取锁前采集。锁可能等待500ms，必须补偿这段时间，
  * 否则第一轨刚打开就会被process误判成“已等够轨间延时”。保留调用方时基，
@@ -141,7 +125,7 @@ pwr_ctrl_result_t monitor_request_power_on(uint32_t now_ms)
     pwr_ctrl_result_t result;
     if (!memory_io_take_for_power(&now_ms))
         return PWR_CTRL_ERR_RESOURCE_BUSY;
-    result = s_ota_maintenance || !ota_app_is_confirmed() ? PWR_CTRL_ERR_BUSY : pwr_ctrl_request_on(now_ms);
+    result = pwr_ctrl_request_on(now_ms);
     xSemaphoreGive(s_memory_io_mutex);
     return result;
 }
@@ -154,8 +138,7 @@ pwr_ctrl_result_t monitor_request_training_power_on(
         return PWR_CTRL_ERR_RESOURCE_BUSY;
     }
     /* 同一事务内选择目标并启动，防止另一任务在两步之间修改类型或开始采样。 */
-    result = s_ota_maintenance || !ota_app_is_confirmed() ? PWR_CTRL_ERR_BUSY :
-             pwr_ctrl_request_training_on(type, mv, now_ms);
+    result = pwr_ctrl_request_training_on(type, mv, now_ms);
     xSemaphoreGive(s_memory_io_mutex);
     return result;
 }
@@ -189,7 +172,7 @@ monitor_boot_result_t monitor_set_boot_mode(boot_mode_t mode)
     if (mode >= BOOT_MODE_COUNT) return MONITOR_BOOT_ERR_PARAM;
     if (!memory_io_take(pdMS_TO_TICKS(MEMORY_IO_LOCK_TIMEOUT_MS)))
         return MONITOR_BOOT_ERR_BUSY;
-    if (s_ota_maintenance || !ota_app_is_confirmed() || pwr_ctrl_get_state() != PWR_CTRL_STATE_OFF) {
+    if (pwr_ctrl_get_state() != PWR_CTRL_STATE_OFF) {
         xSemaphoreGive(s_memory_io_mutex);
         return MONITOR_BOOT_ERR_STATE;
     }
@@ -243,10 +226,6 @@ pwr_ctrl_result_t monitor_apply_ddr_config(
         return PWR_CTRL_ERR_RESOURCE_BUSY;
     }
 
-    if (s_ota_maintenance || !ota_app_is_confirmed()) {
-        xSemaphoreGive(s_memory_io_mutex);
-        return PWR_CTRL_ERR_BUSY;
-    }
     state = pwr_ctrl_get_state();
     if (state == PWR_CTRL_STATE_OFF) {
         if (steps[DDR_RAIL_VDD1] != 0 || steps[DDR_RAIL_VDD2] != 0 ||
@@ -284,12 +263,49 @@ int monitor_get_latest(monitor_snapshot_t *snapshot)
     available = s_has_snapshot;
     if (available) *snapshot = s_latest;
     taskEXIT_CRITICAL();
+    if (available &&
+        (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON ||
+         (uint32_t)(HAL_GetTick() - snapshot->timestamp_ms) > MONITOR_SAMPLE_STALE_MS)) {
+        /* 任务阻塞或刚下电时，不把最后一次成功值冒充当前有效测量。 */
+        snapshot->memory.valid_mask = 0U;
+    }
     return available;
+}
+
+/* 只有实际尝试的组才进入统计，AD未就绪的轮询不重复计入旧电压。 */
+static void feed_sample_group(const memory_monitor_sample_t *sample,
+                              uint8_t group, uint32_t begin_ms)
+{
+    taskENTER_CRITICAL();
+    (void)idd_stats_feed_groups(&s_idd_stats, begin_ms, HAL_GetTick(), sample, group);
+    taskEXIT_CRITICAL();
+}
+
+/* 0602仍使用单一sampleAgeMs，取两组有效测量中较老的采集起点，避免假刷新。 */
+static void update_snapshot_age(monitor_snapshot_t *snapshot, uint32_t voltage_ms,
+                                uint32_t current_ms, uint32_t now_ms)
+{
+    uint32_t age_ms = 0U;
+    const uint8_t groups[] = {MEMORY_MONITOR_VALID_VOLTAGE, MEMORY_MONITOR_VALID_IDD};
+    const uint32_t times[] = {voltage_ms, current_ms};
+    for (unsigned i = 0U; i < 2U; ++i) {
+        if ((snapshot->memory.valid_mask & groups[i]) == 0U) continue;
+        uint32_t group_age_ms = (uint32_t)(now_ms - times[i]);
+        if (group_age_ms > MONITOR_SAMPLE_STALE_MS) {
+            snapshot->memory.valid_mask &= (uint8_t)~groups[i];
+        } else if (group_age_ms > age_ms) {
+            age_ms = group_age_ms;
+        }
+    }
+    snapshot->timestamp_ms = now_ms - age_ms;
 }
 
 void StartMonitorTask(void *argument)
 {
-    monitor_snapshot_t snapshot;
+    monitor_snapshot_t snapshot = {0};
+    uint32_t last_init_ms = 0U, last_adc_ms = 0U, last_status_ms = 0U;
+    uint32_t voltage_ms = 0U, current_ms = 0U;
+    uint8_t was_on = 0U;
     (void)argument;
 
     /* V2开发映射：B1移植时由板级层换为I2C4软总线+SPI4/PE11。 */
@@ -299,29 +315,71 @@ void StartMonitorTask(void *argument)
     vTaskDelay(pdMS_TO_TICKS(1000U));
 
     for (;;) {
-        memset(&snapshot, 0, sizeof(snapshot));
-        snapshot.timestamp_ms = HAL_GetTick();
+        TickType_t delay = pdMS_TO_TICKS(MONITOR_IDLE_DELAY_MS);
         if (memory_io_take(pdMS_TO_TICKS(MEMORY_IO_LOCK_TIMEOUT_MS))) {
-            snapshot.timestamp_ms = HAL_GetTick(); /* 取锁后记录本次真实读取的开始。 */
             snapshot.power_state = pwr_ctrl_get_state();
             if (snapshot.power_state == PWR_CTRL_STATE_ON) {
-                (void)memory_monitor_init(&s_monitor);
-                (void)memory_monitor_sample(&s_monitor, &snapshot.memory);
-                taskENTER_CRITICAL();
-                (void)idd_stats_feed(&s_idd_stats, snapshot.timestamp_ms,
-                                      HAL_GetTick(), &snapshot.memory);
-                taskEXIT_CRITICAL();
+                uint32_t now_ms = HAL_GetTick();
+                if (!was_on || (uint32_t)(now_ms - last_init_ms) >= MONITOR_INIT_RETRY_MS) {
+                    /* 初始化失败限频重试；就绪器件不会被另一器件的故障重置。 */
+                    (void)memory_monitor_init(&s_monitor);
+                    last_init_ms = HAL_GetTick();
+                }
+                if (!was_on) {
+                    last_adc_ms = HAL_GetTick() - MONITOR_ADC_POLL_MS;
+                    last_status_ms = HAL_GetTick() - MONITOR_STATUS_PERIOD_MS;
+                    was_on = 1U;
+                }
+
+                /* PAC保留完整转换精度、REFRESH_V稳定等待及配置回读检查。 */
+                uint8_t ready_groups = memory_monitor_ready_groups(&s_monitor);
+                if ((ready_groups & MEMORY_MONITOR_VALID_IDD) != 0U) {
+                    uint32_t begin_ms = HAL_GetTick();
+                    (void)memory_monitor_read_current(&s_monitor, &snapshot.memory);
+                    if ((snapshot.memory.valid_mask & MEMORY_MONITOR_VALID_IDD) != 0U)
+                        current_ms = begin_ms;
+                    feed_sample_group(&snapshot.memory, MEMORY_MONITOR_VALID_IDD, begin_ms);
+                } else {
+                    snapshot.memory.valid_mask &= (uint8_t)~MEMORY_MONITOR_VALID_IDD;
+                }
+
+                now_ms = HAL_GetTick();
+                if ((ready_groups & MEMORY_MONITOR_VALID_VOLTAGE) != 0U &&
+                    (uint32_t)(now_ms - last_adc_ms) >= MONITOR_ADC_POLL_MS) {
+                    uint32_t begin_ms = now_ms;
+                    int result = memory_monitor_poll_voltage(&s_monitor, &snapshot.memory,
+                                                             now_ms, &begin_ms);
+                    last_adc_ms = HAL_GetTick();
+                    if (result != 0) {
+                        if (result > 0) voltage_ms = begin_ms;
+                        feed_sample_group(&snapshot.memory, MEMORY_MONITOR_VALID_VOLTAGE, begin_ms);
+                    }
+                } else if ((ready_groups & MEMORY_MONITOR_VALID_VOLTAGE) == 0U) {
+                    snapshot.memory.valid_mask &= (uint8_t)~MEMORY_MONITOR_VALID_VOLTAGE;
+                }
+
+                now_ms = HAL_GetTick();
+                if ((uint32_t)(now_ms - last_status_ms) >= MONITOR_STATUS_PERIOD_MS) {
+                    /* TPS读清状态独立低频读取，不在每个电流样本后重复访问三颗器件。 */
+                    (void)memory_monitor_read_status(&s_monitor, &snapshot.memory);
+                    last_status_ms = HAL_GetTick();
+                }
+                delay = 1U; /* 每轮让出一个RTOS节拍；真实间隔还包含总线与调度耗时。 */
             } else {
                 memory_monitor_invalidate(&s_monitor);
                 monitor_idd_cancel();
+                memset(&snapshot.memory, 0, sizeof(snapshot.memory));
+                was_on = 0U;
             }
             xSemaphoreGive(s_memory_io_mutex);
         } else {
             snapshot.power_state = pwr_ctrl_get_state();
+            snapshot.memory.valid_mask = 0U;
         }
 
+        update_snapshot_age(&snapshot, voltage_ms, current_ms, HAL_GetTick());
         publish_snapshot(&snapshot);
-        ota_app_progress(OTA_TASK_MONITOR);
-        vTaskDelay(pdMS_TO_TICKS(2000U));
+        task_watchdog_progress(TASK_WATCHDOG_MONITOR);
+        vTaskDelay(delay);
     }
 }

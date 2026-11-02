@@ -59,7 +59,6 @@ extern void result_led_wave_early_init(void);
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -156,11 +155,12 @@ int main(void)
   MX_TIM8_Init();
   MX_USART2_UART_Init();
   MX_I2C3_Init();
-  MX_IWDG1_Init();
   MX_USART3_UART_Init();
   MX_I2C4_Init();
   MX_QUADSPI_Init();
   /* USER CODE BEGIN 2 */
+  /* 外设初始化后开启看门狗，运行期由任务存活监测统一喂狗。 */
+  MX_IWDG1_Init();
 #if defined(ENABLE_RESULT_LED_WAVE_TEST) && ENABLE_RESULT_LED_WAVE_TEST
   /*
    * 在调度器和LWIP启动前关闭六路替代结果灯。若等低优先级测试任务运行，

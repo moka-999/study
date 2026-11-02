@@ -121,7 +121,8 @@ def main():
                 def start(name, index, **kwargs):
                     send(0x0103, {'algorithmType': 'functional', 'algorithmName': name,
                          'algorithmIndex': index, 'power': {'memoryType': 'LPDDR4X', 'vdd1': '1800',
-                         'vdd2': '1100', 'vddq': '600'}, 'reboot': False, 'bootMode': 'emmc'}, **kwargs)
+                         'vdd2': '1100', 'vddq': '600'}, 'reboot': False, 'bootMode': 'emmc',
+                         'TimingParameters': {}}, **kwargs)
                     body = receive(6)
                     assert body['status'] == 'accepted' and body['testOnly'] is True
                     assert body['algorithmIndex'] == index

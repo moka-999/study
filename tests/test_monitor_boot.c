@@ -1,6 +1,6 @@
 /* 运行正式monitor/统计/MCP4725代码；器件和RTOS使用桩，不模拟真实电气状态。 */
 #include "monitor_task.h"
-#include "ota_app.h"
+#include "task_watchdog.h"
 #include "boot_test_port.h"
 #include <stddef.h>
 #include <setjmp.h>
@@ -10,10 +10,24 @@
 #define S(x) S1(x)
 #define CHECK(c) do { if (!(c)) fail("FAIL " S(__LINE__) ": " #c "\n"); } while (0)
 static uint32_t writes;
-static int locked, busy, io_error, confirmed = 1;
+static int locked, busy, io_error;
 static pwr_ctrl_state_t state = PWR_CTRL_STATE_OFF;
 static uint32_t clock_ms, samples, loops, task_window_ms;
-static int short_window, cancel_during_read;
+static uint32_t voltage_polls, voltage_samples, status_reads, init_calls;
+static uint32_t last_init_ms, first_current_ms, last_current_ms, maximum_current_gap_ms;
+static uint32_t voltage_begin_ms, last_voltage_begin_ms;
+static uint32_t loop_limit;
+static uint8_t voltage_collecting;
+typedef enum {
+    TASK_FAST,
+    TASK_CROSS_WINDOW,
+    TASK_CANCEL_DURING_READ,
+    TASK_OFF,
+    TASK_LOCK_BUSY,
+    TASK_INIT_BACKOFF,
+    TASK_CACHE_EXPIRE
+} task_case_t;
+static task_case_t task_case;
 static jmp_buf task_exit;
 
 static void message(const char *text)
@@ -50,7 +64,6 @@ int xSemaphoreGive(SemaphoreHandle_t semaphore)
     locked = 0;
     return pdTRUE;
 }
-int ota_app_is_confirmed(void) { return confirmed; }
 pwr_ctrl_state_t pwr_ctrl_get_state(void) { return state; }
 uint32_t HAL_GetTick(void) { return clock_ms; }
 pwr_ctrl_result_t pwr_ctrl_request_off(uint32_t now)
@@ -106,38 +119,108 @@ void memory_monitor_configure(memory_monitor_t *monitor, i2c_if_t *pac,
 #else
     CHECK(adc == NULL && port == NULL && pin == 0U);
 #endif
+    memset(monitor, 0, sizeof(*monitor));
 }
 int memory_monitor_init(memory_monitor_t *monitor)
 {
     CHECK(locked && monitor != NULL);
+    if (init_calls != 0U) CHECK((uint32_t)(clock_ms - last_init_ms) >= 1000U);
+    last_init_ms = clock_ms;
+    ++init_calls;
+    if (task_case == TASK_INIT_BACKOFF) return IF_ERR;
+    monitor->pac_ready = 1U;
+    monitor->adc_ready = 1U;
+#ifdef MONITOR_TEST_B1
+    monitor->adc.id = 0x04U;
+    monitor->adc.last_error = 0x123U;
+    monitor->pac.last_error = PAC1934_ERROR_NONE;
+#endif
     return IF_OK;
 }
-int memory_monitor_sample(memory_monitor_t *monitor, memory_monitor_sample_t *sample)
+uint8_t memory_monitor_ready_groups(const memory_monitor_t *monitor)
+{
+    CHECK(locked && monitor);
+    return (monitor->adc_ready ? MEMORY_MONITOR_VALID_VOLTAGE : 0U) |
+           (monitor->pac_ready ? MEMORY_MONITOR_VALID_IDD : 0U);
+}
+int memory_monitor_read_current(memory_monitor_t *monitor, memory_monitor_sample_t *sample)
 {
     CHECK(locked && monitor && sample);
-    ++samples;
-    clock_ms += 20U; /* 整次器件读取耗时，不把跨窗口完成的快照算进去。 */
-    memset(sample, 0, sizeof(*sample));
-    sample->valid_mask = MEMORY_MONITOR_VALID_VOLTAGE | MEMORY_MONITOR_VALID_IDD;
-    for (uint32_t i = 0; i < MEMORY_MONITOR_RAIL_COUNT; ++i) {
-        sample->voltage_mv[i] = 1000 + (int32_t)(samples * 10U + i);
-        sample->idd[i].current_ma = samples * 100U + i;
+    CHECK(state == PWR_CTRL_STATE_ON);
+    if (!monitor->pac_ready) return IF_ERR;
+    if (samples != 0U) {
+        uint32_t gap = clock_ms - last_current_ms;
+        if (gap > maximum_current_gap_ms) maximum_current_gap_ms = gap;
+    } else {
+        first_current_ms = clock_ms;
     }
-    if (cancel_during_read) monitor_idd_cancel();
+    last_current_ms = clock_ms;
+    ++samples;
+    clock_ms += task_case == TASK_CROSS_WINDOW ? 20U : 1U;
+    sample->valid_mask |= MEMORY_MONITOR_VALID_IDD;
+    for (uint32_t i = 0; i < MEMORY_MONITOR_RAIL_COUNT; ++i) {
+        /* 每次相差100µA；提前转换整数mA会让均值和峰值检查失败。 */
+        sample->idd[i].current_ua = samples * 100U + 17U + i;
+        sample->idd[i].current_ma = (uint32_t)(sample->idd[i].current_ua / 1000U);
+    }
+    if (task_case == TASK_CANCEL_DURING_READ) monitor_idd_cancel();
     return IF_OK;
 }
-void memory_monitor_invalidate(memory_monitor_t *monitor) { CHECK(locked && monitor); }
-void ota_app_progress(uint32_t task_id) { CHECK(!locked && task_id == OTA_TASK_MONITOR); }
+int memory_monitor_poll_voltage(memory_monitor_t *monitor, memory_monitor_sample_t *sample,
+                                uint32_t now_ms, uint32_t *begin_ms)
+{
+    CHECK(locked && monitor && sample && begin_ms && now_ms == clock_ms);
+    CHECK(state == PWR_CTRL_STATE_ON);
+    if (!monitor->adc_ready) return 0;
+    ++voltage_polls;
+    /* 持续没有新电压，但电流正常更新；任务必须独立淘汰旧电压。 */
+    if (task_case == TASK_CACHE_EXPIRE && voltage_samples != 0U) return 0;
+    if (!voltage_collecting) {
+        voltage_collecting = 1U;
+        voltage_begin_ms = now_ms;
+    }
+    *begin_ms = voltage_begin_ms;
+    /* 两次尚未完成、第三次才形成完整三轨；不能重复统计缓存或把pending当失败。 */
+    if (voltage_polls % 3U != 0U) return 0;
+    voltage_collecting = 0U;
+    last_voltage_begin_ms = voltage_begin_ms;
+    ++voltage_samples;
+    sample->valid_mask |= MEMORY_MONITOR_VALID_VOLTAGE;
+    for (uint32_t i = 0; i < MEMORY_MONITOR_RAIL_COUNT; ++i)
+        sample->voltage_mv[i] = 1000 + (int32_t)(voltage_samples * 10U + i);
+    return 1;
+}
+int memory_monitor_read_status(memory_monitor_t *monitor, memory_monitor_sample_t *sample)
+{
+    CHECK(locked && monitor && sample && state == PWR_CTRL_STATE_ON);
+    ++status_reads;
+    sample->valid_mask |= MEMORY_MONITOR_VALID_TPS_STATUS;
+    return IF_OK;
+}
+void memory_monitor_invalidate(memory_monitor_t *monitor)
+{
+    CHECK(locked && monitor);
+    monitor->pac_ready = monitor->adc_ready = 0U;
+}
+void task_watchdog_progress(uint32_t task_id) { CHECK(!locked && task_id == TASK_WATCHDOG_MONITOR); }
 void vTaskDelay(TickType_t ticks)
 {
     CHECK(!locked);
     if (ticks == 1000U) {
         clock_ms += ticks;
-        task_window_ms = short_window ? 10U : 10000U;
-        CHECK(monitor_idd_start(task_window_ms, 1U) == IF_OK);
+        task_window_ms = task_case == TASK_CROSS_WINDOW ? 10U : 10000U;
+        if (state == PWR_CTRL_STATE_ON)
+            CHECK(monitor_idd_start(task_window_ms, 1U) == IF_OK);
+        if (task_case == TASK_LOCK_BUSY) busy = 1;
     } else {
-        CHECK(ticks == 2000U);
-        if (++loops == 3U) longjmp(task_exit, 1);
+        CHECK(ticks == (state == PWR_CTRL_STATE_OFF || busy ? 20U : 1U));
+        monitor_snapshot_t snapshot;
+        CHECK(monitor_get_latest(&snapshot));
+        if (task_case == TASK_FAST && voltage_samples != 0U) {
+            /* 快速电流更新不能给尚未更新的电压缓存续命。 */
+            CHECK(snapshot.timestamp_ms == last_voltage_begin_ms);
+        }
+        if (++loops == loop_limit) longjmp(task_exit, 1);
         clock_ms += ticks;
     }
 }
@@ -154,9 +237,6 @@ static void test_idd_integration(void)
     busy = 1;
     CHECK(monitor_idd_start(100U, 1U) == IF_TIMEOUT);
     busy = 0;
-    confirmed = 0;
-    CHECK(monitor_idd_start(100U, 1U) == IF_ERR);
-    confirmed = 1;
     CHECK(monitor_idd_start(100U, 1U) == IF_OK);
     CHECK(monitor_idd_start(200U, 1U) == IF_ERR);
     CHECK(monitor_apply_ddr_config(DDR_MEMORY_LPDDR4X, NULL) == PWR_CTRL_ERR_PARAM);
@@ -168,17 +248,9 @@ static void test_idd_integration(void)
     CHECK(monitor_request_power_off(clock_ms) == PWR_CTRL_OK);
     CHECK(monitor_idd_get(&stats) && stats.state == IDD_STATS_CANCELLED);
 
-    /* 即使故障改变电源状态后尚未轮到process，进入OTA也不能遗留窗口。 */
-    state = PWR_CTRL_STATE_ON;
-    CHECK(monitor_idd_start(100U, 1U) == IF_OK);
-    state = PWR_CTRL_STATE_OFF;
-    CHECK(monitor_ota_enter() == 0);
-    CHECK(monitor_idd_get(&stats) && stats.state == IDD_STATS_CANCELLED);
-    state = PWR_CTRL_STATE_ON;
-    CHECK(monitor_idd_start(100U, 1U) == IF_ERR);
-    monitor_ota_leave();
 
-    /* 无新样本且器件锁一直忙，也必须按期TIMEOUT，不等待下一轮2秒采样。 */
+    /* 无新样本且器件锁一直忙，也必须按期TIMEOUT，不等待下一次有效采样。 */
+    state = PWR_CTRL_STATE_ON;
     CHECK(monitor_idd_start(100U, 1U) == IF_OK);
     clock_ms += 100U;
     busy = 1;
@@ -190,33 +262,76 @@ static void test_idd_integration(void)
     monitor_power_process(clock_ms);
     CHECK(monitor_idd_get(&stats) && stats.state == IDD_STATS_CANCELLED);
 
-    /* 跑真实任务循环三次：正常窗口、跨末端慢读取、读取中主动取消。 */
-    for (unsigned run = 0; run < 3U; ++run) {
-        state = PWR_CTRL_STATE_ON;
+    /* 跑实际任务：电流不等AD完整扫描，另检查失败退避、旧缓存和统计边界。 */
+    for (unsigned run = TASK_FAST; run <= TASK_CACHE_EXPIRE; ++run) {
+        task_case = (task_case_t)run;
+        state = task_case == TASK_OFF ? PWR_CTRL_STATE_OFF : PWR_CTRL_STATE_ON;
+        busy = 0;
         samples = loops = 0U;
-        short_window = run == 1U;
-        cancel_during_read = run == 2U;
+        voltage_polls = voltage_samples = status_reads = init_calls = 0U;
+        maximum_current_gap_ms = 0U;
+        voltage_collecting = 0U;
+        loop_limit = task_case == TASK_INIT_BACKOFF ? 2200U :
+                     task_case == TASK_CACHE_EXPIRE ? 1200U : 120U;
+        monitor_idd_cancel();
         if (setjmp(task_exit) == 0) StartMonitorTask(NULL);
-        CHECK(samples == 3U && !locked);
+        CHECK(!locked);
+        busy = 0;
         CHECK(monitor_idd_get(&stats));
-        if (clock_ms < stats.started_ms + task_window_ms)
-            clock_ms = stats.started_ms + task_window_ms;
+        monitor_idd_finish();
         CHECK(monitor_idd_get(&stats));
-        if (run == 0U) {
-            CHECK(stats.state == IDD_STATS_COMPLETE && stats.attempts == 3U);
+        if (task_case == TASK_FAST) {
+            CHECK(stats.state == IDD_STATS_COMPLETE && samples == loop_limit);
+            CHECK(maximum_current_gap_ms <= 3U && voltage_samples > 1U);
+            CHECK(samples > voltage_samples * 5U);
+            CHECK(clock_ms - first_current_ms < 500U);
             for (uint32_t i = 0; i < MEMORY_MONITOR_RAIL_COUNT; ++i) {
-                CHECK(stats.voltage[i].mean == 1020 + (int64_t)i);
-                CHECK(stats.current[i].mean == 200 + (int64_t)i);
-                CHECK(stats.current[i].maximum == 300 + (int64_t)i);
+                CHECK(stats.voltage[i].valid_count == voltage_samples);
+                CHECK(stats.voltage[i].failed_count == 0U);
+                CHECK(stats.current[i].valid_count == samples);
+                CHECK(stats.current[i].failed_count == 0U);
+                CHECK(stats.voltage[i].mean == 1000 + 5 * ((int64_t)voltage_samples + 1) + i);
+                CHECK(stats.current[i].mean == 50 * ((int64_t)samples + 1) + 17 + i);
+                CHECK(stats.current[i].maximum == (int64_t)samples * 100 + 17 + i);
             }
-        } else {
+            CHECK(init_calls == 1U && status_reads == 1U);
+        } else if (task_case == TASK_CROSS_WINDOW || task_case == TASK_CANCEL_DURING_READ) {
             CHECK(stats.attempts == 0U);
-            CHECK(stats.state == (short_window ? IDD_STATS_TIMEOUT : IDD_STATS_CANCELLED));
-            CHECK(stats.discarded == (short_window ? 1U : 0U));
+            CHECK(stats.state == (task_case == TASK_CROSS_WINDOW ? IDD_STATS_TIMEOUT : IDD_STATS_CANCELLED));
+            CHECK(task_case != TASK_CROSS_WINDOW || stats.discarded > 0U);
+        } else if (task_case == TASK_OFF || task_case == TASK_LOCK_BUSY) {
+            CHECK(samples == 0U && voltage_polls == 0U && init_calls == 0U && status_reads == 0U);
+        } else if (task_case == TASK_INIT_BACKOFF) {
+            CHECK(init_calls >= 2U && init_calls <= 3U && samples == 0U);
+        } else if (task_case == TASK_CACHE_EXPIRE) {
+            monitor_snapshot_t expired;
+            CHECK(samples > 0U && voltage_samples > 0U);
+            CHECK(monitor_get_latest(&expired));
+            CHECK((expired.memory.valid_mask & MEMORY_MONITOR_VALID_VOLTAGE) == 0U);
+            CHECK((expired.memory.valid_mask & MEMORY_MONITOR_VALID_IDD) != 0U);
+            /* 任务整体停止推进后，查询也不得继续发布过期的最后一份电流。 */
+            clock_ms += 1001U;
+            CHECK(monitor_get_latest(&expired) && expired.memory.valid_mask == 0U);
         }
         /* 最新快照仍存在，但新统计必须从空窗口开始，不能回灌旧数据。 */
+#ifdef MONITOR_TEST_B1
+        /* 诊断查询必须不取器件事务锁、不增加初始化/采集次数。 */
+        monitor_diagnostics_t diagnostics;
+        uint32_t previous_samples = samples, previous_init = init_calls;
+        busy = 1;
+        CHECK(!monitor_get_diagnostics(NULL));
+        CHECK(monitor_get_diagnostics(&diagnostics) && !locked);
+        CHECK(samples == previous_samples && init_calls == previous_init);
+        if (task_case == TASK_OFF) CHECK(!diagnostics.adc_ready && !diagnostics.pac_ready);
+        if (task_case == TASK_FAST) {
+            CHECK(diagnostics.adc_ready && diagnostics.pac_ready);
+            CHECK(diagnostics.adc_id == 0x04U && diagnostics.adc_last_error == 0x123U);
+        }
+        busy = 0;
+#endif
         monitor_snapshot_t snapshot;
-        CHECK(monitor_get_latest(&snapshot) && snapshot.memory.valid_mask);
+        CHECK(monitor_get_latest(&snapshot));
+        state = PWR_CTRL_STATE_ON;
         CHECK(monitor_idd_start(100U, 1U) == IF_OK);
         CHECK(monitor_idd_get(&stats) && stats.attempts == 0U);
         monitor_idd_finish();
@@ -259,14 +374,6 @@ void test_main(void)
     CHECK(monitor_set_boot_mode(BOOT_MODE_EMMC) == MONITOR_BOOT_ERR_STATE);
     expect_cached();
     CHECK(monitor_request_power_off(0U) == PWR_CTRL_OK);
-    expect_cached();
-    confirmed = 0;
-    CHECK(monitor_set_boot_mode(BOOT_MODE_EMMC) == MONITOR_BOOT_ERR_STATE);
-    confirmed = 1;
-    expect_cached();
-    CHECK(monitor_ota_enter() == 0);
-    CHECK(monitor_set_boot_mode(BOOT_MODE_EMMC) == MONITOR_BOOT_ERR_STATE);
-    monitor_ota_leave();
     expect_cached();
     CHECK(writes == 1U);
 

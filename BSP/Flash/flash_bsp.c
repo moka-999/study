@@ -4,6 +4,7 @@
  * ============================================================================
  */
 #include "flash_bsp.h"
+#include "board_storage_config.h"
 #include "qspi_hw.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
@@ -14,7 +15,9 @@
  * 单个 4 KiB 扇区的 Read-Modify-Write 缓冲。
  * 该实例不可重入，上层若从多个任务访问 Flash，必须使用同一把互斥锁串行化。
  */
+#if APP_FLASH_WRITABLE
 static uint8_t s_sector_buffer[W25Q_SECTOR_SIZE];
+#endif
 static SemaphoreHandle_t s_transaction_lock;
 static int s_initialized;
 
@@ -40,6 +43,7 @@ void flash_transaction_end(void)
     (void)xSemaphoreGive(s_transaction_lock);
 }
 
+#if APP_FLASH_WRITABLE
 static int page_is_erased(const uint8_t *page)
 {
     for (uint32_t index = 0U; index < W25Q_PAGE_SIZE; ++index) {
@@ -49,6 +53,8 @@ static int page_is_erased(const uint8_t *page)
     }
     return 1;
 }
+
+#endif
 
 /**
  * @brief 通过固定QSPI实例初始化W25Q256。
@@ -91,6 +97,7 @@ static int flash_read(flash_if_t *flash, uint32_t address,
  *       内容变化时会擦完整扇区再恢复数据；掉电/失败可能丢目标扇区内容或
  *       仅写完前面的扇区，函数不回滚。关键记录使用上层A/B副本保护。
  */
+#if APP_FLASH_WRITABLE
 static int flash_write(flash_if_t *flash, uint32_t address,
                        const uint8_t *buffer, uint32_t length)
 {
@@ -181,6 +188,8 @@ static int flash_erase(flash_if_t *flash, uint32_t address, uint32_t length)
     return IF_OK;
 }
 
+#endif
+
 /**
  * @brief 返回固定W25Q256容量和擦写几何参数，不访问器件。
  * @param[in] flash 接口占位参数，当前未使用。
@@ -201,7 +210,12 @@ flash_if_t flash_if = {
     .handle = NULL,
     .init   = flash_init,
     .read   = flash_read,
+#if APP_FLASH_WRITABLE
     .write  = flash_write,
     .erase  = flash_erase,
+#else
+    .write  = NULL,
+    .erase  = NULL,
+#endif
     .info   = flash_info,
 };

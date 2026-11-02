@@ -2,7 +2,6 @@
 #include "pc_tester_info.h"
 #include "pc_power_service.h"
 #include "rk_link.h"
-#include "ota_app.h"
 #include "result_led.h"
 #include "b2_service.h"
 #if defined(B1_RK_UART)
@@ -20,11 +19,33 @@
 #endif
 #endif
 
+/* PC命令、算法类别和结果通道在同一表中绑定，避免IDD从FUNC入口误下发。
+ * 两类暂共用RK最终结果合同；PARA的进入/退出与有效测量窗口另行接入。
+ */
+typedef struct {
+    uint16_t start_command;
+    uint16_t result_command;
+    rk_command_category_t category;
+    const char *algorithm_type;
+} pc_rk_test_kind_t;
+static const pc_rk_test_kind_t s_rk_test_kinds[] = {
+    {PC_COMMAND_START_TEST, PC_COMMAND_TEST_RESULT_REPORT, RK_COMMAND_CATEGORY_FUNCTIONAL, "functional"},
+    {PC_COMMAND_PARA_START, PC_COMMAND_PARA_RESULT, RK_COMMAND_CATEGORY_PARAMETRIC, "parametric"},
+};
+
+static const pc_rk_test_kind_t *find_test_kind(uint16_t command)
+{
+    for (size_t i = 0U; i < sizeof(s_rk_test_kinds) / sizeof(s_rk_test_kinds[0]); ++i)
+        if (s_rk_test_kinds[i].start_command == command) return &s_rk_test_kinds[i];
+    return NULL;
+}
+
 /* 仅唯一TCP任务读写。断线后仍保存cookie，旧结果不得交给新连接。 */
 static struct {
     uint32_t cookie;
     uint32_t index;
     const char *name;           /* 来自RK只读算法表，不借用已经释放的JSON。 */
+    const pc_rk_test_kind_t *kind; /* FUNC/PARA静态通道描述；不借用PC包体。 */
     char site_id[16];           /* 受理时固定B2配置的槽位；未配置则使用W25测试标签。 */
     uint8_t active;             /* 包含已经超时但RK仍可能执行的状态。 */
     uint8_t owner_connected;    /* 只有发起测试的原TCP连接可接收结果。 */
@@ -64,7 +85,7 @@ static int operation_response(uint16_t command, const uint32_t *index, uint32_t 
 {
     cJSON *body = cJSON_CreateObject();
     int result = PC_DISPATCH_ERROR;
-    int has_index = command == PC_COMMAND_START_TEST || command == PC_COMMAND_SLT_START ||
+    int has_index = command == PC_COMMAND_START_TEST || command == PC_COMMAND_PARA_START || command == PC_COMMAND_SLT_START ||
                     command == PC_COMMAND_SLT_RESULT;
     if (body && cJSON_AddNumberToObject(body, "requestCommandId", command) &&
         (!has_index || (index ? cJSON_AddNumberToObject(body, "algorithmIndex", *index)
@@ -76,28 +97,16 @@ static int operation_response(uint16_t command, const uint32_t *index, uint32_t 
     return result;
 }
 
-static int command_status_response(uint32_t sequence, uint32_t index,
+static int command_status_response(uint16_t command, uint32_t sequence, uint32_t index,
     const char *status, const char *error, pc_dispatch_response_t *response)
 {
-    return operation_response(PC_COMMAND_START_TEST, &index, sequence, status, error, response);
+    return operation_response(command, &index, sequence, status, error, response);
 }
 
 static int slt_status_response(uint32_t sequence, const char *status,
     const char *error, pc_dispatch_response_t *response)
 {
     return operation_response(PC_COMMAND_SLT_START, NULL, sequence, status, error, response);
-}
-
-static int maintenance_busy(void)
-{
-#if defined(ENABLE_OTA_BOOT) && ENABLE_OTA_BOOT
-    ota_download_progress_t progress;
-    ota_download_get_progress(&progress);
-    return progress.state == OTA_DOWNLOAD_RECEIVING || progress.state == OTA_DOWNLOAD_READY ||
-           progress.state == OTA_DOWNLOAD_COMMIT_UNKNOWN;
-#else
-    return 0;
-#endif
 }
 
 /* 只更新显示，不控制加热；调用前已校验完整失败清单，不逐芯片驱动GPIO。 */
@@ -139,8 +148,7 @@ static void save_site_id(const char *fru_site)
 pc_dispatch_result_t pc_test_round_begin(uint32_t sequence, pc_dispatch_response_t *response)
 {
     const char *error = NULL;
-    if (!ota_app_is_confirmed()) error = "otaNotReady";
-    else if (s_round_active || pc_test_service_busy() || pc_power_service_busy() || maintenance_busy())
+    if (s_round_active || pc_test_service_busy() || pc_power_service_busy())
         error = "busy";
     int result = operation_response(PC_COMMAND_ROUND_BEGIN, NULL, sequence,
         error ? "failed" : "completed", error, response);
@@ -174,10 +182,10 @@ pc_dispatch_result_t pc_test_round_end(uint32_t failed_mask,
     return result;
 }
 
-static int status_response(uint32_t sequence, uint32_t index, const char *error,
+static int status_response(uint16_t command, uint32_t sequence, uint32_t index, const char *error,
                            pc_dispatch_response_t *response)
 {
-    return command_status_response(sequence, index, error ? "failed" : "accepted", error, response);
+    return command_status_response(command, sequence, index, error ? "failed" : "accepted", error, response);
 }
 
 int pc_test_service_busy(void)
@@ -207,37 +215,34 @@ static const char *queue_test(const rk_request_t *request)
     return NULL;
 }
 
-pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
+pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response)
 {
-    if (!start || !response) return PC_DISPATCH_ERROR;
-    if (!ota_app_is_confirmed())
-        return status_response(sequence, start->algorithm_index, "otaNotReady", response);
+    const pc_rk_test_kind_t *kind = find_test_kind(request_command);
+    if (!kind || !start || !response) return PC_DISPATCH_ERROR;
     if (s_test.active || pc_power_service_busy())
-        return status_response(sequence, start->algorithm_index, "busy", response);
+        return status_response(request_command, sequence, start->algorithm_index, "busy", response);
     if (!s_round_active)
-        return status_response(sequence, start->algorithm_index, "invalidState", response);
+        return status_response(request_command, sequence, start->algorithm_index, "invalidState", response);
 
 #if defined(B1_RK_UART)
     /* 用户确认RK测试程序已就绪，但仍要求MCU真实电源状态为ON。
      * 不改Boot/电压，也不把心跳或ON状态当作自动DDR-ready确认。
      */
     if (start->external_ready && pwr_ctrl_get_state() != PWR_CTRL_STATE_ON)
-        return status_response(sequence, start->algorithm_index, "notReady", response);
+        return status_response(request_command, sequence, start->algorithm_index, "notReady", response);
 #endif
-    if (strcmp(start->algorithm_type, "functional") != 0)
-        return status_response(sequence, start->algorithm_index, "notSupported", response);
+    if (strcmp(start->algorithm_type, kind->algorithm_type) != 0)
+        return status_response(request_command, sequence, start->algorithm_index, "notSupported", response);
     const rk_command_descriptor_t *algorithm = rk_command_find_by_name(start->algorithm_name);
-    if (!algorithm)
-        return status_response(sequence, start->algorithm_index, "notSupported", response);
-    if (maintenance_busy())
-        return status_response(sequence, start->algorithm_index, "busy", response);
+    if (!algorithm || algorithm->category != kind->category)
+        return status_response(request_command, sequence, start->algorithm_index, "notSupported", response);
     fru_info_t fru;
     if (pc_tester_info_load(&fru) != 0)
-        return status_response(sequence, start->algorithm_index, "flashError", response);
+        return status_response(request_command, sequence, start->algorithm_index, "flashError", response);
 
     /* 先保证受理应答能组出，再投递命令；内存分配失败不能偷偷启动RK。 */
-    int result = status_response(sequence, start->algorithm_index, NULL, response);
+    int result = status_response(request_command, sequence, start->algorithm_index, NULL, response);
     if (result != PC_DISPATCH_RESPONSE_READY) return result;
     /* 先复制再产生任何硬件/队列副作用；输入JSON返回后会释放，不能保存借用指针。 */
     cJSON *timing = start->timing_parameters ? cJSON_Duplicate(start->timing_parameters, 1) : NULL;
@@ -260,7 +265,7 @@ pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
         error = queue_test(&request);
     if (error) {
         cJSON_Delete(timing);
-        return status_response(sequence, start->algorithm_index, error, response);
+        return status_response(request_command, sequence, start->algorithm_index, error, response);
     }
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     /* 仍投递真实RK命令。队列拒绝时不改变虚拟电源、不清空上一轮统计。 */
@@ -269,6 +274,7 @@ pc_dispatch_result_t pc_test_service_start(const pc_test_start_view_t *start,
     s_test.cookie = request.cookie;
     s_test.index = start->algorithm_index;
     s_test.name = algorithm->name;
+    s_test.kind = kind;
     save_site_id(fru.site_label);
     s_test.site_id[sizeof(s_test.site_id) - 1U] = '\0';
     s_test.active = 1U;
@@ -286,8 +292,7 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response)
 {
     if (!start || !response) return PC_DISPATCH_ERROR;
-    if (!ota_app_is_confirmed()) return slt_status_response(sequence, "failed", "otaNotReady", response);
-    if (s_test.active || pc_power_service_busy() || maintenance_busy())
+    if (s_test.active || pc_power_service_busy())
         return slt_status_response(sequence, "failed", "busy", response);
     if (!s_round_active) return slt_status_response(sequence, "failed", "invalidState", response);
     fru_info_t fru;
@@ -377,7 +382,7 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
         /* 完整启动路径沿用协议约定的completed：只说明准备完成并交接算法。
          * 先组包再下发，避免内存不足、无法生成应答时仍然启动测试。
          */
-        if (!error && command_status_response(sequence, s_test.index, "completed", NULL,
+        if (!error && command_status_response(s_test.kind->start_command, sequence, s_test.index, "completed", NULL,
                                               response) != PC_DISPATCH_RESPONSE_READY) {
             s_test.active = 0U;
             s_test.owner_connected = 0U;
@@ -387,7 +392,7 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
         if (error) {
             s_test.active = 0U;
             s_test.owner_connected = 0U;
-            return status_response(sequence, s_test.index, error, response);
+            return status_response(s_test.kind->start_command, sequence, s_test.index, error, response);
         }
         return PC_DISPATCH_RESPONSE_READY;
     }
@@ -438,7 +443,7 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
             }
 #endif
             /* 一包包含同一B1的两颗结果，共用siteId、耗时和三轨测量均只出现一次。 */
-            cJSON *body = pc_functional_result_create(s_test.name, s_test.index,
+            cJSON *body = pc_algorithm_result_create(s_test.kind->algorithm_type, s_test.name, s_test.index,
                 s_test.site_id, result.result.elapsed_ms, dies);
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
             if (!body || !v2_power_sim_add_measurement(body)) {
@@ -452,7 +457,7 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
                 return 0; /* 读取冻结统计或组包失败均不丢失已领取的结果。 */
             }
 #endif
-            ready = pack(PC_COMMAND_TEST_RESULT_REPORT, sequence, body, response);
+            ready = pack(s_test.kind->result_command, sequence, body, response);
             cJSON_Delete(body);
         } else {
             /* 用表区分通信异常，不能把发送失败、超时或掉电写成芯片FAIL。 */
@@ -464,7 +469,7 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
             };
             const char *error = (unsigned)result.status < sizeof(errors) / sizeof(errors[0])
                                 ? errors[result.status] : NULL;
-            ready = status_response(sequence, s_test.index, error ? error : "executionFailed", response);
+            ready = status_response(s_test.kind->start_command, sequence, s_test.index, error ? error : "executionFailed", response);
         }
         if (ready != PC_DISPATCH_RESPONSE_READY) return 0;
         /* 只承诺组包成功；TCP发送失败仍按断线规则处理，不跨连接重发旧结果。 */

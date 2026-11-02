@@ -40,14 +40,6 @@ set(CMAKE_CXX_FLAGS_RELEASE "-Os -g0")
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -fno-rtti -fno-exceptions -fno-threadsafe-statics")
 
 set(CMAKE_EXE_LINKER_FLAGS "${TARGET_FLAGS}")
-if(ENABLE_OTA_RELOCATION_PROBE)
-    if(NOT OTA_APP_BASE MATCHES "^(0x08020000|0x08100000)$")
-        message(FATAL_ERROR "OTA probe only supports A1 or A2")
-    endif()
-    # --defsym必须在-T之前，使链接脚本按实验槽地址计算装载区域。
-    string(APPEND CMAKE_EXE_LINKER_FLAGS
-        " -Wl,--defsym=OTA_APP_BASE=${OTA_APP_BASE},--emit-relocs")
-endif()
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -T \"${CMAKE_SOURCE_DIR}/STM32H743xx_FLASH.ld\"")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --specs=nano.specs")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-Map=${CMAKE_PROJECT_NAME}.map -Wl,--gc-sections")

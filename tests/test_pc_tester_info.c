@@ -1,6 +1,9 @@
 /* QEMU执行实际FRU读取/迁移/CRC/双副本，仅将Flash读写换成内存。 */
 #include "pc_tester_info.h"
 #include "flash_bsp.h"
+#include "boot_fru.h"
+#include "boot_vectors.h"
+#include "board_storage_config.h"
 #include <string.h>
 
 #define STRINGIFY_(x) #x
@@ -9,6 +12,7 @@
 static uint8_t storage[0x4000], original_storage[0x4000];
 static unsigned writes, locked, lock_failure, read_failure, fail_read_after_write;
 static int write_cut = -1;
+static unsigned cut_at_write = 1U;
 
 static void message(const char *text)
 {
@@ -43,7 +47,7 @@ static int write_flash(flash_if_t *flash, uint32_t address, const uint8_t *data,
     CHECK(length <= FLASH_LAYOUT_SECTOR_SIZE);
     ++writes;
     memset(storage + address, 0xFF, FLASH_LAYOUT_SECTOR_SIZE);
-    if (write_cut >= 0) {
+    if (write_cut >= 0 && writes == cut_at_write) {
         CHECK((unsigned)write_cut <= length);
         memcpy(storage + address, data, (unsigned)write_cut);
         return IF_ERR;
@@ -65,6 +69,13 @@ const uint8_t *board_mac_address(void)
 {
     static const uint8_t mac[6] = {2, 1, 2, 3, 4, 5};
     return mac;
+}
+
+/* 启动阶段负责迁移；测试以回读值验证，不把RAM临时默认值当作落盘结果。 */
+static int prepare_and_load(fru_info_t *fru)
+{
+    if (boot_fru_prepare(&flash_if, board_mac_address()) != 0) return -1;
+    return fru_info_load(&flash_if, fru, NULL) == FLASH_STORE_OK ? 0 : -1;
 }
 
 static fru_info_t seed(const char *name)
@@ -125,7 +136,7 @@ static void test_slot_validation(void)
         if (fault == 2U) storage[FLASH_LAYOUT_FRU_SLOT_B + sizeof(flash_record_header_t) + 4U] ^= 1U;
         CHECK(fru_info_load(&flash_if, &actual, &generation) == FLASH_STORE_OK);
         CHECK(generation == 1U && memcmp(&actual, &expected, sizeof(actual)) == 0);
-        CHECK(pc_tester_info_load(&actual) == 0 && writes == 0U);
+        CHECK(prepare_and_load(&actual) == 0 && writes == 0U);
     }
     /* 有效未知格式即使与可读副本并存，也不得默认重建或覆盖。 */
     for (unsigned fault = 0U; fault < 4U; ++fault) {
@@ -144,7 +155,7 @@ static void test_slot_validation(void)
         memcpy(original_storage, storage, sizeof(storage));
         CHECK(fru_info_load(&flash_if, &actual, NULL) == FLASH_STORE_ERR_UNSUPPORTED);
         CHECK(fru_info_save(&flash_if, &expected, NULL) == FLASH_STORE_ERR_UNSUPPORTED);
-        CHECK(pc_tester_info_load(&actual) == -1 && writes == 0U && locked == 0U);
+        CHECK(prepare_and_load(&actual) == -1 && writes == 0U && locked == 0U);
         CHECK(memcmp(storage, original_storage, sizeof(storage)) == 0);
     }
 }
@@ -192,10 +203,10 @@ static void test_legacy_fru(void)
             memcpy(storage, original_storage, sizeof(storage));
             writes = 0U;
             write_cut = (int)cut;
-            CHECK(pc_tester_info_load(&actual) == -1 && locked == 0U);
+            CHECK(prepare_and_load(&actual) == -1 && locked == 0U);
             write_cut = -1;
             CHECK(fru_info_load(&flash_if, &actual, NULL) == FLASH_STORE_ERR_LEGACY);
-            CHECK(pc_tester_info_load(&actual) == 0 && writes == 3U);
+            CHECK(prepare_and_load(&actual) == 0 && writes == 3U);
             CHECK(memcmp(&actual, &expected, sizeof(actual)) == 0);
             CHECK(fru_info_load(&flash_if, &actual, &generation) == FLASH_STORE_OK);
             CHECK(generation == 22U);
@@ -242,14 +253,76 @@ static void test_version_compatibility(void)
     CHECK(writes == 0U && memcmp(storage, original_storage, sizeof(storage)) == 0);
 }
 
+static void test_read_only_query(void)
+{
+    fru_info_t actual, expected = seed("LPDDR4/X_200B");
+    /* 查询不迁移、不改名，也不要求接口提供写函数。 */
+    flash_if.write = NULL;
+    CHECK(pc_tester_info_load(&actual) == 0 && writes == 0U);
+    CHECK(memcmp(&actual, &expected, sizeof(actual)) == 0);
+    CHECK(fru_info_save(&flash_if, &expected, NULL) == FLASH_STORE_ERR_PARAM);
+    memset(storage, 0xFF, sizeof(storage));
+    CHECK(pc_tester_info_load(&actual) == -1 && writes == 0U);
+    CHECK(boot_fru_prepare(NULL, NULL) == -1);
+    flash_if.write = write_flash;
+}
+
+static void test_first_boot_power_cuts(void)
+{
+    fru_info_t actual;
+    for (cut_at_write = 1U; cut_at_write <= 2U; ++cut_at_write) {
+        for (unsigned cut = 0U; cut < 256U; ++cut) {
+            memset(storage, 0xFF, sizeof(storage));
+            memset(storage, 0xA6, FLASH_LAYOUT_FRU_SLOT_A);
+            writes = 0U; write_cut = (int)cut;
+            CHECK(boot_fru_prepare(&flash_if, board_mac_address()) == -1);
+            write_cut = -1;
+            CHECK(prepare_and_load(&actual) == 0);
+            CHECK(strcmp(actual.tester_name, TESTER_NAME) == 0);
+            CHECK(memcmp(actual.mac_address, board_mac_address(), 6U) == 0);
+            CHECK(actual.serial_number[0] == 0 && actual.site_label[0] == 0);
+            for (unsigned i = 0U; i < FLASH_LAYOUT_FRU_SLOT_A; ++i) CHECK(storage[i] == 0xA6U);
+            unsigned before = writes;
+            CHECK(prepare_and_load(&actual) == 0 && writes == before);
+        }
+    }
+    cut_at_write = 1U;
+}
+
+static void test_vectors(void)
+{
+    CHECK(boot_app_vectors_valid(0x20020000U, 0x08020299U));
+    CHECK(!boot_app_vectors_valid(0x20020001U, 0x08020299U));
+    CHECK(!boot_app_vectors_valid(0x20000000U, 0x08020299U));
+    CHECK(!boot_app_vectors_valid(0x24020000U, 0x08020299U));
+    CHECK(!boot_app_vectors_valid(0x20020000U, 0x08000001U));
+    CHECK(!boot_app_vectors_valid(0x20020000U, 0x08020298U));
+    CHECK(!boot_app_vectors_valid(0x20020000U, 0x08200001U));
+}
+
 void test_main(void)
 {
+    test_vectors();
+#if !BOARD_W25_PRESENT
+    /* 模拟响应不能获取Flash锁或发起Flash读写；所有后台入口故意失败。 */
+    fru_info_t mock;
+    lock_failure = read_failure = 1U;
+    flash_if.read = NULL; flash_if.write = NULL;
+    CHECK(pc_tester_info_load(&mock) == 0);
+    CHECK(strcmp(mock.tester_name, TESTER_NAME) == 0);
+    CHECK(strcmp(mock.hardware_revision, TESTER_HARDWARE_REVISION) == 0);
+    CHECK(strcmp(mock.test_board, TESTER_BOARD_NAME) == 0);
+    CHECK(mock.serial_number[0] == 0 && mock.site_label[0] == 0);
+    CHECK(writes == 0U && locked == 0U && pc_tester_info_load(NULL) == -1);
+    message("PASS: absent W25 mock info, no Flash access, vector boundaries\n");
+    finish(0U);
+#endif
     fru_info_t actual, expected = seed("LPDDR4/X_200B");
     uint32_t generation = 0U;
     memcpy(original_storage, storage, sizeof(storage));
     memset(expected.tester_name, 0, sizeof(expected.tester_name));
     strcpy(expected.tester_name, "JMCT-4000");
-    CHECK(pc_tester_info_load(&actual) == 0);
+    CHECK(prepare_and_load(&actual) == 0);
     CHECK(memcmp(&actual, &expected, sizeof(actual)) == 0);
     CHECK(writes == 1U && locked == 0U);
     CHECK(fru_info_load(&flash_if, &actual, &generation) == FLASH_STORE_OK);
@@ -257,27 +330,27 @@ void test_main(void)
     CHECK(memcmp(storage, original_storage, FLASH_LAYOUT_FRU_SLOT_A) == 0);
     CHECK(memcmp(storage + FLASH_LAYOUT_FRU_SLOT_B,
                  original_storage + FLASH_LAYOUT_FRU_SLOT_B, FLASH_LAYOUT_SECTOR_SIZE) == 0);
-    CHECK(pc_tester_info_load(&actual) == 0 && writes == 1U);
+    CHECK(prepare_and_load(&actual) == 0 && writes == 1U);
 
     /* 逐字节模拟迁移写入中断：旧副本不丢，恢复后可再次迁移。 */
     for (unsigned cut = 0U; cut < sizeof(flash_record_header_t) + sizeof(fru_info_t); ++cut) {
         memcpy(storage, original_storage, sizeof(storage));
         writes = 0U;
         write_cut = (int)cut;
-        CHECK(pc_tester_info_load(&actual) == -1 && locked == 0U);
+        CHECK(prepare_and_load(&actual) == -1 && locked == 0U);
         write_cut = -1;
         CHECK(fru_info_load(&flash_if, &actual, NULL) == FLASH_STORE_OK);
         CHECK(strcmp(actual.tester_name, "LPDDR4/X_200B") == 0);
-        CHECK(pc_tester_info_load(&actual) == 0 && writes == 2U);
+        CHECK(prepare_and_load(&actual) == 0 && writes == 2U);
         CHECK(memcmp(&actual, &expected, sizeof(actual)) == 0);
     }
 
     /* 任意非旧默认名称保持原值；不把合法定制记录强制改成编译期常量。 */
     expected = seed("CUSTOM-TESTER");
-    CHECK(pc_tester_info_load(&actual) == 0 && writes == 0U);
+    CHECK(prepare_and_load(&actual) == 0 && writes == 0U);
     CHECK(memcmp(&actual, &expected, sizeof(actual)) == 0);
     expected = seed("JMCT-4000");
-    CHECK(pc_tester_info_load(&actual) == 0 && writes == 0U);
+    CHECK(prepare_and_load(&actual) == 0 && writes == 0U);
     CHECK(memcmp(&actual, &expected, sizeof(actual)) == 0);
 
     (void)seed("LPDDR4/X_200B");
@@ -285,26 +358,28 @@ void test_main(void)
     CHECK(pc_tester_info_load(&actual) == -1 && writes == 0U && locked == 0U);
     lock_failure = 0U;
     read_failure = 1U;
-    CHECK(pc_tester_info_load(&actual) == -1 && writes == 0U && locked == 0U);
+    CHECK(prepare_and_load(&actual) == -1 && writes == 0U && locked == 0U);
     read_failure = 0U;
     fail_read_after_write = 1U;
-    CHECK(pc_tester_info_load(&actual) == -1 && writes == 1U && locked == 0U);
+    CHECK(prepare_and_load(&actual) == -1 && writes == 1U && locked == 0U);
     fail_read_after_write = read_failure = 0U;
-    CHECK(pc_tester_info_load(&actual) == 0 && writes == 1U);
+    CHECK(prepare_and_load(&actual) == 0 && writes == 1U);
     CHECK(strcmp(actual.tester_name, "JMCT-4000") == 0);
     CHECK(pc_tester_info_load(NULL) == -1 && locked == 0U);
 
     memset(storage, 0xFF, sizeof(storage));
     writes = 0U;
-    CHECK(pc_tester_info_load(&actual) == 0 && writes == 2U);
+    CHECK(prepare_and_load(&actual) == 0 && writes == 2U);
     CHECK(strcmp(actual.tester_name, "JMCT-4000") == 0);
     CHECK(strcmp(actual.product_name, "LPDDR4/X_200B") == 0);
     CHECK(strcmp(actual.hardware_revision, "D00") == 0);
     CHECK(strcmp(actual.test_board, "RK3588_test") == 0);
-    CHECK(pc_tester_info_load(&actual) == 0 && writes == 2U);
+    CHECK(prepare_and_load(&actual) == 0 && writes == 2U);
+    test_read_only_query();
+    test_first_boot_power_cuts();
     test_slot_validation();
     test_legacy_fru();
     test_version_compatibility();
-    message("PASS: actual tester FRU migration, preservation, 768 power cuts, slot validation, unknown format protection, legacy FRU/version\n");
+    message("PASS: actual tester FRU migration, 1280 power cuts, unchanged-write skip, unknown format protection, legacy FRU/version\n");
     finish(0U);
 }

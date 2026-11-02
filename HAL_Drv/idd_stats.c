@@ -59,26 +59,47 @@ static void metric_add(idd_metric_stats_t *metric, int64_t value, int valid)
 int idd_stats_feed(idd_stats_t *stats, uint32_t begin_ms, uint32_t end_ms,
                    const memory_monitor_sample_t *sample)
 {
-    if (!stats || !sample) return IF_ERR;
-    if (stats->state != IDD_STATS_RUNNING) return 0;
+    return idd_stats_feed_groups(stats, begin_ms, end_ms, sample,
+                                MEMORY_MONITOR_VALID_VOLTAGE | MEMORY_MONITOR_VALID_IDD);
+}
+
+int idd_stats_feed_groups(idd_stats_t *stats, uint32_t begin_ms, uint32_t end_ms,
+                          const memory_monitor_sample_t *sample, uint8_t attempted_mask)
+{
+    const uint8_t groups = MEMORY_MONITOR_VALID_VOLTAGE | MEMORY_MONITOR_VALID_IDD;
+    if (!stats || !sample || (attempted_mask & (uint8_t)~groups) != 0U) return IF_ERR;
+    if (stats->state != IDD_STATS_RUNNING || attempted_mask == 0U) return 0;
     uint32_t begin = begin_ms - stats->started_ms;
     uint32_t end = end_ms - stats->started_ms;
-    if (begin >= stats->duration_ms || end >= stats->duration_ms || end < begin ||
-        (stats->attempts != 0U && end <= stats->last_offset_ms)) {
+    if (begin >= stats->duration_ms || end >= stats->duration_ms || end < begin) {
         if (stats->discarded != UINT32_MAX) ++stats->discarded;
         idd_stats_poll(stats, end_ms);
         return 0;
     }
+    uint8_t fresh = attempted_mask;
+    if ((stats->seen_groups & MEMORY_MONITOR_VALID_VOLTAGE) != 0U && end <= stats->voltage_offset_ms)
+        fresh &= (uint8_t)~MEMORY_MONITOR_VALID_VOLTAGE;
+    if ((stats->seen_groups & MEMORY_MONITOR_VALID_IDD) != 0U && end <= stats->current_offset_ms)
+        fresh &= (uint8_t)~MEMORY_MONITOR_VALID_IDD;
+    /* 一次调用可含新组和重复组，只接纳新组；丢弃计数每次调用至多增加一次。 */
+    if (fresh != attempted_mask && stats->discarded != UINT32_MAX) ++stats->discarded;
+    if (fresh == 0U) return 0;
     ++stats->attempts;
-    stats->last_offset_ms = end;
+    if (end > stats->last_offset_ms) stats->last_offset_ms = end;
+    stats->seen_groups |= fresh;
+    if ((fresh & MEMORY_MONITOR_VALID_VOLTAGE) != 0U) stats->voltage_offset_ms = end;
+    if ((fresh & MEMORY_MONITOR_VALID_IDD) != 0U) stats->current_offset_ms = end;
     for (uint8_t i = 0U; i < MEMORY_MONITOR_RAIL_COUNT; ++i) {
-        int voltage_valid = sample->valid_mask & MEMORY_MONITOR_VALID_VOLTAGE;
-        int current_valid = sample->valid_mask & MEMORY_MONITOR_VALID_IDD;
-        /* 无效数组可能尚未填写，连函数实参求值也不读取它们。 */
-        metric_add(&stats->voltage[i], voltage_valid ? sample->voltage_mv[i] : 0,
-                   voltage_valid);
-        metric_add(&stats->current[i], current_valid ? sample->idd[i].current_ma : 0,
-                   current_valid);
+        if ((fresh & MEMORY_MONITOR_VALID_VOLTAGE) != 0U) {
+            int valid = sample->valid_mask & MEMORY_MONITOR_VALID_VOLTAGE;
+            /* 无效数组可能尚未填写，连函数实参求值也不读取它们。 */
+            metric_add(&stats->voltage[i], valid ? sample->voltage_mv[i] : 0, valid);
+        }
+        if ((fresh & MEMORY_MONITOR_VALID_IDD) != 0U) {
+            int valid = (sample->valid_mask & MEMORY_MONITOR_VALID_IDD) != 0U &&
+                        sample->idd[i].current_ua <= UINT32_MAX;
+            metric_add(&stats->current[i], valid ? (int64_t)sample->idd[i].current_ua : 0, valid);
+        }
     }
     return 1;
 }

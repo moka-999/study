@@ -10,7 +10,8 @@ def main():
     root = Path(__file__).resolve().parents[1]
     source = (root / "App/tasks/rk/rk_link.c").read_text(encoding="utf-8")
     table = source.split("s_command_table[] = {", 1)[1].split("};", 1)[0]
-    algorithms = re.findall(r'\{\s*(\d+)U,\s*"([^"]+)"\s*\}', table)
+    algorithms = re.findall(
+        r'\{\s*(\d+)U,\s*"([^"]+)"\s*,\s*RK_COMMAND_CATEGORY_FUNCTIONAL\s*\}', table)
     document = (root / "doc/func_algorithm_network_packets.md").read_text(encoding="utf-8")
     examples = re.findall(
         r"```json\n(.*?)\n```\n\n完整 HEX：(\d+) 字节，示例 Seq=(\d+)。\n\n```text\n(.*?)\n```",
@@ -50,6 +51,7 @@ def main():
             },
             "reboot": False,
             "bootMode": "emmc",
+            "TimingParameters": {},
         }, name
 
     # 轮询包不携带算法参数；示例2、3仅适用于此前只发过Seq=1开始包的连接。
