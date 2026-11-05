@@ -15,7 +15,8 @@
 /* 默认任务在uart_start_all()后调用一次；不初始化硬件，不访问电源或Flash。 */
 void log_console_start(void);
 
-/* 默认任务每轮调用一次；MCU模式解释log mcu/log rk/status及led验灯命令。
+/* 默认任务每轮调用一次；MCU模式解释log mcu/log rk/status及led验灯命令，
+ * start rk/end rk只登记请求，另由唯一TCP业务上下文推进电源和Boot。
  * led 0|1|2|all off|pass|fail|normal|hot仅用于空闲验灯，单组命令关闭其他组；
  * 也可用00/01/10/11固定两路电平：左FAIL引脚、右PASS引脚，0低1高，11持续双亮。
  * 只更新结果灯，不改变PC轮次或加热，正式PC/B2事件仍可覆盖，结束用led all off。
@@ -26,6 +27,22 @@ void log_console_start(void);
  * RK发送拥塞时暂存一块、不再取新输入；RX断流丢弃至换行并报告，不能保证无损。
  * UART故障恢复沿用路由层HAL超时；不建立新任务，不触碰UART4协议。 */
 void log_console_process(void);
+
+typedef enum {
+    LOG_CONSOLE_POWER_NONE = 0,
+    LOG_CONSOLE_POWER_START_RK, /* start rk：LPDDR4X标称1800/1100/600mV、fspiM1冷启动。 */
+    LOG_CONSOLE_POWER_END_RK    /* end rk：沿用现有正常下电流程。 */
+} log_console_power_request_t;
+
+/* 两条命令仅在MCU模式识别，须完整换行；单槽不覆盖、不自动重试。
+ * 唯一TCP任务领取一次后须调用complete；不要求PC连接，不在串口解析临界区访问电源。
+ * 领取返回NONE表示无请求；测试或电源忙由业务层拒绝，完成仅表示本地电源/Boot动作。
+ */
+log_console_power_request_t log_console_take_power_request(void);
+/* 唯一TCP任务反馈：NULL成功，其它为静态错误名；复制到固定缓冲后由默认任务发送。
+ * 切换日志来源不取消动作；回复在UART拥塞时保留，完整入队后才接受下一条电源命令。
+ */
+void log_console_complete_power_request(const char *error);
 
 /* 任务上下文写MCU日志，返回已消费字节数；RK模式或控制回复待发时消费但不输出。
  * 尚未启动、ISR、参数错误返回0；出口满时返回已入队前缀且累计丢字节。

@@ -8,6 +8,9 @@
 #include "result_led.h"
 #include "pc_test_service.h"
 #include "pc_power_service.h"
+#if defined(B1_RK_UART)
+#include "log_console.h"
+#endif
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
 #include "v2_power_sim.h"
 /* 仅替换本文件的电源/测量依赖；正式监测任务、真实RK及Flash不变。 */
@@ -880,6 +883,40 @@ pc_dispatch_result_t pc_dispatch_handle(
     return result;
 }
 
+#if defined(B1_RK_UART)
+/* 本地串口与PC共用唯一TCP业务上下文，避免跨任务检查busy后再操作电源的竞争。
+ * 只复用PREPARE_SLT的冷启动/Boot步骤，不建立SLT测试占用，也不等待RK心跳。
+ */
+static void poll_console_power(void)
+{
+    static log_console_power_request_t active;
+    const char *error;
+    if (active != LOG_CONSOLE_POWER_NONE) {
+        pc_power_action_t action = active == LOG_CONSOLE_POWER_START_RK ? PC_POWER_PREPARE_SLT : PC_POWER_OFF;
+        if (pc_power_service_take(action, &error)) {
+            log_console_complete_power_request(error);
+            active = LOG_CONSOLE_POWER_NONE;
+        }
+        return;
+    }
+    log_console_power_request_t request = log_console_take_power_request();
+    if (request == LOG_CONSOLE_POWER_NONE) return;
+    if (pc_test_service_busy() || pc_power_service_busy() || s_power_command) {
+        log_console_complete_power_request("busy");
+        return;
+    }
+    const pc_power_target_t target = {
+        .memory_type = DDR_MEMORY_LPDDR4X,
+        .mv = {1800U, 1100U, 600U},
+        .boot_mode = BOOT_MODE_FSPI_M1,
+    };
+    pc_power_action_t action = request == LOG_CONSOLE_POWER_START_RK ? PC_POWER_PREPARE_SLT : PC_POWER_OFF;
+    error = pc_power_service_start(action, request == LOG_CONSOLE_POWER_START_RK ? &target : NULL, 1U);
+    if (error) log_console_complete_power_request(error);
+    else active = request;
+}
+#endif
+
 void pc_dispatch_poll(void)
 {
     pc_power_service_poll();
@@ -887,6 +924,9 @@ void pc_dispatch_poll(void)
         const char *error;
         if (pc_power_service_take(s_power_action, &error)) s_power_command = 0U;
     }
+#if defined(B1_RK_UART)
+    poll_console_power();
+#endif
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     v2_power_sim_poll();
 #endif

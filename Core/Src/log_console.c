@@ -22,6 +22,9 @@ static size_t s_command_length;
 static uint8_t s_discard_line;
 static const char *s_reply;
 static char s_led_reply[96];
+static log_console_power_request_t s_power_request;
+static uint8_t s_power_taken, s_power_reply_ready;
+static char s_power_reply[128];
 /* 仅行首保留退出命令前缀；普通字符立即进入RK发送缓存，不限制命令行长度。 */
 static const char s_rk_escape[] = "log mcu";
 static size_t s_rk_escape_length;
@@ -36,9 +39,14 @@ static volatile uint32_t s_dropped_bytes;
 /* 调用方已进入短临界区；USART1发送取锁必须为0等待，避免屏蔽中断时睡眠。 */
 static void flush_reply(void)
 {
+    if (s_reply == NULL && s_power_reply_ready) s_reply = s_power_reply;
     if (s_reply != NULL &&
         uart_send(UART_PORT_CONSOLE, (uint8_t *)s_reply,
                   (uint16_t)strlen(s_reply)) == IF_OK) {
+        if (s_reply == s_power_reply) {
+            s_power_reply_ready = 0U;
+            s_power_request = LOG_CONSOLE_POWER_NONE;
+        }
         s_reply = NULL;
     }
 }
@@ -88,6 +96,8 @@ void log_console_start(void)
     s_command_length = 0U;
     s_discard_line = 0U;
     s_reply = NULL;
+    s_power_request = LOG_CONSOLE_POWER_NONE;
+    s_power_taken = s_power_reply_ready = 0U;
     s_rk_escape_length = 0U;
     s_rk_line_start = 1U;
     s_skip_lf = 0U;
@@ -160,10 +170,20 @@ static void finish_command(void)
         } else {
             s_reply = "\r\n[log] select MCU first: log mcu\r\n";
         }
+    } else if (!s_discard_line &&
+               (strcmp(s_command, "start rk") == 0 || strcmp(s_command, "end rk") == 0)) {
+        /* 只入单槽请求，电源编排由唯一TCP上下文处理；此处仍在短临界区内。 */
+        if (s_power_request != LOG_CONSOLE_POWER_NONE) s_reply = "\r\n[rk power] busy\r\n";
+        else {
+            s_power_request = s_command[0] == 's' ? LOG_CONSOLE_POWER_START_RK : LOG_CONSOLE_POWER_END_RK;
+            s_power_taken = 0U;
+            s_reply = s_power_request == LOG_CONSOLE_POWER_START_RK ?
+                "\r\n[rk power] start rk queued\r\n" : "\r\n[rk power] end rk queued\r\n";
+        }
     } else if (!s_discard_line && strncmp(s_command, "led ", 4U) == 0) {
         s_reply = apply_led_command(s_command);
     } else {
-        s_reply = "\r\n[log] use: log mcu | log rk | status | led 0|1|2|all 00|01|10|11|off|pass|fail|normal|hot\r\n";
+        s_reply = "\r\n[log] use: log mcu | log rk | status | start rk | end rk | led 0|1|2|all 00|01|10|11|off|pass|fail|normal|hot\r\n";
     }
     /* 确认串排在既有TX尾部；队列满则下一轮重试，期间不加入新日志。
      * 命令洪泛时只保留最新控制回复，实际选择以最后一条有效命令为准。 */
@@ -279,6 +299,34 @@ int log_console_take_status_request(void)
     if (requested) s_status_pending = 0U;
     taskEXIT_CRITICAL();
     return requested;
+}
+
+log_console_power_request_t log_console_take_power_request(void)
+{
+    taskENTER_CRITICAL();
+    log_console_power_request_t request = LOG_CONSOLE_POWER_NONE;
+    if (s_started && s_power_request != LOG_CONSOLE_POWER_NONE && !s_power_taken && s_reply == NULL) {
+        request = s_power_request;
+        s_power_taken = 1U;
+    }
+    taskEXIT_CRITICAL();
+    return request;
+}
+
+void log_console_complete_power_request(const char *error)
+{
+    taskENTER_CRITICAL();
+    if (s_power_request != LOG_CONSOLE_POWER_NONE && s_power_taken && !s_power_reply_ready) {
+        const char *command = s_power_request == LOG_CONSOLE_POWER_START_RK ? "start rk" : "end rk";
+        if (error) (void)snprintf(s_power_reply, sizeof(s_power_reply),
+                                 "\r\n[rk power] %s failed: %.40s\r\n", command, error);
+        else if (s_power_request == LOG_CONSOLE_POWER_START_RK)
+            (void)snprintf(s_power_reply, sizeof(s_power_reply),
+                           "\r\n[rk power] power ON; LPDDR4X 1800/1100/600mV; fspiM1; check RK boot log\r\n");
+        else (void)snprintf(s_power_reply, sizeof(s_power_reply), "\r\n[rk power] power OFF\r\n");
+        s_power_reply_ready = 1U;
+    }
+    taskEXIT_CRITICAL();
 }
 
 int log_console_write_status(const char *text, size_t length)

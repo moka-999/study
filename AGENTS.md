@@ -57,6 +57,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
 - PH4/PH5 are the schematic's logical I2C4 bus and must remain open-drain GPIOs
   for software I2C; do not configure the invalid `GPIO_AF4_I2C4` mapping.
 - UART4固定连接RK UART1_M0运行协议；USART2双向连接RK UART2_M0_DEBUG；USART1在MCU模式接收本地命令，RK模式转发输入，行首log mcu加换行截获返回MCU。UART4协议不参与调试转发。
+- USART1在MCU模式接受`start rk`/`end rk`加换行：前者以LPDDR4X标称1800/1100/600mV、fspiM1走现有冷启动，已ON也先正常下电；后者正常下电。请求由唯一TCP业务上下文推进，无需PC连接；测试/电源在途返回busy，不建立SLT占用、不等RK心跳，power ON不证明RK启动成功。RK模式须先log mcu；详细回复与离线验证见`docs/uart_log_console_20261010.md`。
 - `b1.ioc` is the CubeMX hardware baseline. PA13/PA14 are explicitly reserved for
   SWD and PH4/PH5 start high/released; preserve both settings. After regeneration,
   保留Boot首128KiB、App起点`0x08020000`/容量`1920K`，VTOR使用`g_pfnVectors`。

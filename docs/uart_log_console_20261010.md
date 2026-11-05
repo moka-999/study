@@ -6,7 +6,7 @@
 
 | MCU 接口 | 引脚 | 对端 / 用途 |
 |---|---|---|
-| UART4 | PA12 TX、PA11 RX | 经 U4008/RS0102 接 RK UART0_M0，专用 TLV 协议 |
+| UART4 | PA12 TX、PA11 RX | 经 U4008/RS0102 接 RK UART1_M0，专用 TLV 协议；按20260920-2134原图第6/14页纠正旧记载 |
 | USART2 | PD5 TX、PD6 RX | 经 U4013/RS0102 接 RK UART2_M0_DEBUG；双向调试转发，输入只在RK模式发送 |
 | USART1 | PA9 TX、PA10 RX | 接外部串口助手，输出 MCU 日志或转发 RK 日志，MCU模式接收本地命令，RK模式转发输入 |
 
@@ -21,6 +21,8 @@
 | `log mcu` | MCU 自身日志 | `[log] source=mcu` |
 | `log rk` | USART2 收到的 RK 原始日志 | `[log] source=rk` |
 | `status` | MCU模式下输出一次板级状态 | `[log] status queued`；RK模式原样转发给RK |
+| `start rk` | MCU模式下以LPDDR4X标称1800/1100/600mV、fspiM1冷启动 | 先`[rk power] start rk queued`；完成后`power ON`，失败显示错误名 |
+| `end rk` | MCU模式下正常下电 | 先`[rk power] end rk queued`；完成后`power OFF`，失败显示错误名 |
 | `led 0 pass` | 单组验灯：组0显示PASS，其余两组灭 | `[led] states=1,0,0; ...` |
 | `led all off` | 关闭三组结果灯 | `[led] states=0,0,0; ...`；不改变PG6 |
 | `led 0 00` / `01` / `10` / `11` | 固定组0两路电平，其他组灭；左位PG0、右位PG1，0低1高 | `states`分别为0/1/2/5；11双路常亮，不闪烁 |
@@ -28,6 +30,8 @@
 两种来源互斥；RK输出里的 `log mcu` 等文字只显示，不解释为命令。
 
 - MCU模式：只处理上表本地命令；其他命令、二进制和超长行返回用法提示。
+- 本地电源命令：当前为RK模式时先发送`log mcu`并换行，再发送`start rk`或`end rk`并换行。无需PC连接；唯一TCP任务需正常运行。`start rk`覆盖此前保存的训练目标，已上电时也先正常下电，再按现有OFF等待、Boot设置和轨间时序冷启动；不修改原时序，不建立FUNC/PARA/SLT测试占用。它不等RK心跳、不下发算法，`power ON`只确认本地电源动作完成，RK启动结果须看启动日志。需要查看时另发`log rk`。
+- `end rk`沿用正常下电，已经OFF时直接完成；测试或电源操作在途时两条命令均返回`busy`，不会取消在途测试。命令只保留一条，失败不自动重试，切换日志来源不取消已受理动作；完成回复遇发送拥塞保留，完整入队后才接受下一条电源命令。
 - 空闲验灯：`led 0|1|2|all off|pass|fail|normal|hot`，选一组时其余两组熄灭。
   `pass`亮PASS通道，`fail`亮FAIL通道，`normal`两通道同时闪烁，`hot`仅FAIL通道闪烁，亮/灭各500ms。
   只控制显示，不启动算法、修改轮次或控制加热；正式PC/B2显示事件仍可覆盖，验灯时保持业务空闲，结束发送`led all off`。
@@ -40,7 +44,7 @@
 - USART2发送拥塞时缓存一块，暂缓取新输入，RK日志仍继续处理；接收断流会警告并丢弃到下个换行，不自动重发命令。已发到RK的前半行无法撤回，必要时由操作者发送Ctrl+C再重输。
 - 调试转发不是文件传输协议，不保证持续大流量无损；不能通过此通道发送保留的`log mcu`命令给RK。
 
-确认文字之前可能还有已经排队的旧来源字节，确认之后只加入新来源。出口拥塞时先等待确认文字入队，期间日志直接丢弃；连续大量切换命令只保留最新的待发确认。不会清空 UART4 接收、重启 RK、操作电源或写入 Flash。
+确认文字之前可能还有已经排队的旧来源字节，确认之后只加入新来源。出口拥塞时先等待确认文字入队，期间日志直接丢弃；连续大量切换命令只保留最新的待发确认。日志切换不会清空UART4接收、重启RK、操作电源或写入Flash；电源操作仅由明确的`start rk`/`end rk`命令触发。
 
 ## 3. 编译默认值与 MCU 日志入口
 
@@ -81,3 +85,9 @@ B1 OTA Release 双槽验证通过：145132 字节、1468 处地址修正，A1→
 **待真板验证**：三路实际波特率/电气接线、DMA连续接收、日志高负载下 UART4 和 TCP 并发、任务堆栈/FreeRTOS堆余量及完整启动表现。本轮未连接串口/TCP/ST-Link、未烧录、未提交或推送。
 
 2026-11-02双向输入改动、验证与待验收项见[接入记录](../../test/doc/b1_debug_bridge_20261102.md)。
+
+## 6. 本地电源命令（2026-11-05）
+
+本次新增`start rk`/`end rk`，复用现有电源服务；不修改电源驱动、轨间延时、RK协议或V2运行代码。实际C/QEMU回归已覆盖两种日志默认值、分片/换行/断流、重复输入、发送拥塞、模式隔离，以及标称训练目标、fspiM1、ON后冷重启、正常下电、PC互斥、断线继续和I/O失败/超时。PC整轮、原PC业务、B1完整`check`、Debug构建及Boot＋App文件布局检查通过；合并BIN为386660字节，CRC32为`34EC6C89`。新ELF位于`D:/pro/test/output/b1-console-power-20261105/b1.elf`；安装及真实启动由用户在设备空闲时验证，本轮未连接或烧录设备。
+
+复跑：V2共用脚本`tests/verify_uart_idd_c.py --app-root D:/pro/b1 --compiler <arm-none-eabi-gcc.exe> --log-default 0`（另测1），以及`tests/verify_pc_rk_service.py --app-root D:/pro/b1 --power-sequence`。两项分别运行正式串口解析/单槽交接和正式PC电源服务，硬件、调度器端口为测试桩。
