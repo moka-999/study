@@ -1,5 +1,6 @@
 /* B1 DDR电源与采样器件的最小组合层。 */
 #include "memory_monitor.h"
+#include "board_adc_config.h"
 #include "ddr_power.h"
 #include <string.h>
 
@@ -29,6 +30,7 @@ void memory_monitor_configure(memory_monitor_t *monitor,
     monitor->adc.wait_ms = wait_ms;
     /* B1负端AIN1/3/5接AGND，启用接地输入的诊断策略。 */
     monitor->adc.grounded_ainm = 1U;
+    monitor->adc.use_avdd_reference = BOARD_AD_USE_AVDD_REFERENCE;
 }
 
 int memory_monitor_init(memory_monitor_t *monitor)
@@ -65,7 +67,7 @@ int memory_monitor_sample(memory_monitor_t *monitor,
 
     if (monitor->adc_ready &&
         ad7124_read_all_mv(&monitor->adc, sample->voltage_mv,
-                           MEMORY_MONITOR_RAIL_COUNT, &got, 2.5f,
+                           MEMORY_MONITOR_RAIL_COUNT, &got, (float)BOARD_AD_REFERENCE_MV / 1000.0f,
                            pga, bipolar) == IF_OK &&
         got == MEMORY_MONITOR_RAIL_COUNT) {
         /*
@@ -137,7 +139,7 @@ int memory_monitor_poll_voltage(memory_monitor_t *monitor,
         result = IF_ERR;
         goto failed;
     }
-    monitor->voltage_pending_mv[channel] = ad7124_raw_to_mv((int32_t)raw, 2.5f, 0U, 0U);
+    monitor->voltage_pending_mv[channel] = ad7124_raw_to_mv((int32_t)raw, (float)BOARD_AD_REFERENCE_MV / 1000.0f, 0U, 0U);
     monitor->voltage_mask |= (uint8_t)(1U << channel);
     if (monitor->voltage_mask != (1U << MEMORY_MONITOR_RAIL_COUNT) - 1U) return 0;
     memcpy(sample->voltage_mv, monitor->voltage_pending_mv, sizeof(sample->voltage_mv));

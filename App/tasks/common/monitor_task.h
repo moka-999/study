@@ -75,13 +75,14 @@ int monitor_idd_get(idd_stats_t *out);
 int monitor_task_prepare(void);
 
 /**
- * @brief 持事务锁执行PC的内存类型选择或三轨拉偏。
+ * @brief 持事务锁保存OFF时的上电目标，或执行ON时的三轨拉偏。
  * @param[in] type LPDDR4或LPDDR4X；ON时必须等于当前类型。
- * @param[in] steps 非NULL、3项，顺序VDD1/VDD2/VDDQ，每档10/5/5mV；OFF时须全零。
+ * @param[in] steps 非NULL、3项，顺序VDD1/VDD2/VDDQ，每档10/5/5mV，须可精确编码。
  * @return PWR_CTRL_OK成功；ERR_PARAM非法目标；ERR_NOT_CONFIGURED锁未建立；
  *         ERR_RESOURCE_BUSY取锁失败；ERR_BUSY状态/类型不允许；ERR_FAULT故障。
- * @note 任务上下文，取锁最多等待500ms后还可能同步I2C阻塞。ON拉偏仍要求
- *       PC确保RK已完成DDR初始化；写失败由pwr_ctrl全关并进入FAULT。
+ * @note OFF仅更新RAM训练目标，不访问I2C；下次上电写TPS，MCU复位恢复标称。
+ *       ON拉偏不覆盖训练目标，仍要求PC确保RK已完成DDR初始化。
+ *       任务上下文，取锁最多500ms；ON时可能同步I2C阻塞，写失败全关并进入FAULT。
  */
 pwr_ctrl_result_t monitor_apply_ddr_config(
     ddr_memory_type_t type, const int16_t steps[DDR_RAIL_COUNT]);

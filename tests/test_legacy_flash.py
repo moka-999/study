@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "BSP/Flash/flash_layout.h").read_text(encoding="utf-8-sig")
 SOURCE = (ROOT / "BSP/Flash/flash_layout.c").read_text(encoding="utf-8-sig")
 QUERY = (ROOT / "App/protocol/pc/pc_tester_info.c").read_text(encoding="utf-8-sig")
+BOOT = (ROOT / "boot/boot_fru.c").read_text(encoding="utf-8-sig")
 
 
 def c_struct(name: str, text: str) -> type[ct.Structure]:
@@ -275,14 +276,16 @@ def main() -> None:
     fru_load_source = SOURCE.split("int fru_info_load(", 1)[1].split("int fru_info_save(", 1)[0]
     assert "generation_is_newer(legacy_generation, current_generation)" in fru_load_source
     assert "return FLASH_STORE_ERR_LEGACY;" in fru_load_source
-    assert "load_result != FLASH_STORE_ERR_LEGACY" in QUERY
+    assert "load_result != FLASH_STORE_ERR_LEGACY" in BOOT
     save_source = SOURCE.split("static int save_record(", 1)[1].split("int firmware_version_load(", 1)[0]
-    assert save_source.index("read_legacy_slot") < save_source.index("flash->write")
-    assert save_source.index("FLASH_STORE_ERR_UNSUPPORTED") < save_source.index("flash->write")
-    assert "if (destination[0] != '\\0') return 0;" in QUERY
-    assert "fru_info_load_legacy_v1" in QUERY and "firmware_version_current" not in QUERY
-    initial_branch = QUERY.split("fru_info_init(fru);", 1)[1].split("fill_missing_fields", 1)[0]
-    assert "board_mac_address()" in initial_branch
+    assert save_source.index("read_legacy_slot") < save_source.index("flash->write(")
+    assert save_source.index("FLASH_STORE_ERR_UNSUPPORTED") < save_source.index("flash->write(")
+    assert "if (destination[0] != '\\0') return 0;" in BOOT
+    assert "fru_info_load_legacy_v1" in BOOT and "firmware_version_current" not in QUERY
+    assert "fru_info_load_legacy_v1" not in QUERY and "fru_info_save(" not in QUERY
+    assert "fru_info_load(&flash_if, fru, NULL)" in QUERY
+    initial_branch = BOOT.split("fru_info_init(fru);", 1)[1].split("fill_missing_fields", 1)[0]
+    assert "if (mac != NULL) memcpy(fru->mac_address, mac, sizeof(fru->mac_address));" in initial_branch
     assert "ENABLE_FLASH_SELF_TEST" not in HEADER
     assert '#define FIRMWARE_TARGET "b1-h743"' in SOURCE
     print("B1 Flash legacy ABI/field/A-B/unknown-format model checks PASS (not C execution)")

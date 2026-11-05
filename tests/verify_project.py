@@ -39,8 +39,9 @@ def require(ok: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest().upper()
+def source_sha256(path: Path) -> str:
+    # 固定C源码统一按LF核验，兼容Git检出/导出的CRLF；其它字节变化仍会拒绝。
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest().upper()
 
 
 def main() -> int:
@@ -220,7 +221,7 @@ def main() -> int:
     require("IWDG_PRESCALER_256" in source and "HAL_IWDG_Init(&watchdog)" in source and
             source.index("flash_if.init(&flash_if)") < source.index("    MX_IWDG_Init();") <
             source.index("osKernelInitialize()"),
-            "独立App须在外设初始化后、任务启动前开启IWDG")
+            "启用IWDG时须在外设初始化后、任务启动前启动")
     require("sizeof(firmware_version_info_t) == 76U" in flash_header and
             "sizeof(fru_info_t) == 224U" in flash_header and
             re.search(r"#define\s+FRU_INFO_SCHEMA_VERSION\s+2U", flash_header),
@@ -229,7 +230,7 @@ def main() -> int:
             "fru_info_load_legacy_v1" in flash_layout,
             "B1原有192字节FRU v1必须保留读取迁移入口")
 
-    # AD7124只同步V2已验收的驱动与SPI4板级适配；真板前不得启动即访问器件。
+    # AD7124保持SPI4绑定，启动阶段不访问尚未供电的器件。
     ad_header = (ROOT / "BSP/AD7124/ad7124.h").read_text(encoding="utf-8")
     ad_source = (ROOT / "BSP/AD7124/ad7124.c").read_text(encoding="utf-8")
     spi_source = (ROOT / "HAL_Drv/spi_hw.c").read_text(encoding="utf-8")
@@ -241,12 +242,15 @@ def main() -> int:
             "AD7124_AIN_AIN1, AD7124_AIN_AIN3, AD7124_AIN_AIN5" in ad_source and
             "AD7124_CH_AINM(b1_ainm[ch])" in ad_source,
             "AD7124 B1三路原理图差分通道映射缺失")
-    require("AD7124_CFG_REF_SEL(AD7124_REF_INT)" in ad_source and
-            "AD7124_CFG_REF_SEL(AD7124_REF_EXT1)" not in ad_source and
-            "AD7124_CFG_AIN_BUFP" in ad_source and
-            "AD7124_CFG_AIN_BUFM) != IF_OK" not in ad_source and
-            "_wr24(d, AD7124_REG_ERROR_EN, AD7124_DIAGNOSTIC_MASK)" in ad_source,
-            "AD7124必须使用内部2.5V基准且关闭接地负端缓冲")
+    adc_config = (ROOT / "Core/Inc/board_adc_config.h").read_text(encoding="utf-8")
+    monitor_source = (ROOT / "HAL_Drv/memory_monitor.c").read_text(encoding="utf-8")
+    require("use_avdd_reference" in ad_header and "AD7124_REF_AVDD" in ad_source and
+            "write_error_enable" in ad_source,
+            "AD7124基准选择或诊断回读入口缺失；具体寄存器和故障分支由实际C回归验证")
+    require("BOARD_AD_USE_AVDD_REFERENCE" in adc_config and "BOARD_AD_REFERENCE_MV" in adc_config and
+            "monitor->adc.use_avdd_reference = BOARD_AD_USE_AVDD_REFERENCE;" in monitor_source and
+            monitor_source.count("(float)BOARD_AD_REFERENCE_MV / 1000.0f") == 2,
+            "B1基准选择、同步采样和增量扫描必须共用板级基准配置")
     require("spi_if_t spi4_if" in spi_source and "&hspi4" in spi_source and
             "hspi2" not in spi_source,
             "AD7124必须只绑定B1 SPI4，不能占用SPI2保活总线")
@@ -401,9 +405,9 @@ def main() -> int:
             "Middlewares/Third_Party/cJSON/cJSON.c" in cmake and
             "CJSON_NESTING_LIMIT=16" in cmake,
             "B1构建未纳入PC协议/cJSON或深度限制")
-    require(sha256(cjson_dir / "cJSON.c") ==
+    require(source_sha256(cjson_dir / "cJSON.c") ==
             "298581A04A36C0165DA4B0AADE235C23088CB2FAA58651D720EA2F3706ED0B0D" and
-            sha256(cjson_dir / "cJSON.h") ==
+            source_sha256(cjson_dir / "cJSON.h") ==
             "25B0145150D500498E4D209CEC69C18C42CF818BFFCC54690BE3B895A2A16DEE",
             "B1 cJSON不是V2验收的v1.7.19固定源码")
     require(all(field in pc_test_source for field in (
@@ -479,9 +483,10 @@ def main() -> int:
             "frame->count >= TLV_MAX_PER_FRAME" in rk_frame and
             "invalid_frame:" in rk_frame,
             "RK必须传播解包错误并保留短帧/数量/整帧原子拒绝保护")
-    require(rk_task.count("rk_link_next_sequence()") == 2 and
+    require(rk_task.count("rk_link_next_sequence()") == 3 and
+            "tlv_pack_frequency(value, rk_link_next_sequence()" in rk_task and
             "process_heartbeat(&last_heartbeat);" in rk_task,
-            "RK命令与心跳必须通过独立序号入口分配，不借用PC Seq")
+            "RK命令、心跳与启动频率回复必须通过独立序号入口分配，不借用PC Seq")
     require(not (ROOT / "App/tasks/rk/hb_task.c").exists() and
             not (ROOT / "App/tasks/rk/hb_task.h").exists() and
             "StartHbTask" not in rtos_source + task_header and "hb_task.c" not in cmake,
@@ -617,7 +622,7 @@ def main() -> int:
             "flash_transaction_begin(1000U)" in pc_info,
             "TCP有界等待/断线生命周期与Flash事务保护不得随升级功能删除")
     require("App/tasks/common/task_watchdog.c" in cmake,
-            "移除OTA健康确认后，正式任务仍需看门狗监控")
+            "保留任务存活监督源码，供板级看门狗开关启用")
     print("Boot＋App布局、早期关电、无OTA依赖及只读FRU检查通过")
 
     manifest_path = args.build_dir / "b1.manifest.json"

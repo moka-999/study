@@ -1,4 +1,5 @@
 #include "board_diagnostics.h"
+#include "board_adc_config.h"
 #include "log_console.h"
 #include "main.h"
 #include "board_identity.h"
@@ -161,6 +162,9 @@ static void build_report(uint32_t now)
                   ad_stage < sizeof(ad_stages) / sizeof(ad_stages[0]) ? ad_stages[ad_stage] : "unknown",
                   monitor.adc_init_channel, monitor.adc_init_result, monitor.adc_status,
                   (unsigned long)monitor.adc_error_read);
+    report_append("[AD reference] configured=%s assumedMv=%u\r\n",
+                  BOARD_AD_USE_AVDD_REFERENCE ? "AVDD" : "internal",
+                  (unsigned)BOARD_AD_REFERENCE_MV);
     const ad7124_cal_snapshot_t *cal = &monitor.adc_cal_snapshot;
     report_append("[AD preCal] valid=%u ctrl=0x%04X ch=0x%04X cfg=0x%04X\r\n",
                   cal->valid, cal->control, cal->channel, cal->config);

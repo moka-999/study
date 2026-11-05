@@ -15,7 +15,11 @@
 /* 默认任务在uart_start_all()后调用一次；不初始化硬件，不访问电源或Flash。 */
 void log_console_start(void);
 
-/* 默认任务每轮调用一次；MCU模式解释log mcu/log rk/status加CR、LF或CRLF。
+/* 默认任务每轮调用一次；MCU模式解释log mcu/log rk/status及led验灯命令。
+ * led 0|1|2|all off|pass|fail|normal|hot仅用于空闲验灯，单组命令关闭其他组；
+ * 也可用00/01/10/11固定两路电平：左FAIL引脚、右PASS引脚，0低1高，11持续双亮。
+ * 只更新结果灯，不改变PC轮次或加热，正式PC/B2事件仍可覆盖，结束用led all off。
+ * 本地命令须加CR、LF或CRLF。
  * RK模式逐字节转发输入，仅截获行首完整log mcu加换行；保留CR/LF及控制字符。
  * 行首退出前缀暂存到失配/换行；退格编辑前缀，Ctrl+C丢弃前缀并转发。
  * 每轮最多消费控制台和RK日志各一个接收块，无数据时立即返回。

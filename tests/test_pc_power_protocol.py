@@ -174,7 +174,7 @@ def main() -> None:
             power_control.index("ddr_power_set(DDR_RAIL_MASK_ALL"),
             "调压必须先纯校验，非法JSON不能触发FAULT关断")
 
-    # 新训练目标仅是内部启动入口，不把已有0509静默改成另一种PC合同。
+    # 0509在OFF保存训练目标；正式010x仍通过同一个上电入口写入目标。
     training_request = power_control.split(
         "pwr_ctrl_result_t pwr_ctrl_request_training_on(", 1)[1].split(
         "pwr_ctrl_result_t pwr_ctrl_request_off(", 1)[0]

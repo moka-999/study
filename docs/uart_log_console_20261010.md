@@ -21,10 +21,19 @@
 | `log mcu` | MCU 自身日志 | `[log] source=mcu` |
 | `log rk` | USART2 收到的 RK 原始日志 | `[log] source=rk` |
 | `status` | MCU模式下输出一次板级状态 | `[log] status queued`；RK模式原样转发给RK |
+| `led 0 pass` | 单组验灯：组0显示PASS，其余两组灭 | `[led] states=1,0,0; ...` |
+| `led all off` | 关闭三组结果灯 | `[led] states=0,0,0; ...`；不改变PG6 |
+| `led 0 00` / `01` / `10` / `11` | 固定组0两路电平，其他组灭；左位PG0、右位PG1，0低1高 | `states`分别为0/1/2/5；11双路常亮，不闪烁 |
 
 两种来源互斥；RK输出里的 `log mcu` 等文字只显示，不解释为命令。
 
 - MCU模式：只处理上表本地命令；其他命令、二进制和超长行返回用法提示。
+- 空闲验灯：`led 0|1|2|all off|pass|fail|normal|hot`，选一组时其余两组熄灭。
+  `pass`亮PASS通道，`fail`亮FAIL通道，`normal`两通道同时闪烁，`hot`仅FAIL通道闪烁，亮/灭各500ms。
+  只控制显示，不启动算法、修改轮次或控制加热；正式PC/B2显示事件仍可覆盖，验灯时保持业务空闲，结束发送`led all off`。
+- 电平验灯：`led 0|1|2|all 00|01|10|11`。左位为该组FAIL引脚，右位为PASS引脚；
+  组0为PG0/PG1，组1为PG2/PG3，组2为PG4/PG5。0输出低、1输出高，11两路持续高电平；
+  `status`的状态5仅表示此次调试双路常亮，不新增TCP测试状态。
 - RK模式：输入原样转发到USART2，包括回车、退格、Tab、方向键序列及Ctrl+C；`status`也交给RK。串口助手须发送实际控制字节，例如Ctrl+C为HEX `03`。
 - 退出RK模式：在行首输入完整`log mcu`加CR/LF/CRLF。该保留行不交给RK，尾随LF也不泄漏；命令区分大小写，不带前后空格。
 - 行首与`log mcu`相同的前缀暂存，失配时一起发出；因此输入开头的`l`等字符可能延迟显示。前缀内退格可编辑，Ctrl+C取消暂存前缀并发送中断字符。普通RK命令不受MCU本地15字符行长限制。

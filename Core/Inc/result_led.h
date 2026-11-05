@@ -28,6 +28,7 @@ typedef enum {
     RESULT_LED_FAIL,
     RESULT_LED_TEST_NORMAL,
     RESULT_LED_TEST_HOT,
+    RESULT_LED_DEBUG_BOTH_ON, /* 仅串口验灯：两路持续为高，不参与正式测试状态定义。 */
 } result_led_state_t;
 
 typedef struct {

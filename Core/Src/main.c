@@ -1,4 +1,5 @@
 #include "board_storage_config.h"
+#include "board_watchdog_config.h"
 #include "main.h"
 #include "board_identity.h"
 #include "board_diagnostics.h"
@@ -25,6 +26,7 @@ DMA_HandleTypeDef hdma_usart1_rx;
 QSPI_HandleTypeDef hqspi;
 
 uint8_t g_b1_mac[6];
+#if BOARD_IWDG_ENABLE
 /* 256分频、4095重装，典型LSI时钟下约32秒超时。 */
 static void MX_IWDG_Init(void)
 {
@@ -35,6 +37,7 @@ static void MX_IWDG_Init(void)
     watchdog.Init.Window = 4095U;
     if (HAL_IWDG_Init(&watchdog) != HAL_OK) Error_Handler();
 }
+#endif
 
 static void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -103,12 +106,17 @@ int main(void)
     /* 只初始化W25器件；不读取或写入固件版本、升级状态。 */
     if (flash_if.init(&flash_if) != IF_OK)
         Error_Handler();
-    board_diagnostics_boot_stage("W25 init OK; watchdog and LEDs");
+    board_diagnostics_boot_stage("W25 init OK");
 #else
     board_diagnostics_boot_stage("W25 absent: tester info from constants");
 #endif
-    /* 在任务启动前开启看门狗，运行期由任务存活监测统一喂狗。 */
+#if BOARD_IWDG_ENABLE
+    /* 开关为1时在任务启动前开启，运行期由任务存活监测统一喂狗。 */
     MX_IWDG_Init();
+    board_diagnostics_boot_stage("IWDG enabled");
+#else
+    board_diagnostics_boot_stage("IWDG disabled (debug)");
+#endif
     require_ok(result_led_init(&s_result_led_map));
 
     board_diagnostics_boot_stage("MAC and PHY reset");

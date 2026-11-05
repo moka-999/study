@@ -31,9 +31,9 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
 - Boot=0x08000000/128KiB，App=0x08020000/1920KiB；合并ELF/BIN一次SWD下载，无OTA、双槽、回滚、30秒确认。0901～0903仍保留编号并回notSupported。
 - Ctrl+Shift+B或`tools/dev.ps1 flash -ConfirmIdle YES`自动编译、内部Flash备份、下载、回读和复位；`build`只编译。产物`build/standalone/Debug/b1.elf|bin`包含Boot＋App；不需要同级Bootloader。B1禁止V2模拟/假FAIL。
 - SWD Normal/SWrst/950kHz适配四线J5：1=GND、2=SWCLK、3=SWDIO、4=3V3_MCU参考，无NRST，板卡自行供电。下载先停止RK/温控并断开PC。Boot及App均保留RAM初始化前关PC6/PC7/PG11；不修改Option Bytes，不全擦。
-- 用户已确认当前B1焊有MCU W25Q256，`Core/Inc/board_storage_config.h`默认`BOARD_W25_PRESENT=1`：Boot检查/准备FRU，App只读；新镜像待实板验收。无器件板需显式改0并重编完整Boot＋App，0102才使用宏定义信息。器件或FRU失败时Boot停留，不进入App。
+- W25装配按目标板分别确认：当前验板目标未焊MCU W25Q256，`Core/Inc/board_storage_config.h`默认`BOARD_W25_PRESENT=0`，Boot和App跳过器件，0102使用宏定义信息。已装器件板须改1并重编、下载完整Boot＋App，恢复Boot检查/准备FRU、App只读；启用器件时初始化或FRU失败会停在Boot，不进入App。具体镜像及验收状态见同级test的任务清单，不能按IP推断是否装W25。
 - 已装W25时，Boot初始化/迁移FRU并回读，App只读；有效记录不重复擦写，未知有效格式不覆盖。固件版本、旧MCU包/启动日志及RK两块8MiB预留区不访问。无OTA安装器，不把外部固件烧入内部Flash。
-- 当前仅构建/离线验证，未实板烧录或验收；操作和限制见`../test/doc/direct_flash.md`及`../test/doc/minimal_boot_20261028.md`。
+- 各版本的构建、安装与实板验收分别记录在`../test/doc/driver_tasks.md`；操作和限制见`../test/doc/direct_flash.md`及`../test/doc/minimal_boot_20261028.md`，已安装不代表全部硬件验收通过。
 
 ## 板级约束
 
@@ -49,29 +49,27 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
   PC6 as the reliable shutdown path. TPS voltage adjustment remains available
   by I2C after PC6 has powered the converters.
 - 已确认耦合复位：每次MCU复位（NRST、看门狗、软件或调试器）都须关闭RK/DDR。启动汇编Reset_Handler在RAM初始化前拉低PG11、PC6、PC7，App保持OFF，PC随后重新执行正常上电流程；不能删除或延后到main才关电。
+- 看门狗由`Core/Inc/board_watchdog_config.h`的`BOARD_IWDG_ENABLE`集中控制：当前验板默认0，不启动IWDG、不创建喂狗任务；改1恢复四任务监督。宏不改变Option Bytes，不能停止旧固件已开启的IWDG；首次换入仍需处理下载时的调试冻结。V2配置不随本次B1调整。
 - SPI2为B1从机，PB12～15使用硬件NSS低有效、Mode0、8位MSB；B2共享主机总线及8个独立CS，初始1MHz。0004统一状态交换包含可选testerId/镜像显示模式，周期约1秒、3秒离线诊断；不控制或转发加热。SPI4仍是AD7124 Mode3主机。
 - `App/tasks/b2/`独立任务及业务队列，`App/protocol/b2/`独立解析/FSM；不得混入RK任务、队列或Seq。仅共用`App/protocol/common/crc.[ch]`纯算法。TCP上下文应用IP/整轮灯态，lwIP线程真正设置地址；SPI DMA1 Stream3/4、`.b2_dma`位于AXI SRAM，不使用UART的Stream0～2。
 - B1 has no temperature-control role. PC communicates directly with the B2 MCU;
   the B2 firmware owns heating and all other backplane-level control.
 - PH4/PH5 are the schematic's logical I2C4 bus and must remain open-drain GPIOs
   for software I2C; do not configure the invalid `GPIO_AF4_I2C4` mapping.
-- UART4固定连接RK UART0_M0运行协议；USART2双向连接RK UART2_M0_DEBUG；USART1在MCU模式接收本地命令，RK模式转发输入，行首log mcu加换行截获返回MCU。UART4协议不参与调试转发。
+- UART4固定连接RK UART1_M0运行协议；USART2双向连接RK UART2_M0_DEBUG；USART1在MCU模式接收本地命令，RK模式转发输入，行首log mcu加换行截获返回MCU。UART4协议不参与调试转发。
 - `b1.ioc` is the CubeMX hardware baseline. PA13/PA14 are explicitly reserved for
   SWD and PH4/PH5 start high/released; preserve both settings. After regeneration,
   保留Boot首128KiB、App起点`0x08020000`/容量`1920K`，VTOR使用`g_pfnVectors`。
 - Portable V2 modules may be integrated after their build/offline checks, as
   requested on 2026-08-31. Integration is not hardware acceptance: retain every
   unrun C test, network/UART check and B1 real-board calibration item explicitly.
-- The V2-accepted AD7124-4 driver is ported and bound only to B1 SPI4. SPI4
-  starts in mode 3 at about 390.625kHz; do not auto-run `ad7124_init()` before
-  the first B1 board can provide a real ID and voltage-reference check. The
-  20260831 schematic leaves FB2306 NC, so B1 initialization selects the internal
-  2.5V reference instead of the disconnected REFIN1 input. Its three voltage
-  channels follow the schematic pairs AIN0-AIN1, AIN2-AIN3 and AIN4-AIN5;
-  AIN1/3/5 are the board AGND returns and must not be replaced by internal AVSS.
-  At gain 1 only the positive input buffer is enabled: the grounded negative
-  pins violate the buffered AVSS+100mV headroom, and the internal reference
-  does not need the external-reference buffers.
+- AD7124-4仅绑定B1 SPI4，Mode3、约390.625kHz；ON后才初始化，实板ID为0x07。
+  三路保持AIN0/1、2/3、4/5，负端为板上AGND，不改为内部AVSS。
+  增益1、双端无缓冲，内部校零后保留出厂GAIN；接地负端UV策略见排查记录。
+  当前按用户确认采用AVDD基准，关闭内部REF_EN；板级开关及实测3333mV集中在
+  `Core/Inc/board_adc_config.h`，同步/增量采样共用换算值。AVDD不是稳定基准承诺，
+  更换板卡或供电条件需复测，精度待与万用表验收。内部2.5V方案保留但须先补齐
+  REFOUT到AVSS的0.1µF去耦；不直接补焊FB2306，避免并联内外基准。
 - The V2-accepted MCP4725 driver is bound to B1 hardware I2C2 at address 0x60.
   It uses Fast Write only and must not write EEPROM. Do not set a Boot voltage
   automatically before B1 output-voltage and RK boot-mode validation.
@@ -126,8 +124,10 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
   结果灯已迁至0106/0107，070x命令入口已删除。0x0509使用
   固定四字段`memoryType+vdd1+vdd2+vddq`：三路电压是绝对mV十进制字符串，
   必须满足标称值加原生步进乘整数及TPS范围，不自动取整；旧steps字段不再接受。
-  0103.power复用同一解析器。OFF只接受所选类型的标称电压；ON只允许当前类型。
-  PC须在RK完成DDR初始化后下发偏离标称的电压；内部仍使用10/5/5mV有符号档位。
+  0103.power复用同一解析器。2026-11-04起B1的0509在OFF接受可编码目标，
+  仅保存RAM训练目标，下一次0501上电写TPS；MCU复位后恢复标称。
+  ON只允许当前类型实时调压，不覆盖训练目标，仍须PC确认RK完成DDR初始化。
+  内部使用10/5/5mV有符号档位；0501在ON时不重启，目标缓存不证明物理启动时序。
   采样、Boot I2C、调压和pwr_ctrl推进共用监测层事务锁。0501/0502/0505及完整0103
   已由pc_power_service分阶段推进，原任务不变；main同时装载轨间和业务初值。
   0502直接关电；0505/完整0103上电后等待本轮有效普通心跳，超时报告timeout，
@@ -147,7 +147,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
 - PG6/LED7已确认为MCU正常上电指示：GPIO初始化先低，默认任务完成串口及LwIP初始化后置高常亮，不跟随结果灯、网络连接或RK/DDR电源状态闪烁；不代表整板电压或RK就绪。详见`docs/board_status_slot_20261010.md`。
 - Do not copy V2 pin mappings, PCF8574 PHY reset, fixed MAC or test scripts.
 - `B1_RK_UART=4`已固定，CMake拒绝2；逻辑slot0=UART4协议、slot1=USART2日志、slot2=USART1控制台，后两路绝不进入RK解析器。USART2独立TX发送环、0等待取锁；调试输入拥塞暂存一块，RX丢失报告并丢弃至换行。
-- UART4 PA11/PA12经U4008到RK UART0_M0，USART2 PD5/PD6经U4013到RK UART2_M0_DEBUG，USART1 PA9/PA10为本地日志出口。三路当前115200/8N1，RK调试实际波特率和线路仍待真板验收。
+- UART4 PA11 RX/PA12 TX经U4008到RK UART1_M0（GPIO2_B7 TX/GPIO2_B6 RX），USART2 PD5/PD6经U4013到RK UART2_M0_DEBUG，USART1 PA9/PA10为本地日志出口。映射按20260920-2134原图第6/14页核对，纠正旧UART0记载；三路当前115200/8N1，协议线路仍待实板验收。
 - RX为NORMAL DMA1 Stream0/UART4、Stream1/USART2、Stream2/USART1，IRQ优先级5；HT忽略，IDLE/TC交给各自唯一消费者。队列在调度前注册，uart_start_all()在调度后启动。
 - 日志复用默认任务，不新增任务；编译`B1_LOG_DEFAULT_SOURCE=MCU|RK`指定上电默认，运行时USART1文本`log mcu`/`log rk`加换行选择，重启恢复默认且不写Flash。仅一来源输出，运行期MCU printf经log_console统一过滤，禁止直接写huart1。唯一调度前例外为board_diagnostics：USART1初始化后、内核对象创建前按MCU默认来源输出有界启动阶段；进入内核前永久关闭此出口。USART1新增status只读查询，由默认任务读取缓存并限速输出，不触发采样、上电或修改协议。USART1取TX锁为0等待，拥塞允许丢日志，不能阻塞协议或业务；说明见`docs/uart_log_console_20261010.md`。
 - Keep `.uart_dma` in AXI SRAM after the RTOS heap. Reserve the fixed 30KiB LwIP

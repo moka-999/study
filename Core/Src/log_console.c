@@ -1,11 +1,13 @@
 /* 本地命令与日志复用USART1；输出排队失败只损失日志，不等待串口排空。 */
 #include "log_console.h"
+#include "result_led.h"
 #include "uart_router.h"
 #include "main.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 enum { LOG_SOURCE_MCU = 0, LOG_SOURCE_RK = 1 };
@@ -19,6 +21,7 @@ static char s_command[LOG_COMMAND_CAPACITY];
 static size_t s_command_length;
 static uint8_t s_discard_line;
 static const char *s_reply;
+static char s_led_reply[96];
 /* 仅行首保留退出命令前缀；普通字符立即进入RK发送缓存，不限制命令行长度。 */
 static const char s_rk_escape[] = "log mcu";
 static size_t s_rk_escape_length;
@@ -94,6 +97,48 @@ void log_console_start(void)
     (void)log_console_write(banner, sizeof(banner) - 1U);
 }
 
+/* 仅MCU控制台用于空闲验灯；指定一组时其他组灭，不控制加热或改变PC轮次。
+ * 使用正式驱动的状态与500ms相位；后续PC/B2显示事件仍可覆盖本次设置。 */
+static const char *apply_led_command(const char *command)
+{
+    static const char usage[] = "\r\n[led] use: led 0|1|2|all 00|01|10|11|off|pass|fail|normal|hot\r\n";
+    static const struct {
+        const char *name;
+        result_led_state_t state;
+    } modes[] = {
+        {"off", RESULT_LED_OFF}, {"pass", RESULT_LED_PASS},
+        {"fail", RESULT_LED_FAIL}, {"normal", RESULT_LED_TEST_NORMAL},
+        {"hot", RESULT_LED_TEST_HOT},
+        /* 左位控制FAIL引脚，右位控制PASS引脚；0低、1高，四种组合均不闪烁。 */
+        {"00", RESULT_LED_OFF}, {"01", RESULT_LED_PASS},
+        {"10", RESULT_LED_FAIL}, {"11", RESULT_LED_DEBUG_BOTH_ON}
+    };
+    const char *value = command + 4U;
+    uint32_t target;
+    if (strncmp(value, "all ", 4U) == 0) {
+        target = RESULT_LED_TARGET_COUNT;
+        value += 4U;
+    } else if (value[0] >= '0' && value[0] <= '2' && value[1] == ' ') {
+        target = (uint32_t)(value[0] - '0');
+        value += 2U;
+    } else return usage;
+
+    for (size_t i = 0U; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+        if (strcmp(value, modes[i].name) != 0) continue;
+        result_led_state_t states[RESULT_LED_TARGET_COUNT] = {RESULT_LED_OFF};
+        for (uint32_t group = 0U; group < RESULT_LED_TARGET_COUNT; ++group)
+            if (target == RESULT_LED_TARGET_COUNT || target == group)
+                states[group] = modes[i].state;
+        if (result_led_set_all(states) != HAL_OK)
+            return "\r\n[led] failed: driver not ready\r\n";
+        (void)snprintf(s_led_reply, sizeof(s_led_reply),
+                       "\r\n[led] states=%u,%u,%u; 0=off 1=pass 2=fail 3=normal 4=hot 5=both\r\n",
+                       (unsigned)states[0], (unsigned)states[1], (unsigned)states[2]);
+        return s_led_reply;
+    }
+    return usage;
+}
+
 static void finish_command(void)
 {
     if (s_command_length == 0U && !s_discard_line) return; /* 忽略空行及CRLF的LF。 */
@@ -115,8 +160,10 @@ static void finish_command(void)
         } else {
             s_reply = "\r\n[log] select MCU first: log mcu\r\n";
         }
+    } else if (!s_discard_line && strncmp(s_command, "led ", 4U) == 0) {
+        s_reply = apply_led_command(s_command);
     } else {
-        s_reply = "\r\n[log] use: log mcu | log rk | status\r\n";
+        s_reply = "\r\n[log] use: log mcu | log rk | status | led 0|1|2|all 00|01|10|11|off|pass|fail|normal|hot\r\n";
     }
     /* 确认串排在既有TX尾部；队列满则下一轮重试，期间不加入新日志。
      * 命令洪泛时只保留最新控制回复，实际选择以最后一条有效命令为准。 */

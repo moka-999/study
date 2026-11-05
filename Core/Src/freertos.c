@@ -14,6 +14,7 @@
 #include "pwr_ctrl.h"
 #include "lwipopts.h"
 #include "task_watchdog.h"
+#include "board_watchdog_config.h"
 #include "flash_bsp.h"
 #include "log_console.h"
 #include "board_diagnostics.h"
@@ -67,6 +68,7 @@ static void StartDefaultTask(void *argument)
     }
 }
 
+#if BOARD_IWDG_ENABLE
 /* IWDG由main启动；每500ms检查必要任务进展，超期停止喂狗。
  * OFF时也监督RK任务自身调度，不要求RK设备实际在线。 */
 static void StartWatchdogTask(void *argument)
@@ -77,13 +79,16 @@ static void StartWatchdogTask(void *argument)
         vTaskDelay(pdMS_TO_TICKS(500U));
     }
 }
+#endif
 
 void MX_FREERTOS_Init(void)
 {
     /* cJSON全局分配器必须在任何任务创建前切换到AXI SRAM中的FreeRTOS堆。 */
     pc_json_configure_allocator(pvPortMalloc, vPortFree);
     if (flash_transaction_prepare() != 0) Error_Handler();
+#if BOARD_IWDG_ENABLE
     task_watchdog_prepare(TASK_WATCHDOG_ALL);
+#endif
     if (!b2_service_prepare()) Error_Handler();
 
     rkRequestQueue = xQueueCreate(8, sizeof(rk_request_t));
@@ -111,8 +116,10 @@ void MX_FREERTOS_Init(void)
     }
     /* B2独立SPI任务使用4KiB栈，不进入RK的队列、流水号或结果处理。 */
     if (xTaskCreate(StartB2Task, "b2", 1024, NULL, 4, NULL) != pdPASS) Error_Handler();
+#if BOARD_IWDG_ENABLE
     if (xTaskCreate(StartWatchdogTask, "watchdog", 256, NULL, 25, NULL) != pdPASS)
         Error_Handler();
+#endif
 }
 
 /* 栈溢出表示内存已可能损坏，立即停机，避免继续控制电源或发送错帧。 */

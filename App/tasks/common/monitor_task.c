@@ -247,19 +247,12 @@ pwr_ctrl_result_t monitor_apply_ddr_config(
         return PWR_CTRL_ERR_RESOURCE_BUSY;
     }
 
-    /*
-     * 取得锁后重新检查状态，避免等待锁期间发生上下电迁移。当前没有独立
-     * DDR-ready输入；PC必须在RK已完成内存初始化后才发送非零拉偏命令，
-     * 后续冻结RK握手时再把该确认纳入此处的强制门控。
-     */
+    /* 取得锁后重新检查状态，避免等待锁期间发生上下电迁移。 */
     state = pwr_ctrl_get_state();
     if (state == PWR_CTRL_STATE_OFF) {
-        if (steps[DDR_RAIL_VDD1] != 0 || steps[DDR_RAIL_VDD2] != 0 ||
-            steps[DDR_RAIL_VDDQ] != 0) {
-            result = PWR_CTRL_ERR_BUSY;
-        } else {
-            result = pwr_ctrl_select_memory_type(type);
-        }
+        /* 只在RAM保存下次上电的训练目标；TPS尚未供电，不能访问I2C。 */
+        result = ddr_power_configure_training(type, targets) == IF_OK ?
+                 PWR_CTRL_OK : PWR_CTRL_ERR_PARAM;
     } else if (state == PWR_CTRL_STATE_ON) {
         if (ddr_power_get_memory_type() != type) {
             result = PWR_CTRL_ERR_BUSY;

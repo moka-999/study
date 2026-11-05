@@ -649,7 +649,7 @@ static pc_dispatch_result_t handle_query_boot_mode(
 
 /*
  * 0x0509固定memoryType及字符串mV的vdd1/vdd2/vddq，与0103共用精确编码校验。
- * OFF+三轨标称值只选择类型；ON+相同类型才调压，不缓存下次上电的拉偏值。
+ * B1在OFF时只保存下次上电目标；ON时同类型立即调压，不覆盖已保存的训练目标。
  */
 static pc_dispatch_result_t handle_set_ddr_config(
     const pc_protocol_frame_t *request,

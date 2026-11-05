@@ -41,6 +41,12 @@ static result_led_levels_t result_led_render(result_led_state_t state,
         levels.fail_on = 1U;
         break;
 
+    case RESULT_LED_DEBUG_BOTH_ON:
+        /* 直接验灯的11组合保持两路为高，不随500ms闪烁相位变化。 */
+        levels.fail_on = 1U;
+        levels.pass_on = 1U;
+        break;
+
     case RESULT_LED_TEST_NORMAL:
         /* 常温测试让两个颜色同步闪烁，与PASS/FAIL及高温警示明确区分。 */
         levels.fail_on = blink_on ? 1U : 0U;
@@ -96,7 +102,7 @@ HAL_StatusTypeDef result_led_init(const result_led_board_map_t *map)
 HAL_StatusTypeDef result_led_set(result_led_target_t target, result_led_state_t state)
 {
     if (s_board_map == NULL || (uint32_t)target >= RESULT_LED_TARGET_COUNT ||
-        (uint32_t)state > RESULT_LED_TEST_HOT)
+        (uint32_t)state > RESULT_LED_DEBUG_BOTH_ON)
         return HAL_ERROR;
 
     /*
@@ -142,7 +148,7 @@ HAL_StatusTypeDef result_led_set_all(const result_led_state_t states[RESULT_LED_
 {
     if (s_board_map == NULL || states == NULL) return HAL_ERROR;
     for (uint32_t i = 0U; i < RESULT_LED_TARGET_COUNT; ++i)
-        if ((uint32_t)states[i] > RESULT_LED_TEST_HOT) return HAL_ERROR;
+        if ((uint32_t)states[i] > RESULT_LED_DEBUG_BOTH_ON) return HAL_ERROR;
     taskENTER_CRITICAL();
     uint8_t start_blink = 0U;
     for (uint32_t i = 0U; i < RESULT_LED_TARGET_COUNT; ++i) {
