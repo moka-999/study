@@ -240,7 +240,7 @@
 #define AD7124_ERR_SPI_CRC           (1u << 2)
 #define AD7124_ERR_ALDO_PSM         (1u << 7)
 #define AD7124_ERR_DLDO_PSM         (1u << 9)
-/* 内部基准不启用外部REF_DET；CRC未接入帧格式，不启用SPI_CRC。 */
+/* 内部/AVDD基准不启用外部REF_DET；CRC未接入帧格式，不启用SPI_CRC。 */
 #define AD7124_DIAGNOSTIC_MASK (AD7124_ERR_ADC_SAT | AD7124_ERR_ADC_CONV | \
     AD7124_ERR_ADC_CAL | AD7124_ERR_AINP_OV | AD7124_ERR_AINP_UV | \
     AD7124_ERR_AINM_OV | AD7124_ERR_AINM_UV | AD7124_ERR_ALDO_PSM | \
@@ -280,6 +280,7 @@ typedef struct {
     uint8_t       adc_mode;      /* MODE缓存；UNKNOWN表示恢复失败。  */
     uint8_t       num_ch;        /* 实际使能的通道数 (init 写入)     */
     uint8_t       grounded_ainm; /* 0默认全诊断；1仅用于B1三路AIN1/3/5接AGND、增益1无缓冲。 */
+    uint8_t       use_avdd_reference; /* 0内部2.5V，1使用AVDD并关闭内部基准；初始化前设置。 */
     void        (*wait_ms)(uint32_t ms);  /* 延时回调, NULL=HAL_Delay 忙等 */
 } ad7124_t;
 
@@ -336,19 +337,20 @@ int  ad7124_read_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len);
 int  ad7124_write_reg(ad7124_t *d, uint8_t reg, uint8_t *buf, uint8_t len);
 
 /**
- * @brief 复位并配置三路DDR采样，使用内部2.5V基准和连续模式。
+ * @brief 复位并配置三路DDR采样，按句柄选择内部2.5V/AVDD基准后连续转换。
  * @param[in,out] d 非NULL、SPI和CS已绑定的句柄；成功后num_ch为3。
  * @return IF_OK配置、三路零位校准及启动均完成；IF_TIMEOUT校准等待耗尽；
  *         IF_ERR参数、ID、配置访问或校准失败。
  * @note 同步调用，失败可能已更新部分硬件/缓存，不能按就绪设备使用。
- *       默认CH0..2对应AIN0/1、2/3、4/5；保持既有正端缓冲、负端AGND配置。
+ *       CH0..2对应AIN0/1、2/3、4/5，增益1、双端无缓冲。
+ *       use_avdd_reference只接受0/1；原始码换算必须使用所选基准的电压。
  *       各setup依次内部校零，增益1保留出厂GAIN；全部成功才开启连续扫描。
  *       每路校准最多500次轮询，事务间至少1ms，SPI及调度耗时另计。
  */
 int  ad7124_init(ad7124_t *d);
 
 /**
- * @brief 写入固定ADC_CTRL基底及MODE，并在成功后更新模式缓存。
+ * @brief 写入所选基准对应的ADC_CTRL基底及MODE，成功后更新模式缓存。
  * @param[in,out] d 非NULL且SPI/CS有效的句柄。
  * @param[in] mode 器件模式0..8；拒绝保留值及软件UNKNOWN标记。
  * @return IF_OK写入成功；IF_ERR参数无效，或透传SPI错误。

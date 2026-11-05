@@ -41,7 +41,7 @@ B1 Core/Inc/board_power_config.h同时保存低层时序和业务等待，Core/S
 | 0505 | 直接关电→500ms停留→保留Boot/训练目标重新上电→本轮心跳→completed |
 | 完整0103 | 必要时直接关电→OFF停留→写Boot→等稳定→上电写三轨训练目标→本轮心跳→入RK算法队列 |
 | 外部就绪0103 | 原power:null、bootMode:null、reboot:false不变；B1仍要求ON及操作者确认RK可执行 |
-| 0509 | 保留运行期调压合同；OFF仅接受标称值，不能用它替代0103训练启动 |
+| 0509 | 2026-11-04起B1在OFF保存可编码的三轨训练目标（仅RAM、MCU复位恢复标称），下次0501写TPS；ON同类型实时调压不覆盖训练目标。V2未同步，010x流程不变 |
 
 完整0103保持“0006 accepted → 0006 completed → 0105”关系。completed不是算法结束；配置改变或reboot=true仍会冷启动，同配置且有本次运行的成功就绪记录才复用。
 

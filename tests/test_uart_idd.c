@@ -8,6 +8,7 @@
 #include <string.h>
 #if defined(TEST_B1_LOG_CONSOLE)
 #include "log_console.h"
+#include "result_led.h"
 #endif
 
 #define STR1(x) #x
@@ -85,6 +86,15 @@ static uint8_t *dma_buffer[3];
 static unsigned starts[3], aborts;
 static int fail_start[3], fail_abort;
 #if defined(TEST_B1_LOG_CONSOLE)
+/* 用输出位代替灯珠；链接正式result_led.c，验证命令确实产生对应GPIO和相位。 */
+static GPIO_TypeDef led_gpio;
+uint32_t HAL_GetTick(void) { return tick; }
+void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState level)
+{
+    CHECK(port == &led_gpio && pin != 0U && (pin & ~0x3FU) == 0U);
+    if (level == GPIO_PIN_SET) port->unused |= pin;
+    else port->unused &= ~(uint32_t)pin;
+}
 static char console_output[8192];
 static size_t console_output_length;
 static int fail_console_send;
@@ -423,6 +433,81 @@ static void rk_log_input(const char *text)
     receive_port(UART_PORT_RK_DEBUG, (const uint8_t *)text, (uint16_t)strlen(text), HAL_UART_RXEVENT_IDLE);
     log_console_process();
 }
+static void test_console_led(void)
+{
+    static const result_led_board_map_t map = {.pairs = {
+        {&led_gpio, 1U, &led_gpio, 2U},
+        {&led_gpio, 4U, &led_gpio, 8U},
+        {&led_gpio, 16U, &led_gpio, 32U}
+    }};
+    result_led_state_t states[RESULT_LED_TARGET_COUNT];
+    console_input("log mcu\n");
+    led_gpio.unused = 0x40U; /* 模拟PG6已亮；所有验灯操作都不得改变该位。 */
+    CHECK(result_led_init(&map) == HAL_OK);
+    console_input("led 0 pass\n"); CHECK(led_gpio.unused == 0x42U);
+    console_input("led 1 fail\r\n"); CHECK(led_gpio.unused == 0x44U);
+    console_input("led 2 pass\n"); CHECK(led_gpio.unused == 0x60U);
+    console_input("led all pass\n"); CHECK(led_gpio.unused == 0x6AU);
+    console_input("led all fail\n"); CHECK(led_gpio.unused == 0x55U);
+    console_input("led all off\n"); CHECK(led_gpio.unused == 0x40U);
+
+    /* 三组逐一验证00/01/10/11与真实GPIO位对应；11跨两次半周期仍保持常亮。 */
+    static const unsigned pin_levels[] = {0U, 2U, 1U, 3U};
+    for (unsigned group = 0U; group < RESULT_LED_TARGET_COUNT; ++group) {
+        for (unsigned bits = 0U; bits < 4U; ++bits) {
+            char command[] = "led 0 00\n";
+            command[4] = (char)('0' + group);
+            command[6] = (bits & 2U) ? '1' : '0';
+            command[7] = (bits & 1U) ? '1' : '0';
+            console_input(command);
+            unsigned expected = 0x40U | (pin_levels[bits] << (group * 2U));
+            CHECK(led_gpio.unused == expected);
+            tick += 500U; result_led_process(tick); CHECK(led_gpio.unused == expected);
+            tick += 500U; result_led_process(tick); CHECK(led_gpio.unused == expected);
+        }
+    }
+    console_input("led all 11\n"); CHECK(led_gpio.unused == 0x7FU);
+    CHECK(result_led_get_all(states) == HAL_OK && states[0] == RESULT_LED_DEBUG_BOTH_ON);
+    console_input("led all 00\n"); CHECK(led_gpio.unused == 0x40U);
+
+    /* 半行不执行；常温/高温均使用正式500ms闪烁，而非重复串口指令模拟。 */
+    console_input("led 0 nor"); CHECK(led_gpio.unused == 0x40U);
+    console_input("mal\n"); CHECK(led_gpio.unused == 0x43U);
+    tick += 499U; result_led_process(tick); CHECK(led_gpio.unused == 0x43U);
+    tick += 1U; result_led_process(tick); CHECK(led_gpio.unused == 0x40U);
+    tick += 500U; result_led_process(tick); CHECK(led_gpio.unused == 0x43U);
+    console_input("led all hot\n"); CHECK(led_gpio.unused == 0x55U);
+    tick += 500U; result_led_process(tick); CHECK(led_gpio.unused == 0x40U);
+    CHECK(result_led_get_all(states) == HAL_OK);
+    for (unsigned i = 0U; i < RESULT_LED_TARGET_COUNT; ++i)
+        CHECK(states[i] == RESULT_LED_TEST_HOT);
+
+    /* 非法编号、模式、尾随内容及断流不能覆盖原状态。 */
+    console_input("led 3 pass\nled -1 pass\nled all nope\nled 0 pass x\n");
+    console_input("led 0 0\nled 0 12\nled 0 011\nled 0 11 x\n");
+    CHECK(result_led_get_all(states) == HAL_OK && states[0] == RESULT_LED_TEST_HOT);
+    console_input("led all passXXXXXXXXXXXXXXXX\n");
+    CHECK(result_led_get_all(states) == HAL_OK && states[0] == RESULT_LED_TEST_HOT);
+    console_input("led all ");
+    uart[2].ErrorCode = 8U;
+    isr = 1; HAL_UART_ErrorCallback(&uart[2]); isr = 0;
+    tick += 100U; log_console_process(); console_input("pass\n");
+    CHECK(result_led_get_all(states) == HAL_OK && states[0] == RESULT_LED_TEST_HOT);
+
+    console_input("led all off\nlog rk\n");
+    clear_rk_console_output();
+    console_input("led all pass\n");
+    check_rk_console_output("led all pass\n", 13U);
+    clear_rk_console_output();
+    console_input("led 0 11\n");
+    check_rk_console_output("led 0 11\n", 9U);
+    CHECK(led_gpio.unused == 0x40U); /* RK模式只转发，不能暗中设置本地灯。 */
+    clear_rk_console_output();
+    console_input("log mcu\n");
+    clear_console_output();
+    message("PASS: B1 console LED modes, GPIO isolation and 500ms blink\n");
+}
+
 static void test_log_console(void)
 {
     uint8_t buffer[UART_RX_BUF_SIZE];
@@ -617,6 +702,7 @@ static void test_log_console(void)
     check_rk_console_output("status\n", 7U);
     clear_rk_console_output();
     CHECK(_write(2, "hidden", 6) == 6 && console_output_length == 0U);
+    test_console_led();
     /* 默认值在重新初始化后恢复，两种编译配置各执行一次本用例。 */
     log_console_start(); clear_console_output();
     CHECK(log_console_write("mcu", 3U) == 3U); rk_log_input("rk");

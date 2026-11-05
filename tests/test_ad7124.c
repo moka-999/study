@@ -1,6 +1,9 @@
 /* 直接运行正式AD7124与组合采样层；寄存器/SPI为故障注入桩，不代表模拟精度。 */
 #include "ad7124.h"
 #include "memory_monitor.h"
+#ifdef AD_TEST_B1
+#include "board_adc_config.h"
+#endif
 #include <math.h>
 #include <string.h>
 
@@ -428,11 +431,22 @@ int pac1934_measure_all(pac1934_t *d, pac1934_measurement_t *out)
 int ddr_power_read_status(uint8_t rail, uint8_t *status)
 { (void)rail; *status = 0U; return IF_OK; }
 
+/* 使用实际板级配置绑定ADC；测试桩预置连续模式以单独验证换算和扫描。 */
+static ad7124_t reset_monitor_adc(void)
+{
+    (void)reset_case();
+    memory_monitor_t monitor;
+    memory_monitor_configure(&monitor, NULL, &spi, &gpio, 1U, HAL_Delay);
+    monitor.adc.num_ch = 3U;
+    monitor.adc.adc_mode = AD7124_MODE_CONT;
+    return monitor.adc;
+}
+
 static void test_monitor(void)
 {
     memory_monitor_t monitor = {0};
     memory_monitor_sample_t sample;
-    monitor.adc = reset_case(); monitor.adc_ready = 1U; monitor.pac_ready = 1U;
+    monitor.adc = reset_monitor_adc(); monitor.adc_ready = 1U; monitor.pac_ready = 1U;
     stream_len = 1U; stream[0] = 2U;
     CHECK(memory_monitor_sample(&monitor, &sample) == IF_ERR);
     CHECK(!(sample.valid_mask & MEMORY_MONITOR_VALID_VOLTAGE));
@@ -440,10 +454,12 @@ static void test_monitor(void)
     CHECK(sample.idd[0].current_ma == 123U);
     CHECK(sample.voltage_mv[0] == 0 && sample.voltage_mv[1] == 0 && sample.voltage_mv[2] == 0);
     CHECK(monitor.adc_ready == 0U);
-    monitor.adc = reset_case();
+    monitor.adc = reset_monitor_adc();
     CHECK(memory_monitor_init(&monitor) == IF_OK && monitor.adc_ready == 1U);
     CHECK(memory_monitor_sample(&monitor, &sample) == IF_OK);
-#ifdef AD_TEST_B1
+#if defined(AD_TEST_B1) && BOARD_AD_USE_AVDD_REFERENCE
+    CHECK(sample.voltage_mv[0] == 210 && sample.voltage_mv[1] == 420 && sample.voltage_mv[2] == 630);
+#elif defined(AD_TEST_B1)
     CHECK(sample.voltage_mv[0] == 158 && sample.voltage_mv[1] == 315 && sample.voltage_mv[2] == 473);
 #else
     CHECK(sample.voltage_mv[0] == 156 && sample.voltage_mv[1] == 312 && sample.voltage_mv[2] == 468);
@@ -489,7 +505,7 @@ static void test_incremental_monitor(void)
     memory_monitor_t monitor = {0};
     memory_monitor_sample_t sample = {0};
     uint32_t begin = 0U;
-    monitor.adc = reset_case(); monitor.adc_ready = 1U; monitor.pac_ready = 1U;
+    monitor.adc = reset_monitor_adc(); monitor.adc_ready = 1U; monitor.pac_ready = 1U;
     sample.voltage_mv[0] = 777;
     sample.valid_mask = MEMORY_MONITOR_VALID_VOLTAGE;
     CHECK(memory_monitor_poll_voltage(&monitor, &sample, 100U, &begin) == 0);
@@ -500,7 +516,9 @@ static void test_incremental_monitor(void)
     CHECK(memory_monitor_poll_voltage(&monitor, &sample, 260U, &begin) == 1);
     CHECK(begin == 100U && monitor.voltage_mask == 0U && !monitor.voltage_collecting);
     CHECK(sample.valid_mask == (MEMORY_MONITOR_VALID_VOLTAGE | MEMORY_MONITOR_VALID_IDD));
-#ifdef AD_TEST_B1
+#if defined(AD_TEST_B1) && BOARD_AD_USE_AVDD_REFERENCE
+    CHECK(sample.voltage_mv[0] == 210 && sample.voltage_mv[1] == 420 && sample.voltage_mv[2] == 630);
+#elif defined(AD_TEST_B1)
     CHECK(sample.voltage_mv[0] == 158 && sample.voltage_mv[1] == 315 && sample.voltage_mv[2] == 473);
 #else
     CHECK(sample.voltage_mv[0] == 156 && sample.voltage_mv[1] == 312 && sample.voltage_mv[2] == 468);
@@ -516,7 +534,7 @@ static void test_incremental_monitor(void)
     CHECK(memory_monitor_read_current(&monitor, &sample) == IF_OK);
 
     /* 毫秒回绕、乱序通道与重复通道均不能造成提前完整或永久等待。 */
-    monitor.adc = reset_case(); monitor.adc_ready = 1U;
+    monitor.adc = reset_monitor_adc(); monitor.adc_ready = 1U;
     stream_len = 4U; stream[0] = 1U; stream[1] = 1U; stream[2] = 0U; stream[3] = 2U;
     CHECK(memory_monitor_poll_voltage(&monitor, &sample, UINT32_MAX - 100U, &begin) == 0);
     CHECK(memory_monitor_poll_voltage(&monitor, &sample, UINT32_MAX - 20U, &begin) == 0);
@@ -549,6 +567,7 @@ static void test_initialization_and_diagnostics(void)
         CHECK(regs[AD7124_REG_CFG0 + i] == AD7124_CFG_REF_SEL(AD7124_REF_INT));
     CHECK(regs[AD7124_REG_ERROR_EN] == AD7124_DIAGNOSTIC_MASK);
     CHECK(regs[AD7124_REG_ADC_CTRL] & AD7124_ADC_CS_EN);
+    CHECK(regs[AD7124_REG_ADC_CTRL] & AD7124_ADC_REF_EN);
     CHECK(zero_count == 3U && full_count == 0U && continuous_writes == 1U);
     for (unsigned i = 0U; i < 8U; ++i) {
         CHECK(zero_by_setup[i] == (i < 3U ? 1U : 0U) && full_by_setup[i] == 0U);
@@ -621,10 +640,10 @@ static void test_initialization_and_diagnostics(void)
     CHECK(ad7124_raw_to_voltage(0xFFFFFF, 2.5f, 0U, 0U) < 2.5f);
 }
 
-static void test_grounded_input_diagnostics(void)
+static void test_grounded_input_diagnostics(uint8_t use_avdd)
 {
     /* 模拟已接地的负端及内部校零；诊断策略默认关闭，只有B1组合层选择。 */
-    ad7124_t adc = reset_case(); adc.grounded_ainm = 1U;
+    ad7124_t adc = reset_case(); adc.grounded_ainm = 1U; adc.use_avdd_reference = use_avdd;
     precal_input_error = AD7124_ERR_AINM_UV;
     calibration_input_error = AD7124_ERR_AINP_UV | AD7124_ERR_AINM_UV;
     CHECK(ad7124_init(&adc) == IF_OK && zero_count == 3U && adc.num_ch == 3U);
@@ -632,7 +651,7 @@ static void test_grounded_input_diagnostics(void)
     CHECK(adc.cal_snapshot.error_enable == regs[AD7124_REG_ERROR_EN]);
     uint32_t operation_count = calls;
     for (uint32_t point = 1U; point <= operation_count; ++point) {
-        adc = reset_case(); adc.grounded_ainm = 1U; fail_at = point;
+        adc = reset_case(); adc.grounded_ainm = 1U; adc.use_avdd_reference = use_avdd; fail_at = point;
         CHECK(ad7124_init(&adc) != IF_OK && adc.num_ch == 0U && !selected);
     }
     /* 校零仍检查过压、校准和SPI错误；忙时禁止写恢复值。 */
@@ -640,17 +659,17 @@ static void test_grounded_input_diagnostics(void)
         AD7124_ERR_ADC_CAL, AD7124_ERR_ADC_CONV, AD7124_ERR_ADC_SAT,
         AD7124_ERR_SPI_IGNORE, AD7124_ERR_ALDO_PSM, AD7124_ERR_DLDO_PSM};
     for (unsigned i = 0U; i < sizeof(faults) / sizeof(faults[0]); ++i) {
-        adc = reset_case(); adc.grounded_ainm = 1U;
+        adc = reset_case(); adc.grounded_ainm = 1U; adc.use_avdd_reference = use_avdd;
         calibration_input_error = 0x5000U | faults[i];
         CHECK(ad7124_init(&adc) == IF_ERR && adc.num_ch == 0U);
         CHECK(adc.current_error == faults[i] && ignored_busy_writes == 0U);
     }
-    adc = reset_case(); adc.grounded_ainm = 1U; timeout_setup = 0U;
+    adc = reset_case(); adc.grounded_ainm = 1U; adc.use_avdd_reference = use_avdd; timeout_setup = 0U;
     CHECK(ad7124_init(&adc) == IF_TIMEOUT && adc.num_ch == 0U && ignored_busy_writes == 0U);
-    adc = reset_case(); adc.grounded_ainm = 1U; ignore_uv_restore = 1U;
+    adc = reset_case(); adc.grounded_ainm = 1U; adc.use_avdd_reference = use_avdd; ignore_uv_restore = 1U;
     CHECK(ad7124_init(&adc) == IF_ERR && adc.num_ch == 0U && continuous_writes == 0U);
 
-    adc = reset_case(); adc.grounded_ainm = 1U;
+    adc = reset_case(); adc.grounded_ainm = 1U; adc.use_avdd_reference = use_avdd;
     CHECK(ad7124_init(&adc) == IF_OK);
     status_bits = AD7124_STATUS_ERROR_FLAG;
     regs[AD7124_REG_ERROR] = AD7124_ERR_AINP_UV;
@@ -658,7 +677,7 @@ static void test_grounded_input_diagnostics(void)
     CHECK(ad7124_try_read_conversion(&adc, &raw, &channel) == IF_ERR);
     CHECK(raw == 777U && channel == 99U && adc.last_error == AD7124_ERR_AINP_UV);
 
-    adc = reset_case(); adc.grounded_ainm = 1U;
+    adc = reset_case(); adc.grounded_ainm = 1U; adc.use_avdd_reference = use_avdd;
     CHECK(ad7124_init(&adc) == IF_OK);
     regs[AD7124_REG_CFG0] |= 1U;
     CHECK(ad7124_calibrate(&adc, 0U) == IF_ERR && zero_count == 3U);
@@ -667,9 +686,42 @@ static void test_grounded_input_diagnostics(void)
     memory_monitor_configure(&monitor, NULL, &spi, &gpio, 1U, HAL_Delay);
 #ifdef AD_TEST_B1
     CHECK(monitor.adc.grounded_ainm == 1U);
+    CHECK(monitor.adc.use_avdd_reference == BOARD_AD_USE_AVDD_REFERENCE);
 #else
-    CHECK(monitor.adc.grounded_ainm == 0U);
+    CHECK(monitor.adc.grounded_ainm == 0U && monitor.adc.use_avdd_reference == 0U);
 #endif
+}
+
+static void test_avdd_reference(void)
+{
+    ad7124_t adc = reset_case();
+    adc.use_avdd_reference = 1U;
+    adc.grounded_ainm = 1U;
+    CHECK(ad7124_init(&adc) == IF_OK);
+    CHECK(adc.cal_snapshot.control == 0x0690U && adc.cal_snapshot.config == 0x0018U);
+    for (unsigned i = 0U; i < 3U; ++i) {
+        CHECK(regs[AD7124_REG_CFG0 + i] == 0x0018U);
+        CHECK(regs[AD7124_REG_FILTER0 + i] == 0x000180U);
+        CHECK(regs[AD7124_REG_GAIN0 + i] == 0x500000U + i);
+    }
+    CHECK(zero_count == 3U && full_count == 0U);
+    /* 连续/空闲切换及公开校准不能重新打开内部基准。 */
+    CHECK(ad7124_set_mode(&adc, AD7124_MODE_IDLE) == IF_OK);
+    CHECK(regs[AD7124_REG_ADC_CTRL] == 0x0690U);
+    CHECK(ad7124_set_mode(&adc, AD7124_MODE_CONT) == IF_OK);
+    CHECK(regs[AD7124_REG_ADC_CTRL] == 0x0680U);
+    CHECK(ad7124_calibrate(&adc, 0U) == IF_OK);
+    CHECK(regs[AD7124_REG_ADC_CTRL] == 0x0680U);
+    regs[AD7124_REG_CFG0] = 0x0010U;
+    CHECK(ad7124_calibrate(&adc, 0U) == IF_ERR && zero_count == 4U);
+    regs[AD7124_REG_CFG0] = 0x0018U;
+    regs[AD7124_REG_ADC_CTRL] |= AD7124_ADC_REF_EN;
+    CHECK(ad7124_calibrate(&adc, 0U) == IF_ERR && zero_count == 4U);
+    adc = reset_case();
+    adc.use_avdd_reference = 2U;
+    CHECK(ad7124_init(&adc) == IF_ERR && calls == 0U && adc.num_ch == 0U);
+    CHECK(ad7124_set_mode(&adc, AD7124_MODE_CONT) == IF_ERR && calls == 0U);
+    CHECK(ad7124_set_mode(NULL, AD7124_MODE_CONT) == IF_ERR);
 }
 
 static void test_startup_calibration_failures(void)
@@ -699,7 +751,7 @@ static void test_startup_calibration_failures(void)
     /* ADC初始化失效时，PAC仍能独立采样；下次重试成功后不重复校准。 */
     memory_monitor_t monitor = {0};
     memory_monitor_sample_t sample = {0};
-    monitor.adc = reset_case(); monitor.pac_ready = 1U;
+    monitor.adc = reset_monitor_adc(); monitor.pac_ready = 1U;
     timeout_setup = 1U;
     CHECK(memory_monitor_init(&monitor) == IF_ERR);
     CHECK(!monitor.adc_ready && monitor.pac_ready);
@@ -723,7 +775,9 @@ void test_main(void)
     test_filter(); test_monitor(); test_incremental_conversion(); test_incremental_monitor();
     test_initialization_and_diagnostics();
     test_startup_calibration_failures();
-    test_grounded_input_diagnostics();
+    test_grounded_input_diagnostics(0U);
+    test_grounded_input_diagnostics(1U);
+    test_avdd_reference();
     message("PASS: actual AD7124 snapshots, calibration fault sweep, filter and monitor\n");
     finish(0U);
 }

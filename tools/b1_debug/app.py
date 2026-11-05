@@ -24,7 +24,7 @@ def default_report_root():
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("JMCT · B1 外设验板")
+        root.title("JMCT · B1 外设验板 · OFF目标上电")
         root.geometry("1180x860")
         root.minsize(1050, 760)
         root.option_add("*Font", ("Microsoft YaHei UI", 10))
@@ -105,7 +105,7 @@ class App:
         ttk.Label(config, text="Boot模式").pack(side="left", padx=(24, 5))
         self.control(ttk.Combobox(config, textvariable=self.boot_mode, values=tuple(BOOT_MV),
                                   width=15, state="readonly"), "readonly").pack(side="left")
-        ttk.Label(config, text="两种循环都会先下电，再按标称电压上电；不需要RK心跳。").pack(side="left", padx=15)
+        ttk.Label(config, text="循环均在OFF保存目标再上电；启动结果看RK日志。").pack(side="left", padx=15)
         book = ttk.Notebook(shell)
         self.book = book
         book.pack(fill="x")
@@ -129,8 +129,8 @@ class App:
                             ("应用三轨电压 / 类型", "应用三轨电压")):
             self.button(manual_buttons, label, lambda action=name: self.manual(action)).pack(side="left", padx=(0, 8))
         self.control(ttk.Button(manual_buttons, text="填入标称值", command=self.fill_nominal)).pack(side="left")
-        ttk.Label(manual, text="首次操作：OFF时应用标称值选择内存类型 → 设置Boot → 上电 → 按需调压。\n"
-                  "任意调压须处于ON；设置Boot须处于OFF。完整TPS范围开放，负载承受范围由操作者确认。",
+        ttk.Label(manual, text="目标启动：下电 → 应用三轨目标 → 设置Boot → 上电。输入框改值后须点击应用。\n"
+                  "OFF只保存下次上电目标；ON立即调压且不覆盖上电目标。MCU复位后需重新设置。",
                   wraplength=1000, foreground="#954600").pack(anchor="w", pady=8)
         monitor_bar = ttk.Frame(manual)
         monitor_bar.pack(fill="x", pady=8)
@@ -167,12 +167,12 @@ class App:
         settings = ttk.Frame(volt)
         settings.pack(fill="x", pady=(5, 0))
         self.volt_cycles = self.entry(settings, "清单循环次数", 1, 0, 1, 100000)
-        self.settle_ms = self.entry(settings, "每档稳定等待ms", 1000, 1, 0, 600000)
+        self.settle_ms = self.entry(settings, "上电后等待ms", 1000, 1, 0, 600000)
         self.samples = self.entry(settings, "每档新采样数", 5, 2, 1, 10000)
         self.interval_ms = self.entry(settings, "查询间隔ms", 500, 3, 100, 60000)
-        self.button(settings, "开始调压循环（先下电）", self.start_voltage).grid(row=1, column=4, padx=12)
+        self.button(settings, "开始循环（每档重新上电）", self.start_voltage).grid(row=1, column=4, padx=12)
 
-        ttk.Label(boot, text="每次执行：下电 → 等待 → 写Boot DAC并查询配置 → 标称电压上电 → 观察等待。",
+        ttk.Label(boot, text="每次执行：下电 → 保存三轨输入框目标 → 等待 → 设置Boot → 按目标上电 → 观察等待。",
                   wraplength=1000).pack(anchor="w", pady=8)
         ttk.Label(boot, text="0508返回的是配置缓存，不能证明RK实际启动介质。未烧SPL时不使用0505，也不发送测试算法。",
                   wraplength=1000).pack(anchor="w", pady=8)
@@ -436,6 +436,7 @@ class App:
     def start_boot(self):
         try:
             parameters = dict(mode=self.boot_mode.get(), memory_type=self.memory_type.get(),
+                              point=VoltagePoint(tuple(int(v.get()) for v in self.targets)),
                               cycles=self.number(self.boot_cycles, "循环次数", 1, 100000),
                               off_ms=self.number(self.off_ms, "下电等待", 0, 600000),
                               on_ms=self.number(self.on_ms, "观察时间", 500, 600000))
@@ -451,6 +452,8 @@ class App:
         saved = {**parameters, "power_off_at_end": power_off}
         if "points" in saved:
             saved["points"] = [asdict(p) for p in saved["points"]]
+        if "point" in saved:
+            saved["point"] = asdict(saved["point"])
         runner = self.runner()
         operation = runner.voltage_loop if name == "调压循环" else runner.boot_loop
         self.job(name, lambda: execute_run(runner, lambda: operation(**parameters), power_off), saved)

@@ -14,7 +14,7 @@ STM32H743 **阿波罗 V2** 板，作为 **TCP server + 双协议网关**：PC–
 **拓扑**：
 ```
 PC ──TCP:8888──► MCU(STM32H743) ──逻辑 RK 串口──► RK3588
-                                       └─ 阿波罗 V2: USART1 / B1: UART4（固定RK UART0_M0）
+                                       └─ 阿波罗 V2: USART1 / B1: UART4（固定RK UART1_M0）
 PC ──独立温控接口──► B2 MCU ──► 全部加热及其他底板级控制
 B2 MCU（共享SPI主机）──SCK/MOSI/MISO + CS0..7──► B1 MCU ×8（各自SPI2从机，状态交换）
 ```
@@ -178,7 +178,7 @@ python -B -X utf8 tests/rk_gateway_network_test.py --serial COM5 --report build/
 9. **SPI按板型分配**：Apollo V2的SPI2仅给AD7124开发（Mode 3），B2链路另用SPI3（PA15/PB3/PB4/PB5）；B1用SPI2从机接B2、SPI4主机接AD7124。B2任务独立于RK，DMA1 Stream3/4与`.b2_dma` AXI缓冲专用，禁止占用UART的Stream0～2。
 10. **自定义接口归属**：总线实例统一由`board_interfaces.h`声明，UART内部钩子只在`uart_hw.h`；RK任务用`rk_link_next_sequence()`分配独立序号，禁止外部直接修改计数器。`uart_start_all()`在调度前初始化TX互斥锁；分配失败拒绝发送。注释/风格及剩余耦合约束见`doc/code_quality_review.md`。
 11. **RK解析错误必须上送调用方**：tlv_sm_feed完成后还须检查tlv_sm_get_frame；负数失败、0为零TLV心跳。Length为0或4..1024，最多16 TLV；底层保留未知TLV，最终业务只接受3/5/7合同，不能部分交付。tlv_unpack输入从5A起的完整帧和真实长度。V2/B1字节间门限均100ms，连续完整帧无需外部reset。
-12. **信息类响应的数据源**：0101/0102加载W25Q256的FRU，返回测试仪名称、硬件版本及测试板名称；testerVersion不是MCU固件版本。FRU首次初始化/旧格式迁移由Boot完成，正式App只读。2026-11-02用户确认B1已焊MCU W25Q256，B1/V2的`board_storage_config.h`默认`BOARD_W25_PRESENT=1`；无器件板须改0并重编完整Boot＋App，才跳过器件并使用常量。B1启用镜像已构建，QSPI及首启待实板验收；器件/FRU失败会停在Boot。App启动不读写固件版本、镜像CRC或升级状态；旧版本区、MCU包/启动日志和RK预留地址均不访问或擦除。详见[Flash布局](doc/flash_layout.md)。
+12. **信息类响应的数据源**：已装W25时0101/0102加载其FRU，返回测试仪名称、硬件版本及测试板名称；testerVersion不是MCU固件版本。FRU首次初始化/旧格式迁移由Boot完成，正式App只读。W25装配按目标板分别确认，不能按IP推断；当前B1验板目标未焊器件，`board_storage_config.h`默认`BOARD_W25_PRESENT=0`，Boot和App跳过器件、信息使用常量。已装器件板须改1并重编、下载完整Boot＋App；V2仍默认1。启用器件时初始化/FRU失败会停在Boot，不能因串口无输出就绕过真实故障；镜像及验收状态见任务清单。App启动不读写固件版本、镜像CRC或升级状态；旧版本区、MCU包/启动日志和RK预留地址均不访问或擦除。详见[Flash布局](doc/flash_layout.md)。
 
 ---
 
@@ -196,13 +196,13 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 
 关键硬件边界：
 
-- B1 UART4（PA11/PA12）固定经RS0102对接RK UART0_M0跑协议；USART2（PD5/PD6）经RS0102双向连接RK UART2_M0_DEBUG，USART1（PA9/PA10）输出所选MCU/RK日志。MCU模式处理本地命令，`log rk`加换行后转发输入；RK模式只截获行首完整`log mcu`加换行返回MCU，控制字符原样转发，切换不写Flash。当前115200/8N1及双向电气仍待真板验收。V2的USART1仍是协议口，不能照搬B1日志分配。
+- B1 UART4（PA11 RX/PA12 TX）固定经RS0102 U4008对接RK UART1_M0（GPIO2_B6 RX/GPIO2_B7 TX）跑协议；20260920-2134原理图第6/14页已复核，旧记录的UART0_M0为误记，网络名UART_RX_M0中的M0不代表UART0。USART2（PD5/PD6）经U4013双向连接RK UART2_M0_DEBUG，USART1（PA9/PA10）输出所选MCU/RK日志。MCU模式处理本地命令，`log rk`加换行后转发输入；RK模式只截获行首完整`log mcu`加换行返回MCU，控制字符原样转发，切换不写Flash。协议口115200/8N1及双向电气仍待真板验收，Debug可用不代表协议线路已通。V2的USART1仍是协议口，不能照搬B1日志分配。
 - PC6控制`VCC4V0_SYS`，同时给RK806和三颗TPS供电；PC7控制独立的`VCC3V3_SYS`，不能作为暂停RK训练的开关。0831图PG11到TPS EN的串联位为NC，TPS经10kΩ上拉随4V启动，不能把PG11动作当成真实三轨开关。MCU由独立`3V3_MCU`供电，可先运行再启动RK。按用户确认初版直接关电，不等待RK关机应答，故障强制关断保留；这不保证RK写盘已结束。顺序/延时及RK806复位释放前的调压窗口仍须真板验证，旧波形不是批准值。
 - B1初值集中在`../b1/Core/Inc/board_power_config.h`：PC7先开→10ms→PC6开→5ms后写TPS；反序下电间隔10ms；OFF停留500ms、Boot稳定10ms、切换上限2s、RK启动心跳上限60s。main绑定心跳适配器但保持OFF，V2真实电源配置未启用。初值不是硬件验收；PC负责DDR安全范围，MCU只校验TPS物理范围/步进；直接关电不等待RK写盘完成，见`doc/b1_power_business_20261013.md`。
 - `power`表示DDR初始化/训练目标，不能偷换为训练后拉偏。底层训练目标与运行拉偏缓存分离；业务通过`monitor_request_training_power_on`在OFF时选择目标并上电，默认/只选类型时仍为标称。用户接受“天然启动窗口内赶得上”作为开发预设，非硬件验收结论；寄存器可写范围不等于安全训练范围。新PC字段、MCU安全校验、配置变化强制冷重启和RK-ready闭环见任务清单，不绕过缺失的配置门禁，不预设必须依赖B2。
 - TPS三轨地址为0x49/0x41/0x4F，分别使用I2C1/I2C2/PH4-PH5软件开漏I2C。PAC1934同用该软件总线，7位地址0x16（总线字节0x2C/0x2D）；20260920-2134版B1三路分流电阻各0.02Ω，B1板级换算已跟随更新，V2测试配置仍为0.01Ω，不能无条件覆盖两板参数。
-- 0103.power/0509使用`vdd1/vdd2/vddq`十进制字符串直接表示绝对mV，不再接收旧steps字段。共享解析器严格校验`valMv=nominalMv+stepMv*n`及TPS范围，n为整数；VDD1步进10mV、VDD2/VDDQ步进5mV，不取整。内部仍复用有符号原生档位及现有驱动；可写不等于DDR安全。范围、兼容与验证见`doc/pc_voltage_mv_20261012.md`。
-- B1 AD7124使用SPI4 PE11–PE14、Mode 3与内部2.5V基准；暂按AD7124-4及ID白名单0x04/0x06/0x07。图面TSSOP-24符号与LFCSP-32标注冲突，仍须硬件核对BOM/PCB。分析仪CPHA标签有歧义时查看原始上升采样沿，不据标签改为Mode 2。
+- 0103.power/0509使用`vdd1/vdd2/vddq`十进制字符串直接表示绝对mV，不再接收旧steps字段。共享解析器严格校验`valMv=nominalMv+stepMv*n`及TPS范围，n为整数；VDD1步进10mV、VDD2/VDDQ步进5mV，不取整。2026-11-04起B1的0509在OFF只保存下次上电的RAM训练目标（允许非标称、不访问TPS），0501上电写入；ON同类型实时调压不覆盖训练目标，MCU复位恢复标称。V2未同步该OFF语义；010x流程不变。内部复用原生档位及驱动，可写不等于DDR安全。范围、兼容与验证见`doc/pc_voltage_mv_20261012.md`。
+- B1 AD7124使用SPI4 PE11–PE14、Mode 3，实板ID=0x07符合AD7124-4白名单0x04/0x06/0x07。当前首板用AVDD基准，内部REF_EN关闭；`../b1/Core/Inc/board_adc_config.h`集中选择和实测3333mV换算。V2默认仍用内部2.5V。保持增益1、无缓冲及约240ms三轨扫描；AVDD方案精度待实测，内部基准方案须先补齐REFOUT去耦。分析仪CPHA标签有歧义时查看原始上升采样沿，不据标签改为Mode 2。
 - MCP4725在I2C2、地址0x60，Boot目标电压0–1.8V；不得超过1.8V，实际3V3与VOUT误差待真板校准。
 - B1 PG12是PHY复位，不是RK复位。B2的`/RESET_n`接RK/RK806复位（1.8V域），`/MCU_RESET_n`接B1 NRST（3.3V域），只作异常恢复；`PWRON_L`人工按键与24V软开关不是同一网络，未见B1 GPIO驱动。
 - 三颗双色结果灯使用PG0–PG5，显示2组LPDDR4/4X和1组eMCP；以FAIL/PASS通道定义常亮及闪烁，常温双通道闪烁、高温FAIL通道闪烁，亮/灭各500ms。实际颜色、对象顺序及复位高阻瞬态待B1验证，不以图面红绿旁注代替实物。B1的PG6/LED7已确认表示MCU正常上电，初始化时灭、默认任务完成初始化后常亮，不是RK/DDR电源或网络连通指示；另一单色灯由RK的CPU_GPIO_PWR控制。
@@ -243,7 +243,7 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 
 ### 内存布局
 - 任务栈：rk 32KB（含心跳）/ tcp 16KB，不再创建独立hb任务；堆128KB，实际余量须以当前镜像运行时测量为准。
-- 看门狗监测默认任务、TCP、监测和RK四项存活，B1 OFF时RK仍须推进；它不再承担升级健康确认，不阻塞PC业务等待30秒。
+- 看门狗启用时监测默认任务、TCP、监测和RK四项存活，B1 OFF时RK仍须推进；它不再承担升级健康确认，不阻塞PC业务等待30秒。B1的`Core/Inc/board_watchdog_config.h`现默认`BOARD_IWDG_ENABLE=0`供验板，不启动IWDG或喂狗任务；设1重编可恢复，V2不变。该宏不修改Option Bytes，也不能停止旧固件已启动的IWDG，首次下载仍须处理暂停时的调试冻结。
 - 确认堆余量用 `xPortGetFreeHeapSize()`
 
 ---

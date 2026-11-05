@@ -238,10 +238,10 @@ int ad7124_read_id(ad7124_t *d)
 int ad7124_set_mode(ad7124_t *d, uint8_t mode)
 {
     /* UNKNOWN为软件故障标记，不能截断成保留模式后写入器件。 */
-    if (mode > AD7124_MODE_CAL_SYS_F) return IF_ERR;
+    if (!d || d->use_avdd_reference > 1U || mode > AD7124_MODE_CAL_SYS_F) return IF_ERR;
     uint16_t adc_ctrl = AD7124_ADC_CLK_SEL(AD7124_CLK_INT) |
                         AD7124_ADC_POWER_MODE(AD7124_PWR_FULL) |
-                        AD7124_ADC_REF_EN |
+                        (d->use_avdd_reference ? 0U : AD7124_ADC_REF_EN) |
                         AD7124_ADC_DATA_STATUS | AD7124_ADC_CS_EN |
                         AD7124_ADC_MODE(mode);
 
@@ -333,18 +333,19 @@ static int initialize_device(ad7124_t *d)
         AD7124_AIN_AIN1, AD7124_AIN_AIN3, AD7124_AIN_AIN5
     };
 
-    if (!d || !d->spi || d->grounded_ainm > 1U) return IF_ERR;
+    if (!d || !d->spi || d->grounded_ainm > 1U || d->use_avdd_reference > 1U) return IF_ERR;
+    uint8_t reference = d->use_avdd_reference ? AD7124_REF_AVDD : AD7124_REF_INT;
     d->init_stage = AD7124_INIT_RESET;
     if (ad7124_reset(d) != IF_OK) return IF_ERR;
     d->init_stage = AD7124_INIT_ID;
     if (ad7124_read_id(d) != IF_OK) return IF_ERR;
 
-    /* ADC_CTRL同时使能内部2.5V基准；CFGx再显式选择该内部基准。 */
+    /* AVDD模式关闭内部基准；三个CFGx均选择同一基准，切换MODE时也保持。 */
     d->init_stage = AD7124_INIT_CONTROL;
     if (_wr16(d, AD7124_REG_ADC_CTRL,
               AD7124_ADC_CLK_SEL(AD7124_CLK_INT) |
               AD7124_ADC_POWER_MODE(AD7124_PWR_FULL) |
-              AD7124_ADC_REF_EN |
+              (d->use_avdd_reference ? 0U : AD7124_ADC_REF_EN) |
               AD7124_ADC_DATA_STATUS | AD7124_ADC_CS_EN |
               AD7124_ADC_MODE(AD7124_MODE_IDLE)) != IF_OK)
         return IF_ERR;
@@ -360,10 +361,10 @@ static int initialize_device(ad7124_t *d)
             return IF_ERR;
 
         /* 增益1、负端接AGND；校零时正端内部短接负端，双端均关闭缓冲，
-         * 避免地电位低于缓冲器所需的AVSS+100mV。内部基准无需REFIN缓冲。 */
+         * 避免地电位低于缓冲器所需的AVSS+100mV。内部/AVDD基准无需REFIN缓冲。 */
         if (_wr16(d, AD7124_REG_CFG0 + ch,
                   AD7124_CFG_PGA(0) |
-                  AD7124_CFG_REF_SEL(AD7124_REF_INT)) != IF_OK)
+                  AD7124_CFG_REF_SEL(reference)) != IF_OK)
             return IF_ERR;
 
         /* SINC4、FS=384；切换通道需四个滤波周期建立，不是每路50SPS。 */
@@ -495,10 +496,12 @@ static int calibrate_channel(ad7124_t *d, uint8_t ch, uint32_t polls)
 
     if (d->grounded_ainm) {
         /* 只适用已确认的B1三路接地输入；变更通道或增益后必须重新评审。 */
+        uint8_t reference = d->use_avdd_reference ? AD7124_REF_AVDD : AD7124_REF_INT;
         uint16_t expected = AD7124_CH_ENABLE | AD7124_CH_SETUP(ch) |
                             AD7124_CH_AINP(ch * 2U) | AD7124_CH_AINM(ch * 2U + 1U);
-        if (d->grounded_ainm != 1U || ch >= 3U || snapshot->channel != expected ||
-            config != AD7124_CFG_REF_SEL(AD7124_REF_INT) ||
+        if (d->grounded_ainm != 1U || d->use_avdd_reference > 1U || ch >= 3U ||
+            snapshot->channel != expected || config != AD7124_CFG_REF_SEL(reference) ||
+            (control & AD7124_ADC_REF_EN) != (d->use_avdd_reference ? 0U : AD7124_ADC_REF_EN) ||
             (snapshot->error & ~(AD7124_ERR_AINP_UV | AD7124_ERR_AINM_UV))) {
             result = IF_ERR;
             goto restore;

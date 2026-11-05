@@ -10,9 +10,13 @@ def main():
     parser.add_argument("--app-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--compiler", default=shutil.which("arm-none-eabi-gcc") or "arm-none-eabi-gcc")
     parser.add_argument("--qemu", default=shutil.which("qemu-system-arm") or "D:/qemu/qemu-system-arm.exe")
+    parser.add_argument("--internal-reference", action="store_true", help="验证B1切回内部2.5V基准")
     args = parser.parse_args()
     root = args.app_root.resolve()
-    build = root / "build/ad7124-test"
+    is_b1 = (root / "b1.ioc").exists()
+    if args.internal_reference and not is_b1:
+        parser.error("--internal-reference只用于B1板级开关；V2默认就是内部基准")
+    build = root / ("build/ad7124-test-internal" if args.internal_reference else "build/ad7124-test")
     build.mkdir(parents=True, exist_ok=True)
     # 只替换GPIO类型及操作；SPI协议、采样和校准均执行正式C代码。
     (build / "main.h").write_text('''#pragma once
@@ -22,13 +26,14 @@ typedef enum { GPIO_PIN_RESET=0, GPIO_PIN_SET=1 } GPIO_PinState;
 void HAL_GPIO_WritePin(GPIO_TypeDef *, uint16_t, GPIO_PinState);
 void HAL_Delay(uint32_t);
 ''', encoding="utf-8")
-    includes = [build] + [root / p for p in ("HAL_Drv", "BSP/AD7124", "BSP/PAC1934", "BSP/TPS62868")]
+    includes = [build] + [root / p for p in ("HAL_Drv", "BSP/AD7124", "BSP/PAC1934", "BSP/TPS62868", "Core/Inc")]
     sources = [Path(__file__).with_name("test_ad7124.c"), root / "BSP/AD7124/ad7124.c",
                root / "HAL_Drv/memory_monitor.c", Path(__file__).resolve().parent / "support/qemu_start.s"]
     command = [str(args.compiler), "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-std=c11", "-g", "-O1", "-Wall", "-Wextra", "-Werror",
                "-ffunction-sections", "-fdata-sections", *["-I" + str(p) for p in includes],
-               *(["-DAD_TEST_B1=1"] if (root / "b1.ioc").exists() else []),
+               *(["-DAD_TEST_B1=1"] if is_b1 else []),
+               *(["-DBOARD_AD_USE_AVDD_REFERENCE=0"] if args.internal_reference else []),
                *map(str, sources), "-nostartfiles", "--specs=nosys.specs",
                "-T" + str(Path(__file__).resolve().parent / "support/qemu_test.ld"), "-Wl,--gc-sections",
                "-o", str(build / "test.elf")]
@@ -43,7 +48,7 @@ void HAL_Delay(uint32_t);
     (build / "run.log").write_text(output, encoding="utf-8")
     if result.returncode or "PASS: actual AD7124" not in output:
         raise RuntimeError(output)
-    print(f"{root.name}: {output.strip()}")
+    print(f"{root.name}{' internal' if args.internal_reference else ''}: {output.strip()}")
 
 
 if __name__ == "__main__":

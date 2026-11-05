@@ -124,6 +124,7 @@ void test_main(void)
     CHECK(strstr(output, "code=7 candidateSite=8 assignedSite=0") != NULL);
     CHECK(strstr(output, "IP=192.168.1.201 up=1 link=0") != NULL);
     CHECK(strstr(output, "[VDD1/2/Q mV] unavailable") != NULL);
+    CHECK(strstr(output, "[AD reference] configured=AVDD assumedMv=3333") != NULL);
     CHECK(strstr(output, "[IDD1/2/Q uA] unavailable") != NULL);
     CHECK(strstr(output, "[TPS status 1/2/Q] unavailable") != NULL);
     CHECK(strstr(output, "[LED] states=0,0,0 PG0..6 ODR=0x00 IDR=0x00") != NULL);

@@ -82,7 +82,7 @@ def good_sample(age=10):
 
 
 class BoardModel:
-    """提供050x最小合同，拒绝OFF时非标称调压。"""
+    """提供050x最小合同，分别记录OFF缓存与实际发起上电的目标。"""
     def __init__(self, clock):
         self.clock = clock
         self.calls = []
@@ -90,6 +90,9 @@ class BoardModel:
         self.mode = "usbMaskrom"
         self.failed_command = None
         self.samples = None
+        self.training_mv = (1800, 1100, 600)
+        self.start_targets = []
+        self.voltage_states = []
 
     def call(self, command, body=None):
         self.calls.append((command, body))
@@ -98,6 +101,7 @@ class BoardModel:
             raise RemoteError("hardwareError")
         if command == 0x0501:
             self.power = "on"
+            self.start_targets.append(self.training_mv)
         elif command == 0x0502:
             self.power = "off"
         elif command == 0x0503:
@@ -108,10 +112,10 @@ class BoardModel:
             self.mode = body["bootMode"]
         elif command == 0x0507:
             return {"bootMode": self.mode, "targetMv": BOOT_MV[self.mode]}
-        elif command == 0x0509 and self.power == "off":
-            expected = ("1800", "1100", "600" if body["memoryType"] == "LPDDR4X" else "1100")
-            if tuple(body[k] for k in ("vdd1", "vdd2", "vddq")) != expected:
-                raise RemoteError("powerMustBeOn")
+        elif command == 0x0509:
+            self.voltage_states.append(self.power)
+            if self.power == "off":
+                self.training_mv = tuple(int(body[k]) for k in ("vdd1", "vdd2", "vddq"))
         elif command == 0x0601:
             return next(self.samples) if self.samples is not None else good_sample(0)
         return {"status": "completed", "requestCommandId": command}
@@ -272,7 +276,8 @@ class ProtocolTests(unittest.TestCase):
             client.connect("127.0.0.1", port)
             runner = Runner(client, stop)
             try:
-                outcome = execute_run(runner, lambda: runner.prepare("LPDDR4X", "emmc"), False)
+                outcome = execute_run(runner, lambda: runner.prepare(
+                    "LPDDR4X", "emmc", VoltagePoint((1700, 1060, 570))), False)
                 self.assertIn("已停止", outcome)
             finally:
                 client.close()
@@ -289,17 +294,20 @@ class LoopTests(unittest.TestCase):
                              clock=self.clock, wait=self.clock.wait)
 
     def test_single_steps_do_not_hide_power_cycles(self):
-        self.runner.set_voltage(VoltagePoint((1800, 1100, 600)), "LPDDR4X")
+        self.runner.set_voltage(VoltagePoint((1700, 1060, 570)), "LPDDR4X")
         self.runner.set_boot("emmc")
         self.runner.power_on()
         self.runner.set_voltage(VoltagePoint((2000, 1205, 655)), "LPDDR4X")
         self.assertEqual([c for c, _ in self.client.calls],
                          [0x0509, 0x0506, 0x0507, 0x0501, 0x0503, 0x0509])
         self.assertEqual(self.client.power, "on")
+        self.assertEqual(self.client.start_targets, [(1700, 1060, 570)])
+        self.assertEqual(self.client.training_mv, (1700, 1060, 570))
         self.runner.power_off()
         self.assertEqual(self.client.calls[-2:], [(0x0502, None), (0x0503, None)])
 
     def test_single_step_rejection_does_not_change_power(self):
+        self.client.failed_command = 0x0509
         with self.assertRaises(RemoteError):
             self.runner.set_voltage(VoltagePoint((2000, 1200, 600)), "LPDDR4X")
         self.assertEqual([c for c, _ in self.client.calls], [0x0509])
@@ -357,7 +365,10 @@ class LoopTests(unittest.TestCase):
         commands = [c for c, _ in self.client.calls]
         self.assertEqual(commands[:7], [0x0502, 0x0503, 0x0509, 0x0506, 0x0507, 0x0501, 0x0503])
         targets = [body["vdd1"] for cmd, body in self.client.calls if cmd == 0x0509]
-        self.assertEqual(targets, ["1800", "2000", "3350", "2000", "3350"])
+        self.assertEqual(targets, ["2000", "3350", "2000", "3350"])
+        self.assertEqual(self.client.start_targets, [p.mv for p in points] * 2)
+        self.assertEqual(self.client.voltage_states, ["off"] * 4)
+        self.assertEqual(commands.count(0x0501), 4)
         self.assertEqual(commands[-2:], [0x0502, 0x0503])
         self.assertEqual(len(self.rows), 24)
         self.assertEqual(self.rows[0]["AD减目标mV"], -199)
@@ -382,19 +393,32 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(self.rows, [])
 
     def test_boot_loop_never_claims_actual_medium_or_waits_for_rk(self):
-        execute_run(self.runner, lambda: self.runner.boot_loop("fspiM1", 3, "LPDDR4", 500, 3000), True)
+        point = VoltagePoint((1900, 1150, 1150))
+        execute_run(self.runner, lambda: self.runner.boot_loop("fspiM1", 3, "LPDDR4", point, 500, 3000), True)
         commands = [c for c, _ in self.client.calls]
         self.assertNotIn(0x0505, commands)
         self.assertEqual(commands.count(0x0501), 3)
         self.assertEqual(commands.count(0x0502), 4)
         self.assertEqual(len(self.rows), 3)
         self.assertTrue(all(r["RK实际启动介质"] == "未验证" for r in self.rows))
-        self.assertEqual(self.client.calls[2][1]["vddq"], "1100")
+        self.assertEqual(self.client.calls[2][1]["vddq"], "1150")
+        self.assertEqual(self.client.start_targets, [point.mv] * 3)
+        self.assertEqual(self.client.voltage_states, ["off"] * 3)
+
+    def test_off_preset_rejected_stops_without_nominal_fallback_or_power_on(self):
+        self.client.failed_command = 0x0509
+        with self.assertRaises(RemoteError):
+            execute_run(self.runner, lambda: self.runner.voltage_loop(
+                [VoltagePoint((1700, 1060, 570))], 1, "LPDDR4X", "emmc", 0, 1, 100), True)
+        self.assertEqual([c for c, _ in self.client.calls], [0x0502, 0x0503, 0x0509])
+        self.assertEqual(self.client.power, "off")
+        self.assertEqual(self.rows, [])
 
     def test_driver_failure_leaves_scene_and_no_auto_cleanup(self):
         self.client.failed_command = 0x0506
         with self.assertRaises(RemoteError):
-            execute_run(self.runner, lambda: self.runner.boot_loop("emmc", 3, "LPDDR4X", 0, 1000), True)
+            execute_run(self.runner, lambda: self.runner.boot_loop(
+                "emmc", 3, "LPDDR4X", VoltagePoint((1800, 1100, 600)), 0, 1000), True)
         self.assertEqual(self.client.calls[-1][0], 0x0506)
         self.assertNotIn(0x0501, [c for c, _ in self.client.calls])
 

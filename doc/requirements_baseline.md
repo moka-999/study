@@ -74,8 +74,8 @@ PC6控制RK806/TPS共享4V，PC7控制系统3.3V；PG11 NC不提供独立DDR关�
 |---|---|---|
 | 电源/测量 | 真实驱动，PAC分流20mΩ；精度待验收 | 可显式启用电源/Boot/测量模拟，PAC测试参数10mΩ |
 | MATS假FAIL | 禁止 | 显式联调选项，只改第一颗PC结果，第二颗真实 |
-| RK协议口 | UART4→RK UART0_M0 | USART1 |
-| 日志 | USART2接收RK UART2_M0_DEBUG；USART1选择输出MCU或RK日志 | 不照搬B1串口分工 |
+| RK协议口 | UART4→U4008→RK UART1_M0（GPIO2_B6/B7）；20260920-2134图第6/14页复核 | USART1 |
+| 日志 | USART2双向连接RK UART2_M0_DEBUG；USART1切换MCU本地命令或RK控制台 | 不照搬B1串口分工 |
 | PHY | 最新B1资料按YT8512H、PG12复位核对 | YT8512C、开发板复位路径 |
 
 详细引脚/BOM依据见[引脚表](b1_mcu_pinout.md)。B1实际料号、贴装、地址和模拟输出不能由静态检查代替。

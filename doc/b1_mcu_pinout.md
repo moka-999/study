@@ -21,11 +21,14 @@
 | PG12 | ETH_nRST | PHY复位；PA0是WK-UP，不能用于PHY复位 |
 
 ## UART ↔ RK3588
+
+本节按20260920-2134原理图第6/14页重新核对：协议对端是UART1_M0，旧UART0记载有误；其余外设不因此视为重新验收。依据见[本轮核对](../experiments/mcu_pxe/uart1_fix_20261103.md)。
+
 | UART | STM32 引脚 | 说明 |
 |------|-----------|------|
-| UART4 TX/RX | PA12/PA11 | → RS0102 U4008 → RK3588 UART0_M0，固定协议通道 |
-| USART2 TX/RX | PD5/PD6 | → RS0102 U4013 → RK3588 UART2_M0_DEBUG，只接收日志 |
-| USART1 TX/RX | PA9/PA10 | 本地输出所选MCU/RK日志，接收本地log切换命令；不是RK协议通道 |
+| UART4 TX/RX | PA12/PA11 | → RS0102 U4008 → RK3588 UART1_M0，RK RX=GPIO2_B6、TX=GPIO2_B7，固定协议通道 |
+| USART2 TX/RX | PD5/PD6 | → RS0102 U4013 → RK3588 UART2_M0_DEBUG，双向调试 |
+| USART1 TX/RX | PA9/PA10 | 输出所选MCU/RK日志；MCU模式处理本地命令，RK模式转发输入至USART2 |
 
 ## I2C
 | 总线 | 引脚 | 设备 |

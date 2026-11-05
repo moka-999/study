@@ -12,7 +12,7 @@
 
 ## 1. 帧与字节序
 
-当前协议口115200、8N1；V2为USART1，B1固定UART4到RK UART0_M0，USART2只收RK调试日志，USART1为B1本地日志出口。B1线路与调试波特率仍待真板验收。
+当前协议口115200、8N1；V2为USART1，B1固定UART4经U4008到RK UART1_M0，USART2经U4013双向连接RK UART2_M0_DEBUG，USART1为可切换的MCU/RK控制台。UART1映射按20260920-2134原理图第6/14页复核，纠正旧UART0记载；协议线路仍待真板验收，见[核对记录](../experiments/mcu_pxe/uart1_fix_20261103.md)。
 
 | 字段 | 偏移 | 字节数 | 规则 |
 |---|---:|---:|---|

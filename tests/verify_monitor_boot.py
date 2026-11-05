@@ -46,6 +46,9 @@ uint32_t HAL_GetTick(void);
                root / "App/tasks/common/monitor_task.c", root / "BSP/MCP4725/mcp4725.c",
                root / "HAL_Drv/idd_stats.c",
                Path(__file__).resolve().parent / "support/qemu_start.s"]
+    if (root / "b1.ioc").exists():
+        # B1直接编译真实DDR缓存与上电写入代码，TPS操作用计数桩验证无提前访问。
+        sources.append(root / "HAL_Drv/ddr_power.c")
     command = [str(args.compiler), "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-g", "-O1", "-Wall", "-Wextra", "-Werror",
                "-ffunction-sections", "-fdata-sections", *["-I" + str(p) for p in includes],

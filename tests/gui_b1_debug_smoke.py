@@ -123,6 +123,8 @@ def main():
         wait_job()
         assert "本机模拟" in app.status.get()
         check_layout()
+        for var, value in zip(app.targets, (1700, 1060, 570)):
+            var.set(str(value))
         app.manual("应用三轨电压")
         wait_job()
         app.boot_mode.set("emmc")
@@ -131,6 +133,7 @@ def main():
         app.manual("上电")
         wait_job()
         assert [c for c, _ in records[3:]] == [0x0509, 0x0506, 0x0507, 0x0501, 0x0503]
+        assert records[3][1]["vdd1"] == "1700"
         for var, value in zip(app.targets, (1810, 1105, 605)):
             var.set(str(value))
         app.manual("应用三轨电压")
@@ -172,21 +175,26 @@ def main():
         app.samples.set("2")
         app.settle_ms.set("100")
         app.interval_ms.set("100")
+        start = len(records)
         app.start_voltage()
         assert str(app.connect_button["state"]) == "disabled"
         wait_job()
         assert len(app.table.get_children()) == 6
         assert "已确认下电" in app.status.get()
+        assert [c for c, _ in records[start:start + 7]] == [0x0502, 0x0503, 0x0509, 0x0506, 0x0507, 0x0501, 0x0503]
+        assert records[start + 2][1]["vdd1"] == "3350"
         check_layout()
         app.book.select(2)
         app.boot_mode.set("fspiM1")
         app.boot_cycles.set("2")
         app.off_ms.set("0")
         app.on_ms.set("500")
+        start = len(records)
         app.start_boot()
         wait_job()
         assert len(app.table.get_children()) == 2
         assert all(app.table.item(k, "values")[-1] == "未验证" for k in app.table.get_children())
+        assert [body["vdd1"] for c, body in records[start:] if c == 0x0509] == ["3350", "3350"]
         check_layout()
         assert not any(c in (0x0505, 0x0103, 0x0901) for c, _ in records)
         (output / "gui_result.json").write_text(json.dumps(

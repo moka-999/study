@@ -20,7 +20,12 @@ def main():
     # 仅用队列/HAL声明替换硬件和调度器；被测路由、状态机、帧及统计原样链接。
     (build / "test_port.h").write_text('''#pragma once
 #include <stdint.h>
+#include <stddef.h>
 typedef struct { uint32_t unused; } GPIO_TypeDef;
+typedef enum { HAL_OK=0, HAL_ERROR=1 } HAL_StatusTypeDef;
+typedef enum { GPIO_PIN_RESET=0, GPIO_PIN_SET=1 } GPIO_PinState;
+uint32_t HAL_GetTick(void);
+void HAL_GPIO_WritePin(GPIO_TypeDef *, uint16_t, GPIO_PinState);
 typedef struct { uint32_t ErrorCode; int event; } UART_HandleTypeDef;
 typedef uint32_t TickType_t;
 typedef unsigned UBaseType_t;
@@ -48,7 +53,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *, uint16_t);
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *);
 uint32_t __get_IPSR(void);
 ''', encoding="utf-8")
-    for name in ("main", "FreeRTOS", "task", "queue"):
+    for name in ("main", "FreeRTOS", "task", "queue", "stm32h7xx_hal"):
         (build / f"{name}.h").write_text('#include "test_port.h"\n', encoding="utf-8")
     includes = [build] + [root / p for p in ("HAL_Drv", "BSP/AD7124", "BSP/PAC1934", "App/protocol/rk", "App/protocol/common")]
     sources = [Path(__file__).with_name("test_uart_idd.c")] + [root / p for p in (
@@ -56,12 +61,13 @@ uint32_t __get_IPSR(void);
         "App/protocol/common/crc.c", "App/protocol/rk/state_machine.c")] + [support / "qemu_start.s"]
     if is_b1:
         sources.append(root / "Core/Src/log_console.c")
+        sources.append(root / "Core/Src/result_led.c")
         includes.append(root / "Core/Inc")
     command = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-ffunction-sections",
                "-fdata-sections", *["-I" + str(p) for p in includes], *map(str, sources),
                "-nostartfiles", "--specs=nosys.specs", "-T" + str(support / "qemu_test.ld"),
-               "-Wl,--gc-sections", "-o", str(build / "test.elf")]
+               "-Wl,--gc-sections,--defsym=end=_ebss", "-o", str(build / "test.elf")]
     if is_b1:
         command += ["-DTEST_B1_LOG_CONSOLE=1", f"-DB1_LOG_DEFAULT_SOURCE={args.log_default}"]
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)

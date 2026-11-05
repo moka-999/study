@@ -88,6 +88,7 @@ spi_if_t spi2_if, spi4_if;
 
 /* 仅替换电源/器件动作，测试真实monitor是否正确持锁和取消旧条件窗口。 */
 void pwr_ctrl_process(uint32_t now) { CHECK(locked && now == clock_ms); }
+#ifndef MONITOR_TEST_B1
 ddr_memory_type_t ddr_power_get_memory_type(void) { return DDR_MEMORY_LPDDR4X; }
 int ddr_power_build_step_targets(ddr_memory_type_t type,
                                   const int16_t steps[DDR_RAIL_COUNT],
@@ -97,6 +98,7 @@ int ddr_power_build_step_targets(ddr_memory_type_t type,
     memset(mv, 0, DDR_RAIL_COUNT * sizeof(*mv));
     return IF_OK;
 }
+#endif
 pwr_ctrl_result_t pwr_ctrl_select_memory_type(ddr_memory_type_t type)
 {
     CHECK(locked && type <= DDR_MEMORY_LPDDR4X);
@@ -355,6 +357,89 @@ static void expect_unknown(void)
     CHECK(mode == BOOT_MODE_COUNT && mv == 9999U && !locked);
 }
 
+#ifdef MONITOR_TEST_B1
+static uint32_t tps_calls, tps_writes;
+static uint16_t tps_targets[DDR_RAIL_COUNT];
+static int unused_read(i2c_if_t *bus, uint8_t dev, uint8_t reg, uint8_t *val)
+{
+    (void)bus; (void)dev; (void)reg; (void)val;
+    fail("FAIL unexpected raw I2C read\n");
+}
+static int unused_write(i2c_if_t *bus, uint8_t dev, uint8_t reg, uint8_t val)
+{
+    (void)bus; (void)dev; (void)reg; (void)val;
+    fail("FAIL unexpected raw I2C write\n");
+}
+i2c_if_t i2c1_if;
+int tps62868_read_status(tps62868_t *device, uint8_t *flags)
+{
+    CHECK(locked && state != PWR_CTRL_STATE_OFF && device && flags);
+    ++tps_calls;
+    *flags = 0U;
+    return IF_OK;
+}
+int tps62868_set_ramp(tps62868_t *device, uint8_t ramp)
+{
+    CHECK(locked && state != PWR_CTRL_STATE_OFF && device && ramp == TPS62868_RAMP_20MV_US);
+    ++tps_calls;
+    return IF_OK;
+}
+int tps62868_set_vout1(tps62868_t *device, uint16_t mv)
+{
+    const uint8_t addresses[] = {TPS62868_ADDR_VDD1, TPS62868_ADDR_VDD2, TPS62868_ADDR_VDDQ};
+    CHECK(locked && state != PWR_CTRL_STATE_OFF && device && tps_writes < DDR_RAIL_COUNT);
+    CHECK(device->addr == addresses[tps_writes]);
+    tps_targets[tps_writes++] = mv;
+    ++tps_calls;
+    return IF_OK;
+}
+static void test_off_training_target(void)
+{
+    const uint16_t expected[] = {1700U, 1060U, 570U};
+    int16_t steps[] = {-10, -8, -6};
+    const int16_t invalid[] = {-101, 0, 0};
+    uint32_t previous_writes = writes;
+    state = PWR_CTRL_STATE_OFF;
+    CHECK(monitor_apply_ddr_config(DDR_MEMORY_LPDDR4X, steps) == PWR_CTRL_OK);
+    steps[0] = 15; /* 不保留调用者缓冲；后续拒绝不能覆盖已受理的1700mV目标。 */
+    CHECK(monitor_apply_ddr_config(DDR_MEMORY_LPDDR4X, invalid) == PWR_CTRL_ERR_PARAM);
+    CHECK(monitor_apply_ddr_config((ddr_memory_type_t)-1, steps) == PWR_CTRL_ERR_PARAM);
+    CHECK(monitor_apply_ddr_config(DDR_MEMORY_LPDDR4X, NULL) == PWR_CTRL_ERR_PARAM);
+    busy = 1;
+    CHECK(monitor_apply_ddr_config(DDR_MEMORY_LPDDR4, steps) == PWR_CTRL_ERR_RESOURCE_BUSY);
+    busy = 0;
+    state = PWR_CTRL_STATE_WAIT_FIRST_RAIL;
+    CHECK(monitor_apply_ddr_config(DDR_MEMORY_LPDDR4, steps) == PWR_CTRL_ERR_BUSY);
+    state = PWR_CTRL_STATE_FAULT;
+    CHECK(monitor_apply_ddr_config(DDR_MEMORY_LPDDR4, steps) == PWR_CTRL_ERR_FAULT);
+    CHECK(ddr_power_get_memory_type() == DDR_MEMORY_LPDDR4X);
+    for (uint8_t rail = 0U; rail < DDR_RAIL_COUNT; ++rail)
+        CHECK(ddr_power_get_training_mv(rail) == expected[rail]);
+    CHECK(!locked && writes == previous_writes && tps_calls == 0U);
+
+    /* 模拟电源时序到达TPS可写阶段：真实ddr_power_init只写一次已保存目标。 */
+    i2c1_if.read_reg = i2c2_if.read_reg = i2c4_if.read_reg = unused_read;
+    i2c1_if.write_reg = i2c2_if.write_reg = i2c4_if.write_reg = unused_write;
+    state = PWR_CTRL_STATE_WAIT_SECOND_RAIL;
+    locked = 1;
+    CHECK(ddr_power_init() == IF_OK);
+    locked = 0;
+    CHECK(tps_calls == 9U && tps_writes == 3U);
+    CHECK(memcmp(tps_targets, expected, sizeof(expected)) == 0);
+    /* ON运行拉偏即使尝试写失败，也不能改写下次上电目标。 */
+    state = PWR_CTRL_STATE_ON;
+    CHECK(monitor_apply_ddr_config(DDR_MEMORY_LPDDR4X, steps) == PWR_CTRL_ERR_FAULT);
+    for (uint8_t rail = 0U; rail < DDR_RAIL_COUNT; ++rail)
+        CHECK(ddr_power_get_training_mv(rail) == expected[rail]);
+    CHECK(tps_calls == 9U && writes == previous_writes);
+    state = PWR_CTRL_STATE_OFF;
+    CHECK(monitor_apply_ddr_config(DDR_MEMORY_LPDDR4, steps) == PWR_CTRL_OK);
+    CHECK(ddr_power_get_memory_type() == DDR_MEMORY_LPDDR4);
+    CHECK(ddr_power_get_training_mv(DDR_RAIL_VDDQ) == 1070U);
+    CHECK(ddr_power_select_memory_type(DDR_MEMORY_LPDDR4X) == IF_OK);
+}
+#endif
+
 void test_main(void)
 {
     /* MCU冷启动BSS为空，准备句柄不能自动写DAC。 */
@@ -386,6 +471,9 @@ void test_main(void)
     CHECK(monitor_set_boot_mode(BOOT_MODE_EMMC) == MONITOR_BOOT_OK);
     expect_cached();
     CHECK(writes == 3U && !locked);
+#ifdef MONITOR_TEST_B1
+    test_off_training_target();
+#endif
     test_idd_integration();
     message("PASS: actual monitor Boot cache and IDD task integration\n");
     finish(0U);

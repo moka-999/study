@@ -272,7 +272,7 @@ class Runner:
             raise RuntimeError(f"Boot配置缓存与请求不一致：{result}")
 
     def set_voltage(self, point, memory_type):
-        """只提交三轨配置；OFF时非标称值或ON时改类型由MCU明确拒绝。"""
+        """OFF时保存下次上电目标，ON时同类型立即调压；失败不自动换用标称值。"""
         self.command(0x0509, point.payload(memory_type))
 
     def read_monitor(self, index=1, max_age_ms=1500, kind="持续监测"):
@@ -299,10 +299,10 @@ class Runner:
             self.read_monitor(index, max_age_ms)
             self.pause(interval_ms / 1000.0)
 
-    def prepare(self, memory_type, boot_mode):
-        # OFF只接受标称电压来选内存类型；任意验板电压必须在上电后用0509设置。
+    def prepare(self, memory_type, boot_mode, point):
+        # 每次在OFF保存该档训练目标，上电后不再追加运行期调压。
         self.power_off()
-        self.command(0x0509, VoltagePoint(nominal(memory_type)).payload(memory_type))
+        self.set_voltage(point, memory_type)
         self.set_boot(boot_mode)
         self.command(0x0501)
         self.state("on")
@@ -321,11 +321,10 @@ class Runner:
 
     def voltage_loop(self, points, cycles, memory_type, boot_mode, settle_ms,
                      samples, interval_ms, max_age_ms=1500, sample_timeout_ms=10000):
-        self.prepare(memory_type, boot_mode)
         for cycle in range(1, cycles + 1):
             for index, point in enumerate(points, 1):
                 self.event(f"第{cycle}/{cycles}轮，第{index}/{len(points)}档：{point.mv} mV")
-                self.command(0x0509, point.payload(memory_type))
+                self.prepare(memory_type, boot_mode, point)
                 barrier = self.clock() + settle_ms / 1000.0
                 self.pause(settle_ms / 1000.0)
                 for sample_index in range(1, samples + 1):
@@ -334,7 +333,7 @@ class Runner:
                     for i, rail in enumerate(RAILS):
                         mv, ma = sample["voltageMv"][i], sample["currentMa"][i]
                         ref_v, ref_i = point.reference_mv[i], point.reference_ma[i]
-                        self.row({"类型": "调压", "轮次": cycle, "电压点": index, "采样序号": sample_index,
+                        self.row({"类型": "目标电压上电", "轮次": cycle, "电压点": index, "采样序号": sample_index,
                                   "电源轨": rail, "内存类型": memory_type, "Boot配置": boot_mode,
                                   "目标mV": point.mv[i], "AD实测mV": mv, "AD减目标mV": mv - point.mv[i],
                                   "AD对目标偏差%": round((mv - point.mv[i]) / point.mv[i] * 100, 6),
@@ -342,16 +341,14 @@ class Runner:
                                   "AD减参考mV": None if ref_v is None else mv - ref_v,
                                   "仪表参考mA": ref_i, "PAC减参考mA": None if ref_i is None else ma - ref_i,
                                   "快照年龄ms": sample["sampleAgeMs"], "电源状态": "on",
-                                  "说明": "仅记录偏差，未给判限；参考值为操作者录入"})
+                                  "说明": "OFF保存目标后上电；仅记录采样偏差，不判定DDR训练或系统启动"})
                     self.pause(interval_ms / 1000.0)
 
-    def boot_loop(self, mode, cycles, memory_type, off_ms, on_ms):
-        self.power_off()
-        self.command(0x0509, VoltagePoint(nominal(memory_type)).payload(memory_type))
+    def boot_loop(self, mode, cycles, memory_type, point, off_ms, on_ms):
         for cycle in range(1, cycles + 1):
-            self.event(f"第{cycle}/{cycles}次上下电：{mode}，RK实际介质仍需外部确认")
-            if cycle > 1:
-                self.power_off()
+            self.event(f"第{cycle}/{cycles}次上下电：{mode}，三轨{point.mv} mV，RK启动需外部确认")
+            self.power_off()
+            self.set_voltage(point, memory_type)
             self.pause(off_ms / 1000.0)
             self.set_boot(mode)
             self.command(0x0501)
@@ -364,7 +361,7 @@ class Runner:
             self.row({"类型": "Boot循环", "轮次": cycle, "内存类型": memory_type,
                       "Boot配置": mode, "目标mV": BOOT_MV[mode], "电源状态": "on",
                       "上下电结果": "指令完成", "RK实际启动介质": "未验证",
-                      "说明": "0508仅成功配置缓存；目标mV为Boot DAC目标，不是实测"})
+                      "说明": f"DDR目标VDD1/VDD2/VDDQ={point.mv}mV；目标mV列为Boot DAC目标，均非实测"})
 
 
 def execute_run(runner, operation, power_off_at_end):

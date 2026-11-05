@@ -1,0 +1,90 @@
+PCB初稿
+
+Use case: precise-object-edit.
+Asset: Chinese electronics multimeter probe annotation, preserving the attached PCB screenshot exactly.
+Input image 1 is the sole edit target, an 815 by 716 pixel black-background PCB screenshot. Keep every original pad, net name, component outline and orientation unchanged. Do not mirror, rotate, redraw, invent pads, or improve/replace the PCB geometry. Add white margins/title/legend; original screenshot should remain sharply visible at a large scale on the left, with a clean text legend on the right. Focus only on TOP group D3, Q8 at left and Q7 at right. No probe markers on the second or third group.
+
+Add small thin hollow circles on the following exact pad CENTERS, with short leader lines to large readable labels outside the pads (coordinates below are in the ORIGINAL 815x716 input):
+G, white circle on Q8 bottom-left GND pad at (95,178). Label "G 黑表笔：GND".
+A, red circle on Q7 bottom-right pad at (607,178), net N17313050. Label "A Q7-1 / PG0控制".
+B, red circle on Q8 top-left pad at (95,65), net N17313056. Label "B Q8-1 / PG1控制".
+C, orange circle on Q7 left/middle pad at (482,121), net N17312992. Label "C Q7-3 / 输出".
+D, orange circle on Q8 right/middle pad at (217,121), net N17312994. Label "D Q8-3 / 输出".
+Keep circle centers at exactly these original pads even if the image is proportionally enlarged. C,D are MOS drains, NOT LED terminals. A,B are MOS gates after resistors, not direct MCU pins. Don't obscure net labels or move pads.
+
+Title exact: "B1 第0组灯：万用表测点"
+Subtitle exact: "MCU面当前视角｜按此图辨认，不另行镜像"
+Legend exact:
+"直流电压档，黑表笔固定G"
+"红表笔依次测 A、B，再测 C、D"
+"A / B 高电平理论约2.7V"
+"（按1kΩ串联＋4.7kΩ下拉计算）"
+
+Add compact readable table:
+"命令 | A（Q7-1） | B（Q8-1）"
+"led 0 00 | 约0V | 约0V"
+"led 0 01 | 约0V | 约2.7V"
+"led 0 10 | 约2.7V | 约0V"
+"led 0 11 | 约2.7V | 约2.7V"
+
+Below table:
+"C、D：记录两种单通道状态的实测值"
+"MOS导通时输出接近0V，关断值不固定"
+"保持RK/DDR关闭；板卡MCU正常供电"
+"不要用电流档；细表笔避免短接相邻脚"
+Engineering annotation, no decorative illustration, no photoreal reconstruction. All added Chinese labels legible with dark text on white background. Original screenshot retained as evidence.
+
+实物初稿
+
+Use case: precise-object-edit.
+Asset: Chinese real-board location photo for LED diagnostics.
+Input image 1 is the edit target: original physical B1 MCU-side board photo (583x720 pixels, big STM32 upper-left, red rectangle around unpopulated FX18 connector on left). Preserve entire original photograph unchanged: no mirroring, rotation, component movement, synthetic enhancement or invented pads. Place original at large size on left of a white landscape page. Keep its existing red FX18 rectangle. Add ONLY a thin yellow rectangle marking the first LED group region at ORIGINAL coordinates x=132..196, y=296..336. The tiny top LED D3 is approximately x=161,y=318, below the STM32 and just right of FX18. Make clear this rectangle indicates a REGION, not an exact probe landing pad.
+
+Title: "B1 实物定位：先测第0组 D3"
+Subtitle: "MCU面｜大STM32在左上，FX18长座在左侧"
+A leader from the yellow rectangle to a white legend:
+"黄色框：D3与Q7/Q8所在区域"
+"本次先检查这一组"
+"其他两组保持关闭"
+
+On right include the TOP GROUP ONLY cropped from input image 2 (PCB screenshot, source original x=40..663, y=0..236), preserving crop unmirrored. Label it "对应PCB位置（精确测脚见测点图）". In this crop Q8 is left, D3 middle, Q7 right; keep this arrangement. Do not replace photograph with PCB or render a new board.
+Place a visible divider separating real photo and PCB inset so users cannot confuse them.
+Text below inset:
+"照片分辨率不足以确认每个小焊盘"
+"请按PCB焊盘形状辨认1/2/3脚"
+"黑表笔接已确认的GND"
+"不要把金属外框默认当作GND"
+"上电用直流电压档，不用电流档"
+
+Bottom short instruction: "先 log mcu，再逐条发送 led 0 01 和 led 0 10；每条加回车。"
+Keep original image pixels and physical layout faithful. No inference of actual LED colors, no highlighting of RK-side network LEDs. Clean precise engineering annotation, high contrast typography.
+
+PCB测点修正
+
+Precisely edit this existing annotated PCB image, which is 1536x1024. Keep all image geometry, all text, labels, tables and pads exactly unchanged. Only reposition the 5 hollow probe circles and the final tips of their associated leader lines. Each circle must be centered INSIDE its physical component pad, not on the small via or the trace:
+A red center=(704,411), centered inside Q7's LOWER-RIGHT CYAN oval marked N17313050. Current A is too low, sitting on trace near via. Move it UP into cyan pad.
+B red center=(162,277), centered inside Q8's UPPER-LEFT CYAN oval N17313056.
+C orange center=(578,340), centered inside Q7's MIDDLE-LEFT CYAN oval N17312992.
+D orange center=(298,341), centered inside Q8's MIDDLE-RIGHT CYAN oval N17312994.
+G white center=(163,405), centered inside Q8's LOWER-LEFT BROWN oval GND. Current G is too low. Move UP into brown GND pad.
+Use small 8-pixel-radius hollow circles, do not cover net labels. Keep circle locations registered to the named pads if output scaling changes. NO other changes; no redraw of original PCB, no new connection lines. Return same overall 1536x1024 layout.
+
+实物区域修正
+
+Make ONE targeted correction to the supplied existing annotated 1536x1024 board-photo infographic. Keep photograph, inset, title, table-free legend and all other content unchanged. Current yellow rectangle wrongly includes three vertically stacked LEDs. Delete that tall narrow yellow rectangle, replace with ONE wider but SHORT yellow rectangle encompassing ONLY the TOPMOST ROW of the three LEDs and its two neighboring tiny MOS transistors, below STM32, right of red FX18 rectangle.
+In THIS 1536x1024 image the top LED D3 is at approximately (266,470). The middle LED is (266,496) and bottom LED is (266,524); those must NOT be inside yellow box.
+Draw new yellow rectangle from (238,453) to (315,482), containing only top LED and immediate left/right neighbors. Keep middle and bottom LEDs fully outside. Redirect the existing yellow leader from caption to new box right edge at (315,468). Caption remains "黄色框：D3与Q7/Q8所在区域 本次先检查这一组 其他两组保持关闭". No other changes. Photo is only a location guide, never invent micro pads. Keep existing red FX18 rectangle and original orientation.
+
+最终实物图：采用原先三灯区域框，只修正说明，不使用单行框的中间稿。
+Edit ONLY the wording of the yellow callout box in this existing 1536x1024 electronics photo annotation. Preserve entire photograph, entire tall yellow rectangle around THREE vertically stacked LEDs, arrow position, PCB inset and all other text exactly unchanged. Do NOT move or redraw the rectangle or any component.
+
+Replace the white callout that currently says:
+"黄色框：D3与Q7/Q8所在区域
+本次先检查这一组
+其他两组保持关闭"
+with exactly:
+"黄色框：三组结果灯区域
+从上到下：第0、1、2组
+本次只测最上方第0组"
+
+This is a REGION guide showing all three LEDs; the topmost one is group 0, not the middle. The PCB inset on right is specifically group 0 D3. Avoid changing any pixels outside the caption box. No other changes.
