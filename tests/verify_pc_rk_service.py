@@ -62,13 +62,14 @@ uint32_t HAL_GetTick(void);
         "App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_test_service.c",
         "App/protocol/pc/pc_power_service.c",
         "App/protocol/pc/pc_protocol.c", "App/protocol/pc/pc_test_message.c",
-        "App/tasks/rk/rk_link.c", "HAL_Drv/ddr_power.c", "Middlewares/Third_Party/cJSON/cJSON.c")]]
+        "App/tasks/rk/rk_link.c", "App/protocol/rk/frame.c", "App/protocol/common/crc.c",
+        "HAL_Drv/ddr_power.c", "Middlewares/Third_Party/cJSON/cJSON.c")]]
     if args.power_simulation or args.b1_guard or root.name == "b1":
         sources.append(root / "HAL_Drv/idd_stats.c")
     if args.power_simulation:
         sources += [root / path for path in ("App/tasks/test/v2_power_sim.c", "BSP/MCP4725/mcp4725.c")]
     includes = [build, *[root / path for path in (
-        "App/protocol/pc", "App/protocol/rk", "App/protocol/b2", "App/tasks/b2",
+        "App/protocol/pc", "App/protocol/rk", "App/protocol/common", "App/protocol/b2", "App/tasks/b2",
         "App/tasks/rk", "App/tasks/common", "App/tasks/test", "HAL_Drv",
         "BSP/TPS62868", "BSP/PAC1934", "BSP/AD7124", "BSP/MCP4725", "BSP/Flash",
         "Middlewares/Third_Party/cJSON", "Core/Inc")]]

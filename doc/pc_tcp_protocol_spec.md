@@ -188,18 +188,22 @@ PC→MCU，每次提交一个FUNC算法。
   "algorithmName": "mats",
   "algorithmIndex": 1,
   "TimingParameters": {
-    "Freq": "",
     "CASReadLatency": "",
     "CASWriteLatency": "",
-    "tRC": "",
+    "Freq": "",
+    "tREFI": "",
+    "tWR": "",
+    "tRTP": "",
     "tRCD": "",
-    "tRFC": "",
     "tRP": "",
-    "tRAS": "",
+    "tRASmin": "",
+    "tRASmax": "",
+    "tWTR": "",
+    "tRFCmin": "",
+    "tFAW": "",
+    "tCCD": "",
     "tRRD": "",
-    "BurstLength": "",
-    "ODT": "",
-    "tREFI": ""
+    "BL": ""
   },
   "power": {
     "memoryType": "LPDDR4X",
@@ -223,26 +227,32 @@ PC→MCU，每次提交一个FUNC算法。
 | reboot | boolean | true要求冷重启；false允许复用有效启动配置，仍受下方重启规则约束 |
 | bootMode | string/null | 启动介质，取值见4.21；null仅配合power:null、reboot:false，空字符串无效 |
 | timeoutMs | integer 可选 | 省略或0不限算法等待；非零1..86400000ms；不是启动等待时限 |
-| TimingParameters | object 必填 | 默认填{}；子字段可部分提供，均为字符串；当前仅校验保存，不写RK |
+| TimingParameters | object 必填 | 默认填{}；子字段可部分提供，均为字符串；按下述启动/发送规则处理 |
 
 七个根字段必填，含TimingParameters；仅timeoutMs可省略。TimingParameters须为对象，使用默认时序填{}，缺失或null回invalidArgument。不接受未知字段；power不继承上次值。
 
-TimingParameters子字段均为可选字符串，可只填部分项或空字符串。未填项不补默认值、不继承上一请求。当前仅校验保存，不写RK；accepted/completed不表示时序已生效。
+TimingParameters子字段均为可选字符串，可只填部分项或空字符串。Freq空串/省略使用默认频率，其余空串/省略不下发、不继承上一请求；不重启时不保证恢复默认寄存器。非空值用十进制整数串：Freq为int64，其余为u32。PC判定单位、取值和适用性，MCU不换算、不取整；accepted/completed不表示时序已生效。旧CASLatency/tRC/ODT/tRAS/tRFC/BurstLength不再接受。
 
 | 子字段 | 类型 | 含义 |
 |---|---|---|
-| Freq | string | 目标频率 |
+| Freq | string | 启动频率，启动早期回复RK查询 |
 | CASReadLatency | string | CAS读延迟 |
 | CASWriteLatency | string | CAS写延迟 |
-| tRC | string | 同一bank相邻Activate的最小间隔 |
-| tRCD | string | Activate到Read/Write的最小间隔 |
-| tRFC | string | 刷新恢复时间 |
-| tRP | string | Precharge到Activate的最小间隔 |
-| tRAS | string | Activate到Precharge的最小间隔 |
-| tRRD | string | 不同bank的Activate最小间隔 |
-| BurstLength | string | 突发长度，取值待RK确认 |
-| ODT | string | 终端匹配配置，保留 |
 | tREFI | string | 刷新间隔 |
+| tWR | string | 写恢复 |
+| tRTP | string | 读到预充电 |
+| tRCD | string | 行到列延迟 |
+| tRP | string | 预充电 |
+| tRASmin | string | 最小行有效时间 |
+| tRASmax | string | 最大行有效时间 |
+| tWTR | string | 写到读延迟 |
+| tRFCmin | string | 最小刷新恢复时间 |
+| tFAW | string | 四次激活窗口 |
+| tCCD | string | 列命令间隔 |
+| tRRD | string | 行激活间隔 |
+| BL | string | 突发长度 |
+
+完整启动顺序为缓存参数 → 原电源/Boot流程 → DDR阶段回复Freq → SPL就绪 → 逐项发送其他时序 → 算法。Freq目标变化须冷启动；普通时序变化本身不要求重启。设置暂不等待RK回应；发送失败停止后续项。外部已启动模式可发普通时序，非负Freq回invalidState。详见[接入记录](rk_timing_frequency_20261105.md)。
 
 #### 电压与重启规则
 
@@ -319,7 +329,7 @@ MCU→PC。每个FUNC算法上报一包，当前为两个镜像各一颗DDR的�
 | ↳ `mirrorIndex` | int | 镜像索引，当前为0或1；不是镜像内芯片编号 |
 | ↳ `testStatus` | int | 本颗结论：0=FAIL，1=PASS |
 | ↳ `resultDesc` | object | 本颗结果说明，子字段由algorithmType决定 |
-| ↳↳ `firstErrorAddress` | string/null | FUNC失败首错地址：0x加16位十六进制；FAIL地址0保留完整零地址，PASS为null |
+| ↳↳ `firstErrorAddress` | string/null | FUNC失败首错地址：0x加16位十六进制；RK零地址明细表示PASS，输出null，非零失败地址完整保留 |
 | ↳↳ `errorType` | string | FUNC错误类型，如SAF；PASS或RK未提供类型时为空字符串 |
 | ↳ `physicalAddr` | string | 镜像内物理芯片标识；当前每镜像一颗时填空，不是首错内存地址 |
 | `measurementData` | object/null | 顶层共享统计，不重复放到两颗结果里；字段为数字或null，不含state |
@@ -392,18 +402,22 @@ PC→MCU，每次提交一个PARA算法。请求结构、电压/重启规则及�
   "algorithmName": "idd_0",
   "algorithmIndex": 1,
   "TimingParameters": {
-    "Freq": "",
     "CASReadLatency": "",
     "CASWriteLatency": "",
-    "tRC": "",
+    "Freq": "",
+    "tREFI": "",
+    "tWR": "",
+    "tRTP": "",
     "tRCD": "",
-    "tRFC": "",
     "tRP": "",
-    "tRAS": "",
+    "tRASmin": "",
+    "tRASmax": "",
+    "tWTR": "",
+    "tRFCmin": "",
+    "tFAW": "",
+    "tCCD": "",
     "tRRD": "",
-    "BurstLength": "",
-    "ODT": "",
-    "tREFI": ""
+    "BL": ""
   },
   "power": {
     "memoryType": "LPDDR4X",
@@ -422,7 +436,7 @@ PC→MCU，每次提交一个PARA算法。请求结构、电压/重启规则及�
 | algorithmName | string | IDD算法名称，按双方约定填写，区分大小写 |
 | algorithmIndex | integer | PC计划项编号，与FUNC相同，响应和结果原样带回 |
 | power / reboot / bootMode | object/null / boolean / string/null | 与4.7相同；示例reboot=false仍受配置变化重启规则约束 |
-| TimingParameters | object 必填 | 默认填{}，不可缺失或null；子字段同4.7，仅校验保存，不写RK |
+| TimingParameters | object 必填 | 默认填{}，不可缺失或null；子字段及发送规则同4.7 |
 | timeoutMs | integer 可选 | 与4.7相同；不是测量窗口 |
 
 - 先完成0106，再发送0108；同一时刻只允许一个FUNC/PARA/SLT测试。
@@ -497,11 +511,11 @@ PC→MCU。启动整次SLT，MCU准备电源和EDK启动介质；具体算法及
 | power | object | 沿用4.7的memoryType及三轨字符串mV，非null |
 | reboot | boolean | 沿用4.7重启规则，false不能绕过配置变化所需重启 |
 | bootMode | string | 实际EDK启动介质；取值见4.21，非空且非null |
-| TimingParameters | object 必填 | 默认填{}；子字段可部分提供，均为字符串；当前仅校验保存，不写RK |
+| TimingParameters | object 必填 | 默认填{}；子字段可部分提供，均为字符串；按下述启动/发送规则处理 |
 
 - 七个根字段全部必填；TimingParameters默认填{}，缺失或null回invalidArgument。不带timeoutMs；电压范围、步进和安全责任沿用4.7。
-- 应答：0006 accepted → completed，requestCommandId=266、algorithmIndex=null；completed仅表示电源/Boot准备完成，不是SLT测试完成。
-- MCU不等待RK心跳、不下发串口算法，也不检查EDK或报告服务是否启动。
+- 应答：0006 accepted → completed，requestCommandId=266、algorithmIndex=null；completed仅表示电源/Boot准备及本轮参数发送完成，不证明参数生效或SLT测试完成。
+- 默认空时序不等待RK；非负Freq须完成本轮查询回复，非空普通时序须等本轮SPL普通心跳后发送，额外启动等待上限60秒。MCU不下发串口算法，也不检查EDK或报告服务；上电后配置失败仍保留SLT占用，须原连接010B确认实际结束。
 - PC确认实际启动、取得SLT报告后发送010B；示例emmc须与实际EDK部署位置一致。
 
 ### 4.15 SLT结果回送（0x010B）

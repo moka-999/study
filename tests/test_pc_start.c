@@ -245,8 +245,11 @@ static void test_timing_parameters(void)
         "{}", "{\"Freq\":\"\"}", "{\"Freq\":\"1600\",\"tRCD\":\"18\"}",
         "{\"CASReadLatency\":\"20\"}", "{\"CASWriteLatency\":\"12\"}",
         "{\"CASReadLatency\":\"20\",\"CASWriteLatency\":\"12\"}",
-        "{\"Freq\":\"\",\"CASReadLatency\":\"\",\"CASWriteLatency\":\"\",\"tRC\":\"\",\"tRCD\":\"\",\"tRFC\":\"\","
-        "\"tRP\":\"\",\"tRAS\":\"\",\"tRRD\":\"\",\"BurstLength\":\"\",\"ODT\":\"\",\"tREFI\":\"\"}"
+        "{\"Freq\":\"\",\"CASReadLatency\":\"\",\"CASWriteLatency\":\"\",\"tREFI\":\"\",\"tWR\":\"\",\"tRTP\":\"\","
+        "\"tRCD\":\"\",\"tRP\":\"\",\"tRASmin\":\"\",\"tRASmax\":\"\",\"tWTR\":\"\",\"tRFCmin\":\"\","
+        "\"tFAW\":\"\",\"tCCD\":\"\",\"tRRD\":\"\",\"BL\":\"\"}",
+        "{\"Freq\":\"9223372036854775807\",\"tWR\":\"4294967295\",\"BL\":\"0\"}",
+        "{\"Freq\":\"-9223372036854775808\",\"tRASmin\":\"000123\"}"
     };
     pc_test_start_view_t view = {0};
     for (size_t i = 0U; i < sizeof(valid) / sizeof(valid[0]); ++i) {
@@ -273,6 +276,15 @@ static void test_timing_parameters(void)
         CHECK(cJSON_IsObject(view.timing_parameters));
         cJSON_Delete(root);
     }
+    /* 数值不经过double：完整64位频率与32位时序端点保持原值，空串不置位。 */
+    cJSON *exact = base_request();
+    replace(exact, "TimingParameters", cJSON_Parse("{\"Freq\":\"-9223372036854775808\",\"tWR\":\"4294967295\",\"tRCD\":\"\",\"BL\":\"0\"}"));
+    CHECK(pc_test_start_parse(exact, &view) == PC_TEST_JSON_OK);
+    CHECK(view.timing.frequency == INT64_MIN && view.timing.values[3] == UINT32_MAX);
+    CHECK(view.timing.present == ((1U << 3) | (1U << 14)) && view.timing.values[14] == 0U);
+    CHECK(pc_timing_command(0U) == 0x25U && pc_timing_command(1U) == 0x26U);
+    CHECK(pc_timing_command(2U) == 0x28U && pc_timing_command(14U) == 0x34U && pc_timing_command(15U) == 0U);
+    cJSON_Delete(exact);
     const uint16_t commands[] = {PC_COMMAND_START_TEST, PC_COMMAND_PARA_START, PC_COMMAND_SLT_START};
     for (size_t kind = 0U; kind < sizeof(commands) / sizeof(commands[0]); ++kind) {
         for (unsigned null_value = 0U; null_value < 2U; ++null_value) {
@@ -298,7 +310,12 @@ static void test_timing_parameters(void)
         "{\"CASReadLatency\":20}", "{\"CASWriteLatency\":null}",
         "{\"CASReadLatency\":\"20\",\"CASReadLatency\":\"24\"}",
         "{\"CASWriteLatency\":\"12\",\"CASWriteLatency\":\"16\"}",
-        "{\"CASReadLatency\":\"20\",\"CASWriteLatency\":\"12\",\"CASLatency\":\"20\"}"
+        "{\"CASReadLatency\":\"20\",\"CASWriteLatency\":\"12\",\"CASLatency\":\"20\"}",
+        "{\"tRC\":\"\"}", "{\"ODT\":\"\"}", "{\"tRAS\":\"1\"}", "{\"tRFC\":\"1\"}",
+        "{\"BurstLength\":\"16\"}", "{\"tRASMin\":\"1\"}", "{\"tWR\":\"-1\"}",
+        "{\"tWR\":\"4294967296\"}", "{\"tWR\":\"1.0\"}", "{\"Freq\":\"+1\"}",
+        "{\"Freq\":\" 1600\"}", "{\"Freq\":\"1e3\"}", "{\"Freq\":\"0x640\"}",
+        "{\"Freq\":\"9223372036854775808\"}", "{\"Freq\":\"-9223372036854775809\"}"
     };
     for (size_t i = 0U; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
         for (size_t kind = 0U; kind < sizeof(commands) / sizeof(commands[0]); ++kind) {

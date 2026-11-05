@@ -1,5 +1,6 @@
 """运行两板实际RK编解码和事务代码，使用QEMU替代硬件，不打开串口或烧录器。"""
 import argparse
+import re
 from pathlib import Path
 import subprocess
 
@@ -15,6 +16,9 @@ def main():
     root = args.app_root.resolve()
     build = root / ('build/rk-protocol-test-b1-gate' if args.b1_power_gate else 'build/rk-protocol-test')
     build.mkdir(parents=True, exist_ok=True)
+    # 枚举从目标板正式头读取，避免测试桩把V2电源阶段错误套到B1。
+    state_enum = re.search(r'typedef enum\s*\{\s*PWR_CTRL_STATE_OFF\b.*?\}\s*pwr_ctrl_state_t;',
+                          (root / 'HAL_Drv/pwr_ctrl.h').read_text(encoding='utf-8'), re.S).group(0)
     # 仅生成平台桩；编解码和事务函数均直接编译目标工程源码。
     (build / 'port.h').write_text('''#pragma once
 #include <stdint.h>
@@ -31,7 +35,7 @@ typedef void *QueueHandle_t;
 #define UART_RX_GAP (-1)
 #define TASK_WATCHDOG_RK 3
 #define LED_HEARTBEAT 0
-#define PWR_CTRL_STATE_ON 4
+/* PWR_STATE_ENUM */
 uint32_t xTaskGetTickCount(void);
 void vTaskDelay(uint32_t);
 int xQueueSend(QueueHandle_t, const void *, uint32_t);
@@ -40,8 +44,8 @@ int uart_send(int, uint8_t *, uint16_t);
 int uart_poll_rx(int, uint8_t *, uint16_t);
 void task_watchdog_progress(int);
 void led_toggle(int);
-int pwr_ctrl_get_state(void);
-''', encoding='utf-8')
+pwr_ctrl_state_t pwr_ctrl_get_state(void);
+'''.replace('/* PWR_STATE_ENUM */', state_enum), encoding='utf-8')
     for name in ('FreeRTOS', 'task', 'queue', 'uart_router', 'task_watchdog', 'led', 'pwr_ctrl'):
         (build / (name + '.h')).write_text('#include "port.h"\n', encoding='utf-8')
     # 包含目标板的任务文件以执行内部事务状态，不另写一份Python业务模型。

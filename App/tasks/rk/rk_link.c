@@ -138,7 +138,10 @@ void rk_link_ready_note_rx(const tlv_frame_t *frame)
 int rk_link_request(const rk_request_t *request)
 {
     if (request == NULL || rkRequestQueue == NULL || rkResponseQueue == NULL ||
-        rk_command_find_by_id(request->command_id) == NULL) return -1;
+        (!rk_is_timing_command(request->command_id) &&
+         rk_command_find_by_id(request->command_id) == NULL)) return -1;
+    if (rk_is_timing_command(request->command_id) ? request->timeout_ms != 0U :
+        request->parameter_value != 0U) return -1;
     uint64_t ticks = (uint64_t)request->timeout_ms * configTICK_RATE_HZ / 1000U;
     if (request->timeout_ms != 0U && (ticks == 0U || ticks > INT32_MAX)) return -1;
 #if defined(B1_RK_UART)
@@ -150,4 +153,52 @@ int rk_link_receive(rk_response_t *response)
 {
     return response != NULL && rkResponseQueue != NULL &&
            xQueueReceive(rkResponseQueue, response, 0U) == pdTRUE;
+}
+
+/* 此缓存只服务本次启动，不能把前一PC请求的频率带入下一次无参数启动。 */
+static struct {
+    uint32_t token;
+    int64_t value;
+    int status;
+} s_frequency;
+
+void rk_link_frequency_begin(uint32_t token, int64_t value)
+{
+    if (!token) return;
+    taskENTER_CRITICAL();
+    s_frequency.token = token;
+    s_frequency.value = value;
+    s_frequency.status = 0;
+    taskEXIT_CRITICAL();
+}
+
+int64_t rk_link_frequency_get(uint32_t *token)
+{
+    taskENTER_CRITICAL();
+    int64_t value = s_frequency.token ? s_frequency.value : -1;
+    if (token) *token = s_frequency.token;
+    taskEXIT_CRITICAL();
+    return value;
+}
+
+void rk_link_frequency_note_tx(uint32_t token, int success)
+{
+    taskENTER_CRITICAL();
+    if (token && token == s_frequency.token) s_frequency.status = success ? 1 : -1;
+    taskEXIT_CRITICAL();
+}
+
+int rk_link_frequency_status(uint32_t token)
+{
+    taskENTER_CRITICAL();
+    int status = token && token == s_frequency.token ? s_frequency.status : -1;
+    taskEXIT_CRITICAL();
+    return status;
+}
+
+void rk_link_frequency_end(uint32_t token)
+{
+    taskENTER_CRITICAL();
+    if (token && token == s_frequency.token) memset(&s_frequency, 0, sizeof(s_frequency));
+    taskEXIT_CRITICAL();
 }

@@ -116,6 +116,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/pc/pc_tester_info.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/common/crc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/frame.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/idd_session.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/protocol/rk/state_machine.c
     # 正式任务按通信对象分区，纯验证任务统一放test目录。
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pc/tcp_task.c

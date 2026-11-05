@@ -40,10 +40,10 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 - 初版固定`Version=1`、`Flag=8`、`ServiceID=0`。非法头前缀逐字节丢弃并有界寻找下一头；两次完整帧消费之间累计丢弃超过4096字节才关闭连接。完整帧的UTF-8/JSON错误回`0006 failed/invalidArgument`并继续；认可长度后不扫描正文内部。仍无法收齐的半帧超过500ms字节间空闲则断连，正常空闲不受此限制。详见[TCP接收恢复](doc/pc_tcp_recovery_20260929.md)。
 - 每条连接中PC和MCU分别维护发送u32 Seq，每发一帧本端加1，不回显请求Seq；接收不改变本端发送计数，两个方向允许同号且可同时发送。Seq仅是发送流水号，业务关联另行定义；绝不能把内部RK Seq写入PC响应头。ServiceID保留2字节但固定0、不参与分发。首值、重连初始化和回绕边界仍待PC双方最终确认，暂定实现与验证状态见任务清单，测试通过不等于批准。
 - 心跳固定为PC主动发送`CMD_CLIENT_HEART_BEAT(0x0002)+{}`，MCU返回`CMD_SERVER_HEART_BEAT(0x0001)+{}`，新合同使用MCU本端递增Seq；心跳不承载其他状态。
-- 测试须先0106 `{}`建立当前连接的整轮，再串行0103/0105 FUNC、0108/0109 PARA或010A/010B SLT，最后0107提交errorchip失败数组。mirrorIndex 0/1/2映射两组LPDDR/eMCP灯，未知编号整包拒绝；0701/0702/0703已从固件删除，合法旧请求回0006/notSupported。0108按FUNC格式接入16项IDD名称，0109仅MCU方向；先只向RK下发21..36编号，标准IDD窗口/判限待接。提前0107只废弃结果、不取消RK或提前解除busy；未入RK队列的FUNC/PARA不再投递。SLT固定slt/memtest86、index=null，只准备电源/Boot，不等RK心跳或检查EDK；同连接010B回收占用，断线不自动认领或释放SLT。0106按B2已知模式显示常温/高温闪，未知镜像灭；轮内允许B2部分更新，0107后只缓存模式、不覆盖最终结果。
+- 测试须先0106 `{}`建立当前连接的整轮，再串行0103/0105 FUNC、0108/0109 PARA或010A/010B SLT，最后0107提交errorchip失败数组。mirrorIndex 0/1/2映射两组LPDDR/eMCP灯，未知编号整包拒绝；0701/0702/0703已从固件删除，合法旧请求回0006/notSupported。0108按FUNC格式接入16项IDD名称，0109仅MCU方向；先只向RK下发21..36编号，标准IDD窗口/判限待接。提前0107只废弃结果、不取消RK或提前解除busy；未入RK队列的FUNC/PARA不再投递。SLT固定slt/memtest86、index=null；默认空时序只准备电源/Boot，非负Freq等待本轮查询回复，非空普通时序等本轮SPL心跳后发送，不检查EDK；同连接010B回收占用，断线不自动认领或释放SLT。0106按B2已知模式显示常温/高温闪，未知镜像灭；轮内允许B2部分更新，0107后只缓存模式、不覆盖最终结果。
 - TCP解析必须支持半包、粘包和连续多包；第一组测试JSON已确认，其余命令与字段分批冻结。
 - 已固定引入cJSON v1.7.19，使用FreeRTOS堆、递归深度16；完整PDU上限4096字节。
-- FUNC0103、PARA0108、SLT010A均必须携带`TimingParameters`对象；默认时序传`{}`，缺失或null回invalidArgument。12个子字段可部分提供字符串，读/写延迟分别使用`CASReadLatency`/`CASWriteLatency`，不再接受`CASLatency`，不继承上次请求；当前只复制到RAM，尚不写RK寄存器。旧包补字段后必须重算Length。
+- FUNC0103、PARA0108、SLT010A均必须携带`TimingParameters`对象；默认时序传`{}`，缺失或null回invalidArgument。16个子字段可部分提供字符串：CASReadLatency/CASWriteLatency/Freq/tREFI/tWR/tRTP/tRCD/tRP/tRASmin/tRASmax/tWTR/tRFCmin/tFAW/tCCD/tRRD/BL。Freq为int64，其余为u32十进制整数；PC判定取值及适用性，MCU只检查格式/位宽并原值编码。空串/省略不下发普通时序，Freq缺省回复-1；不继承上一请求。Freq变化走既有冷启动并在0x35查询中回复，普通时序在SPL就绪后无应答逐项发送，再下发算法；发送完成不代表生效。见[接入记录](doc/rk_timing_frequency_20261105.md)。旧包补字段后必须重算Length。
 - MCU升级已移除；两板恢复128KiB精简Boot（0x08000000）＋单App（0x08020000），合并文件一次烧录，不含OTA/回滚。0x0901～0x0903仅保留编号，合法旧请求回0006/notSupported，不访问Flash/RK。W25仍保留0x00410000和0x00C10000起始的两块8MiB RK空间；见[直接烧录](doc/direct_flash.md)。
 
 ### MCU–RK（2026-09-23替换后的协议）
@@ -53,14 +53,14 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 ```
 - CRC = Modbus CRC-16（多项式0x8005，右移实现0xA001，初值0xFFFF）。HCRC覆盖前3字节；FCRC仅覆盖Seq及TLV，不含Length。
 - TLV 单元：`[Type:2B BE][TLV_Len:2B BE][Value]`；Value内多字节整数为小端。
-- 命令容器`0x5000`的前两字节是小端CmdID，任务发送无参数编号1..20（FUNC，17=MATS）或21..36（PARA，名称按idd_0等精确匹配）。101A动作bool（1进入/0退出）和7018寄存器地址u32LE仅准备编解码，正式任务尚不附带。普通心跳为Length=0、零TLV的16字节完整帧；接收仍兼容0x0000空Value。
-- RK所有上行帧统一填写RK最近收到的MCU Seq，不回显原测试命令Seq、不使用RK自身心跳计数；MCU下行命令/心跳仍共用递增u64流水号。
-- 测试中进度帧同帧携带`0x5001`算法号u16LE和`0x3016`进度u8（0..100），各一次；先检查Seq窗口和在途算法号，单独0x3016无效。RK按定时器发送，允许窗口内Seq滞后及多帧同Seq；仅保存参考值，不作为完成/ready或自动恢复依据，不增加PC JSON字段。
-- 最终结果为单个3/5/7 TLV包：5001算法u16LE、1017整体FAIL位u8、9002耗时u64LE各一次；0～2组相邻9001地址u64LE＋3001 die u8为失败明细。die仅0/1且唯一，1017=0无失败、1有失败；零地址原样保留。三个标量和失败对可換序，地址必须紧跟所属die；旧四详情/独立FAIL不再拼接完成。
+- 命令容器`0x5000`的前两字节是小端CmdID，任务发送无参数编号1..20（FUNC，17=MATS）或21..36（PARA，名称按idd_0等精确匹配）。101A动作bool（1进入/0退出）已另备内部IDD会话：发完进入帧后默认等5ms，逐点保存5s电流、冻结统计后发退出；正式任务尚不附带，需先确定判限/JSON再绑定发送完成与采样事件，见[内部准备](doc/idd_session_prepare_20261105.md)。7018寄存器地址u32LE仅编解码准备。普通心跳为Length=0、零TLV的16字节完整帧；接收仍兼容0x0000空Value。
+- RK运行期上行帧填写最近收到的MCU Seq；MCU下行命令/心跳共用递增u64流水号。启动频率查询0x35独立应答5001+801C/int64，不能套用算法结果窗口；B1上电过渡只开放此查询。普通时序5000+701B/u32无应答发送，见[时序接入](doc/rk_timing_frequency_20261105.md)。
+- 测试中进度帧同帧携带`0x5001`算法号u16LE和`0x3016`进度u8（0..100），各一次；先检查Seq窗口和在途算法号，单独0x3016无效。MCU每秒主动发心跳，当前RK收帧后空闲回零TLV心跳、在途回进度，最终结果可主动发送；MCU不再应答RK心跳。允许窗口内Seq滞后及多帧同Seq；进度仅参考，不作为完成/ready或自动恢复依据，不增加PC JSON字段。
+- 最终结果为单个3/5/7 TLV包：5001算法u16LE、1017整体FAIL位u8、9002耗时u64LE各一次；0～2组相邻9001地址u64LE＋3001 die u8。9001=0表示该颗PASS，非零才计入失败数组；die仅0/1且唯一（PASS明细也查重），1017须与是否存在非零失败地址一致。三个标量和明细对可换序，地址后须立即跟所属die；旧四详情/独立FAIL不再拼接完成。
 - 帧内TLV数量为0..16；Length仅允许0或4..1024，1..3仍非法。新合同及验证见[增量记录](doc/rk_protocol_update_20260930.md)。
 - 状态机 5 态：IDLE→HEADER→DATA→CRC→FOOTER；仅用于MCU–RK串口链路。
 
-> 旧PC–TLV `dispatch.c/.h`已删除。RK参考工程中的POSIX/UART演示代码不直接移植，复用本工程串口/FreeRTOS并补齐边界。V2正式0103支持用户确认的外部已启动模式：power/bootMode均null、reboot=false，仅执行FUNC/PARA算法，不接管电源/启动；默认不设算法等待超时。B1也已接入该模式，但额外要求真实电源状态ON，测量用实际采样。B1完整上电/冷重启已装载可调初值，采用本轮普通心跳就绪与直接关电；训练安全范围交由PC确认，MCU仍校验TPS范围和步进。默认OFF，V2真实电源配置仍空；见[当前业务配置与验收](doc/b1_power_business_20261013.md)。`ENABLE_RK_GATEWAY_TEST`仅保留旧隔离模拟用途，真实RK接入不打开该开关。外部已启动模式见[真实RK接入](doc/rk_real_test_20260928.md)及[B1同步记录](../b1/docs/real_test_sync_20260929.md)。
+> 旧PC–TLV `dispatch.c/.h`已删除。RK参考工程中的POSIX/UART演示代码不直接移植，复用本工程串口/FreeRTOS并补齐边界。V2正式0103支持用户确认的外部已启动模式：power/bootMode均null、reboot=false，可先发普通时序再执行FUNC/PARA算法，非负Freq回invalidState，不接管电源/启动；默认不设算法等待超时。B1也已接入该模式，但额外要求真实电源状态ON，测量用实际采样。B1完整上电/冷重启已装载可调初值，采用本轮普通心跳就绪与直接关电；训练安全范围交由PC确认，MCU仍校验TPS范围和步进。默认OFF，V2真实电源配置仍空；见[当前业务配置与验收](doc/b1_power_business_20261013.md)。`ENABLE_RK_GATEWAY_TEST`仅保留旧隔离模拟用途，真实RK接入不打开该开关。外部已启动模式见[真实RK接入](doc/rk_real_test_20260928.md)及[B1同步记录](../b1/docs/real_test_sync_20260929.md)。
 
 V2可显式启用`ENABLE_V2_POWER_SIMULATION`：沿用上述正式任务及真实RK，仅电源/Boot/测量改用内存模型，PC响应不附加`simulation`字段；0601在测试中只读且不因算法在途回busy。是否模拟以构建配置与安装记录为准，不能因无标记就认作实测。默认关闭、B1禁止，与旧网关联调开关互斥，不作为真实电源/IDD验收。详见[V2电源模拟](doc/v2_power_simulation_20260928.md)。
 

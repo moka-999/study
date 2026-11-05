@@ -10,6 +10,7 @@
 #include "../../App/tasks/b2/b2_task.h"
 #include "../../App/tasks/b2/b2_service.h"
 #include "../../App/protocol/common/crc.h"
+#include "../../App/protocol/rk/idd_session.h"
 #include "b2_spi.h"
 #include "network_config.h"
 

@@ -55,9 +55,15 @@ static struct {
     rk_request_t pending;       /* 只保存值，不借用已释放的JSON字符串。 */
     uint8_t delivery_pending;   /* 1=已领取结果，等待当前连接成功组包；不重复执行RK。 */
     rk_response_t delivery;    /* 固定一份结果副本；内存不足时不再消费后续恢复事件。 */
-    cJSON *timing_parameters;   /* 自有RAM副本，仅解析存档；不代表已写入RK时序。 */
+    cJSON *timing_parameters;   /* 自有RAM原文副本；发送完成不代表RK已经应用。 */
+    pc_timing_parameters_t timing;
+    uint8_t timing_cursor, timing_inflight, configuring;
+    uint8_t frequency_required, ready_required, report_prepared;
+    uint32_t startup_since_ms;
 } s_test;
 static uint8_t s_round_active; /* 仅属于当前TCP连接；算法占用与轮次是否收尾分开记录。 */
+static int64_t s_last_frequency = -1; /* 最近受理的完整启动目标；物理就绪仍由电源服务确认。 */
+#define PC_CONFIG_STARTUP_TIMEOUT_MS 60000U
 
 /* 映射集中一处，物理颜色仍由板级驱动决定；未来扩展镜像时显式扩充此表。 */
 static const result_led_target_t s_mirror_leds[] = {
@@ -215,6 +221,19 @@ static const char *queue_test(const rk_request_t *request)
     return NULL;
 }
 
+/* 一次只投递一个时序值；RK任务报告SENT后再投下一项，全部发送后才启动算法。 */
+static const char *queue_timing(const pc_timing_parameters_t *timing, uint8_t *cursor, uint32_t cookie)
+{
+    unsigned i = *cursor;
+    while (i < PC_TIMING_PARAMETER_COUNT && !(timing->present & (1U << i))) ++i;
+    if (i == PC_TIMING_PARAMETER_COUNT) { *cursor = (uint8_t)i; return NULL; }
+    rk_request_t request = {pc_timing_command(i), cookie, 0U, timing->values[i]};
+    int result = rk_link_request(&request);
+    if (result) return result == -2 ? "busy" : "notReady";
+    *cursor = (uint8_t)(i + 1U);
+    return NULL;
+}
+
 pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response)
 {
@@ -237,6 +256,9 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
     const rk_command_descriptor_t *algorithm = rk_command_find_by_name(start->algorithm_name);
     if (!algorithm || algorithm->category != kind->category)
         return status_response(request_command, sequence, start->algorithm_index, "notSupported", response);
+    /* 外部已启动模式不能重新进入DDR初始化，不静默忽略PC要求的启动频率。 */
+    if (start->external_ready && start->timing.frequency >= 0)
+        return status_response(request_command, sequence, start->algorithm_index, "invalidState", response);
     fru_info_t fru;
     if (pc_tester_info_load(&fru) != 0)
         return status_response(request_command, sequence, start->algorithm_index, "flashError", response);
@@ -247,9 +269,12 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
     /* 先复制再产生任何硬件/队列副作用；输入JSON返回后会释放，不能保存借用指针。 */
     cJSON *timing = start->timing_parameters ? cJSON_Duplicate(start->timing_parameters, 1) : NULL;
     if (start->timing_parameters && !timing) return PC_DISPATCH_ERROR;
-    rk_request_t request = {algorithm->command_id, s_test.cookie + 1U, start->timeout_ms};
+    uint32_t cookie = s_test.cookie + 1U;
+    if (!cookie) ++cookie;
+    rk_request_t request = {algorithm->command_id, cookie, start->timeout_ms, 0U};
     const char *error = NULL;
-    uint8_t preparing = 0U;
+    uint8_t preparing = 0U, cursor = 0U, inflight = 0U, booting = 0U;
+    uint8_t frequency_required = 0U, ready_required = 0U;
 #if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
     if (!start->external_ready) {
         pc_power_target_t target = {0};
@@ -258,11 +283,23 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
         memcpy(target.mv, start->target_mv, sizeof(target.mv));
         if (pc_boot_mode_parse(start->boot_mode, &target.boot_mode) != 0)
             error = "invalidArgument";
-        else error = pc_power_service_start(PC_POWER_PREPARE_TEST, &target, start->reboot);
+        else error = pc_power_service_start(PC_POWER_PREPARE_TEST, &target,
+            start->reboot || start->timing.frequency != s_last_frequency);
         preparing = error == NULL;
+        booting = preparing && pc_power_service_diagnostic()->phase != PC_POWER_DONE;
+    } else
+#else
+    /* 电源模拟不会重启真实RK；提供Freq时仍须等真实RK本轮查询，不能模拟应用成功。 */
+    if (!start->external_ready && start->timing.frequency >= 0) {
+        booting = frequency_required = ready_required = 1U;
     } else
 #endif
-        error = queue_test(&request);
+    {
+        if (start->timing.present) {
+            error = queue_timing(&start->timing, &cursor, cookie);
+            inflight = error == NULL;
+        } else error = queue_test(&request);
+    }
     if (error) {
         cJSON_Delete(timing);
         return status_response(request_command, sequence, start->algorithm_index, error, response);
@@ -283,6 +320,17 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
     s_test.slt = 0U;
     s_test.discarded = 0U;
     s_test.pending = request;
+    s_test.timing = start->timing;
+    s_test.timing_cursor = cursor;
+    s_test.timing_inflight = inflight;
+    s_test.configuring = inflight || booting;
+    s_test.report_prepared = preparing;
+    s_test.frequency_required = frequency_required || (booting && start->timing.frequency >= 0);
+    s_test.ready_required = ready_required;
+    s_test.startup_since_ms = ready_required ? HAL_GetTick() : 0U;
+    if (!start->external_ready) s_last_frequency = start->timing.frequency;
+    if (booting) rk_link_frequency_begin(cookie, start->timing.frequency);
+    if (ready_required) (void)rk_link_ready_begin(cookie);
     cJSON_Delete(s_test.timing_parameters);
     s_test.timing_parameters = timing;
     return PC_DISPATCH_RESPONSE_READY;
@@ -302,6 +350,8 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     if (result != PC_DISPATCH_RESPONSE_READY) return result;
     cJSON *timing = start->timing_parameters ? cJSON_Duplicate(start->timing_parameters, 1) : NULL;
     if (start->timing_parameters && !timing) return PC_DISPATCH_ERROR;
+    uint32_t cookie = s_test.cookie + 1U;
+    if (!cookie) ++cookie;
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     v2_power_sim_prepare_slt(start);
 #else
@@ -324,6 +374,15 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     s_test.site_id[sizeof(s_test.site_id) - 1U] = '\0';
     s_test.active = s_test.owner_connected = s_test.preparing = s_test.slt = 1U;
     s_test.discarded = 0U;
+    s_test.cookie = cookie;
+    s_test.timing = start->timing;
+    s_test.timing_cursor = s_test.timing_inflight = 0U;
+    s_test.configuring = s_test.report_prepared = 1U;
+    s_test.frequency_required = start->timing.frequency >= 0;
+    s_test.ready_required = start->timing.present != 0U;
+    s_last_frequency = start->timing.frequency;
+    rk_link_frequency_begin(cookie, start->timing.frequency);
+    if (s_test.ready_required) (void)rk_link_ready_begin(cookie);
     cJSON_Delete(s_test.timing_parameters);
     s_test.timing_parameters = timing;
     return result;
@@ -334,7 +393,7 @@ pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *result,
 {
     if (!result || !response) return PC_DISPATCH_ERROR;
     const char *error = NULL;
-    if (!s_test.active || !s_test.slt || s_test.preparing || !s_test.owner_connected ||
+    if (!s_test.active || !s_test.slt || s_test.preparing || s_test.configuring || !s_test.owner_connected ||
         strcmp(result->algorithm_name, s_test.name) != 0 || strcmp(result->site_id, s_test.site_id) != 0)
         error = "invalidState";
     int ready = operation_response(PC_COMMAND_SLT_RESULT, NULL, sequence,
@@ -346,17 +405,90 @@ pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *result,
     return ready;
 }
 
-static int poll_slt(uint32_t sequence, pc_dispatch_response_t *response)
+/* 启动/发送错误是业务失败，不伪造芯片FAIL。部分已发送设置不回滚、不自动重发。 */
+static int preparation_failed(const char *error, uint32_t sequence, pc_dispatch_response_t *response)
 {
-    if (!s_test.preparing) return 0;
-    const char *error = NULL;
-#if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
-    if (!pc_power_service_take(PC_POWER_PREPARE_SLT, &error)) return 0;
-#endif
-    s_test.preparing = 0U;
-    if (error) s_test.active = 0U;
+    if (s_test.frequency_required) pc_power_service_invalidate();
+    rk_link_frequency_end(s_test.cookie);
+    /* SLT已完成上电后仍可能自行运行；配置失败不能冒充PC的010B结束通知。 */
+    s_test.active = s_test.slt && !s_test.preparing;
+    s_test.preparing = s_test.configuring = s_test.timing_inflight = 0U;
     if (!s_test.owner_connected || s_test.discarded || !response) return 0;
-    return slt_status_response(sequence, error ? "failed" : "completed", error, response);
+    return s_test.slt ? slt_status_response(sequence, "failed", error, response) :
+        status_response(s_test.kind->start_command, sequence, s_test.index, error, response);
+}
+
+/* 只等待本地发送事件，忽略RK尚未定义的设置回包；不把进度或错误算法结果当成功ACK。 */
+static int poll_preparation(uint32_t sequence, pc_dispatch_response_t *response)
+{
+    const char *error = NULL;
+    if (s_test.preparing) {
+#if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
+        if (!pc_power_service_take(s_test.slt ? PC_POWER_PREPARE_SLT : PC_POWER_PREPARE_TEST, &error)) return 0;
+#endif
+        if (error) return preparation_failed(error, sequence, response);
+        s_test.preparing = 0U;
+        s_test.configuring = 1U;
+        if (s_test.frequency_required || s_test.ready_required) s_test.startup_since_ms = HAL_GetTick();
+    }
+    if (s_test.timing_inflight) {
+        rk_response_t event;
+        do { if (!rk_link_receive(&event)) return 0; } while (event.cookie != s_test.cookie);
+        s_test.timing_inflight = 0U;
+        if (event.status != RK_RESPONSE_SENT)
+            return preparation_failed(event.status == RK_RESPONSE_TX_FAILED ? "txFailed" :
+                event.status == RK_RESPONSE_POWER_OFF ? "powerOff" : "executionFailed", sequence, response);
+    }
+    /* 丢弃后收完已入队设置，不继续投递；SLT仍保留原有占用，不自动取消其执行。 */
+    if (!s_test.owner_connected || s_test.discarded) {
+        if (s_test.frequency_required) pc_power_service_invalidate();
+        rk_link_frequency_end(s_test.cookie);
+        s_test.configuring = 0U;
+        if (!s_test.slt) s_test.active = 0U;
+        return 0;
+    }
+#if defined(B1_RK_UART)
+    /* 准备结束后掉电不能继续发送，也不能把最后一个SENT当成仍已准备好的SLT。 */
+    if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON)
+        return preparation_failed("powerOff", sequence, response);
+#endif
+    if (s_test.frequency_required || s_test.ready_required) {
+        int frequency = s_test.frequency_required ? rk_link_frequency_status(s_test.cookie) : 1;
+        int ready = s_test.ready_required ? rk_link_ready_poll(s_test.cookie) : 1;
+        if (frequency < 0) return preparation_failed("txFailed", sequence, response);
+        if (ready < 0) return preparation_failed("notReady", sequence, response);
+        if (!frequency || !ready) {
+            if ((uint32_t)(HAL_GetTick() - s_test.startup_since_ms) >= PC_CONFIG_STARTUP_TIMEOUT_MS)
+                return preparation_failed("timeout", sequence, response);
+            return 0;
+        }
+        s_test.frequency_required = s_test.ready_required = 0U;
+    }
+    rk_link_frequency_end(s_test.cookie);
+    unsigned next = s_test.timing_cursor;
+    while (next < PC_TIMING_PARAMETER_COUNT && !(s_test.timing.present & (1U << next))) ++next;
+    if (next < PC_TIMING_PARAMETER_COUNT) {
+        error = queue_timing(&s_test.timing, &s_test.timing_cursor, s_test.cookie);
+        if (error) return preparation_failed(error, sequence, response);
+        s_test.timing_inflight = 1U;
+        return 0;
+    }
+    int report = s_test.slt || s_test.report_prepared;
+    int result = 0;
+    if (report) {
+        result = s_test.slt ? slt_status_response(sequence, "completed", NULL, response) :
+            command_status_response(s_test.kind->start_command, sequence, s_test.index, "completed", NULL, response);
+        if (result != PC_DISPATCH_RESPONSE_READY) {
+            if (!s_test.slt) {
+                s_test.active = s_test.owner_connected = s_test.configuring = 0U;
+            }
+            return result;
+        }
+    }
+    if (!s_test.slt && (error = queue_test(&s_test.pending)) != NULL)
+        return preparation_failed(error, sequence, response);
+    s_test.configuring = 0U;
+    return result;
 }
 
 /* 组包完成或原连接明确放弃后才释放；TIMEOUT仍须等待RK恢复事件。 */
@@ -372,30 +504,8 @@ static void release_delivery(void)
 int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
 {
     if (s_test.owner_connected && response == NULL) return 0;
-    if (s_test.active && s_test.slt) return poll_slt(sequence, response);
-    if (s_test.preparing) {
-        const char *error = NULL;
-        if (!pc_power_service_take(PC_POWER_PREPARE_TEST, &error)) return 0;
-        s_test.preparing = 0U;
-        /* 断线不中断已开始的电源收尾，但不替失联PC偷偷启动尚未下发的算法。 */
-        if (!s_test.owner_connected || s_test.discarded) { s_test.active = 0U; return 0; }
-        /* 完整启动路径沿用协议约定的completed：只说明准备完成并交接算法。
-         * 先组包再下发，避免内存不足、无法生成应答时仍然启动测试。
-         */
-        if (!error && command_status_response(s_test.kind->start_command, sequence, s_test.index, "completed", NULL,
-                                              response) != PC_DISPATCH_RESPONSE_READY) {
-            s_test.active = 0U;
-            s_test.owner_connected = 0U;
-            return PC_DISPATCH_ERROR;
-        }
-        if (!error) error = queue_test(&s_test.pending);
-        if (error) {
-            s_test.active = 0U;
-            s_test.owner_connected = 0U;
-            return status_response(s_test.kind->start_command, sequence, s_test.index, error, response);
-        }
-        return PC_DISPATCH_RESPONSE_READY;
-    }
+    if (s_test.preparing || s_test.configuring) return poll_preparation(sequence, response);
+    if (s_test.active && s_test.slt) return 0;
     rk_response_t result;
     for (;;) {
         if (!s_test.delivery_pending) {
@@ -434,7 +544,7 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
             }
 #if defined(ENABLE_V2_MATS_FAIL_TEST) && ENABLE_V2_MATS_FAIL_TEST
             /* 仅PC联调：MATS完成后将第0颗显示FAIL/SAF，第1颗保持真实结果。
-             * 第0颗原本PASS才填演示地址；真实FAIL的地址即使为0也必须保留。
+             * 第0颗原本PASS才填演示地址；真实FAIL保留RK解码器给出的非零首错地址。
              */
             if (strcmp(s_test.name, "mats") == 0) {
                 if (!dies[0].failed) dies[0].error_address = UINT64_C(0x12345678);

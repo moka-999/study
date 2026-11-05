@@ -45,6 +45,7 @@ int monitor_idd_get(idd_stats_t *out)
 #include <stddef.h>
 #include <math.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #define S1(x) #x
@@ -179,6 +180,14 @@ pwr_ctrl_result_t monitor_apply_ddr_config(ddr_memory_type_t type, const int16_t
     if (config_result_override) {
         CHECK(power_fixture && (unsigned)type <= DDR_MEMORY_LPDDR4X && steps);
         ++config_set_calls;
+#if defined(B1_RK_UART)
+        /* 真实monitor的OFF缓存另有实际C回归；此夹具衔接分发与0501目标读取。 */
+        if (config_ddr_result == PWR_CTRL_OK && mock_power_state == PWR_CTRL_STATE_OFF) {
+            uint16_t targets[DDR_RAIL_COUNT];
+            CHECK(ddr_power_build_step_targets(type, steps, targets) == IF_OK);
+            CHECK(ddr_power_configure_training(type, targets) == IF_OK);
+        }
+#endif
         return config_ddr_result;
     }
     (void)type; (void)steps; fail("FAIL DDR write\n");
@@ -278,7 +287,7 @@ static void start_expect(const char *json, const char *error)
     status_is(&response, error, 17U);
     if (error && strcmp(error, "busy") != 0) CHECK(queue_calls == before);
 }
-/* 按编号反序注入失败明细，确保业务层不把数组顺序误当die编号。 */
+/* 反序构造两颗明细并用实际RK解码器归一化；零地址PASS必须在PC输出为null。 */
 static void inject_mask(rk_response_status_t status, uint8_t mask, uint64_t first, uint64_t second)
 {
     CHECK(!response_ready);
@@ -286,16 +295,22 @@ static void inject_mask(rk_response_status_t status, uint8_t mask, uint64_t firs
     queued_response.cookie = queued_request.cookie;
     queued_response.sequence = UINT64_C(0xAABBCCDDEEFF0011);
     queued_response.status = status;
-    queued_response.result.failed = mask != 0U;
-    queued_response.result.elapsed_ms = UINT64_C(42000);
-    queued_response.result.command_id = queued_request.command_id;
+    tlv_frame_t frame;
+    frame_init(&frame);
+    uint8_t command[] = {(uint8_t)queued_request.command_id, (uint8_t)(queued_request.command_id >> 8)};
+    uint8_t failed = mask != 0U, elapsed[] = {0x10U, 0xA4U, 0U, 0U, 0U, 0U, 0U, 0U};
+    CHECK(tlv_pack(&frame, TLV_TYPE_RESULT_CMD, command, sizeof(command)) == 0);
+    CHECK(tlv_pack(&frame, TLV_TYPE_RESULT_FAIL, &failed, 1U) == 0);
+    CHECK(tlv_pack(&frame, TLV_TYPE_RESULT_TIME, elapsed, sizeof(elapsed)) == 0);
     for (unsigned n = 0U; n < 2U; ++n) {
         uint8_t die = 1U - n;
-        if ((mask & (1U << die)) == 0U) continue;
-        rk_failure_detail_t *failure = &queued_response.result.failures[queued_response.result.failure_count++];
-        failure->die = die;
-        failure->error_address = die == 0U ? first : second;
+        uint64_t address = (mask & (1U << die)) ? (die ? second : first) : 0U;
+        uint8_t value[8];
+        for (unsigned i = 0U; i < 8U; ++i) value[i] = (uint8_t)(address >> (8U * i));
+        CHECK(tlv_pack(&frame, TLV_TYPE_RESULT_ADDR, value, sizeof(value)) == 0);
+        CHECK(tlv_pack(&frame, TLV_TYPE_RESULT_DIE, &die, 1U) == 0);
     }
+    CHECK(rk_final_result_decode(&frame, &queued_response.result) == 0);
     response_ready = 1;
 }
 static void inject(rk_response_status_t status, uint64_t address)
@@ -699,7 +714,7 @@ static void mats_fail_scope_check(void)
             cJSON *body = query(PC_COMMAND_QUERY_POWER_MONITOR, PC_COMMAND_POWER_MONITOR_RESP);
             CHECK(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(body, "statistics")));
             cJSON_Delete(body);
-            inject_mask(RK_RESPONSE_COMPLETE, sample, 0U, UINT64_MAX);
+            inject_mask(RK_RESPONSE_COMPLETE, sample, 1U, UINT64_MAX);
             rk_final_result_t original = queued_response.result;
             CHECK(pc_dispatch_next_response(19U, &response) == PC_DISPATCH_RESPONSE_READY);
             body = decode(&response, PC_COMMAND_TEST_RESULT_REPORT, 19U);
@@ -719,7 +734,7 @@ static void mats_fail_scope_check(void)
                 CHECK(!cJSON_GetObjectItemCaseSensitive(chip, "measurementData"));
                 string_is(chip, "physicalAddr", "");
                 const cJSON *desc = cJSON_GetObjectItemCaseSensitive(chip, "resultDesc");
-                if (failed) string_is(desc, "firstErrorAddress", die ? "0xFFFFFFFFFFFFFFFF" : "0x0000000000000000");
+                if (failed) string_is(desc, "firstErrorAddress", die ? "0xFFFFFFFFFFFFFFFF" : "0x0000000000000001");
                 else if (injected) string_is(desc, "firstErrorAddress", "0x0000000012345678");
                 else CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(desc, "firstErrorAddress")));
                 string_is(desc, "errorType", injected ? "SAF" : "");
@@ -1062,9 +1077,25 @@ static void power_sequence_check(void)
 
     /* 0501复用真实训练上电驱动，不要求伪造READY；断线后的终态不交给新连接。 */
     configure_power(); CHECK(pc_power_service_configure(&sequence_config, NULL) == 0);
+#if defined(B1_RK_UART)
+    on = power_on_calls;
+    config_result_override = 1; config_ddr_result = PWR_CTRL_OK;
+    CHECK(dispatch(PC_COMMAND_SET_DDR_CONFIG,
+        "{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1700\",\"vdd2\":\"1060\",\"vddq\":\"570\"}",
+        101U, &response) == PC_DISPATCH_RESPONSE_READY);
+    cJSON *preset = decode(&response, PC_COMMAND_COMMAND_RESP, 101U);
+    string_is(preset, "status", "completed"); cJSON_Delete(preset);
+    config_result_override = 0;
+    CHECK(power_on_calls == on && mock_power_state == PWR_CTRL_STATE_OFF);
+#endif
     power_command(PC_COMMAND_POWER_ON, "accepted", NULL);
     step_power(10U); step_power(5U); mock_power_state = PWR_CTRL_STATE_ON; step_power(1U);
     power_completion(PC_COMMAND_POWER_ON, NULL);
+#if defined(B1_RK_UART)
+    CHECK(ddr_power_get_training_mv(DDR_RAIL_VDD1) == 1700U);
+    CHECK(ddr_power_get_training_mv(DDR_RAIL_VDD2) == 1060U);
+    CHECK(ddr_power_get_training_mv(DDR_RAIL_VDDQ) == 570U);
+#endif
     configure_power(); power_command(PC_COMMAND_POWER_ON, "accepted", NULL);
     pc_dispatch_disconnected(); step_power(10U); step_power(5U);
     mock_power_state = PWR_CTRL_STATE_ON; step_power(1U);
@@ -1106,10 +1137,10 @@ static char *para_json(const char *type, const char *name, uint32_t index)
     CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmName", cJSON_CreateString(name)));
     CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmIndex", cJSON_CreateNumber(index)));
     cJSON *timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters"); CHECK(cJSON_IsObject(timing));
-    CHECK(cJSON_AddStringToObject(timing, "Freq", "1600"));
+    CHECK(cJSON_AddStringToObject(timing, "Freq", ""));
     CHECK(cJSON_AddStringToObject(timing, "tRCD", ""));
-    CHECK(cJSON_AddStringToObject(timing, "CASReadLatency", "20"));
-    CHECK(cJSON_AddStringToObject(timing, "CASWriteLatency", "12"));
+    CHECK(cJSON_AddStringToObject(timing, "CASReadLatency", ""));
+    CHECK(cJSON_AddStringToObject(timing, "CASWriteLatency", ""));
     char *json = cJSON_PrintUnformatted(root); CHECK(json);
     cJSON_Delete(root);
     return json;
@@ -1168,7 +1199,7 @@ static void para_flow_check(void)
         para_command(PC_COMMAND_PARA_START, json, 100U + i, "busy");
         round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "busy");
         cJSON_free(json);
-        string_is(pc_test_service_timing_parameters(), "Freq", "1600");
+        string_is(pc_test_service_timing_parameters(), "Freq", "");
         string_is(pc_test_service_timing_parameters(), "tRCD", "");
         uint8_t mask = i % 4U;
         inject_mask(RK_RESPONSE_COMPLETE, mask, UINT64_C(0x1234), UINT64_C(0x9876));
@@ -1407,13 +1438,25 @@ static void timing_required_check(void)
     message("PASS: missing/null timing in FUNC/PARA/SLT rejected without hardware or queue effects\n");
 }
 
+/* 模拟UART任务的本地发送完成事件；不伪造RK成功ACK，RK编码另有实际任务回归。 */
+static void timing_sent(unsigned count)
+{
+    pc_dispatch_response_t response;
+    for (unsigned i = 0U; i < count; ++i) {
+        CHECK(rk_is_timing_command(queued_request.command_id));
+        queued_response = (rk_response_t){.cookie = queued_request.cookie, .status = RK_RESPONSE_SENT};
+        response_ready = 1;
+        CHECK(pc_dispatch_next_response(78U, &response) == 0);
+    }
+}
+
 /* 输入JSON会在dispatch内释放；校验副本寿命、拒绝不覆盖以及逐分配点失败无副作用。 */
 static void timing_storage_check(void)
 {
     pc_dispatch_response_t response;
     cJSON *root = cJSON_Parse(START_JSON); CHECK(root);
     cJSON *timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters"); CHECK(cJSON_IsObject(timing));
-    CHECK(cJSON_AddStringToObject(timing, "Freq", "1600"));
+    CHECK(cJSON_AddStringToObject(timing, "Freq", ""));
     CHECK(cJSON_AddStringToObject(timing, "tRCD", ""));
     CHECK(cJSON_AddStringToObject(timing, "CASReadLatency", "20"));
     CHECK(cJSON_AddStringToObject(timing, "CASWriteLatency", "12"));
@@ -1422,10 +1465,11 @@ static void timing_storage_check(void)
     timing_required_check();
     unsigned calls = queue_calls;
     round_command(PC_COMMAND_START_TEST, json, "accepted", NULL);
-    CHECK(queue_calls == calls + 1U && queued_request.command_id == 17U);
+    CHECK(queue_calls == calls + 1U && queued_request.command_id == 0x25U);
+    timing_sent(2U); CHECK(queued_request.command_id == 17U);
     const cJSON *saved = pc_test_service_timing_parameters();
     CHECK(saved && saved != timing);
-    string_is(saved, "Freq", "1600"); string_is(saved, "tRCD", "");
+    string_is(saved, "Freq", ""); string_is(saved, "tRCD", "");
     string_is(saved, "CASReadLatency", "20"); string_is(saved, "CASWriteLatency", "12");
     CHECK(!cJSON_GetObjectItemCaseSensitive(saved, "tRC"));
     round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "busy");
@@ -1452,23 +1496,24 @@ static void timing_storage_check(void)
         CHECK(result == PC_DISPATCH_ERROR && !pc_test_service_busy());
         CHECK(timing_allocation_balance == 0);
         CHECK(queue_calls == calls && pc_test_service_timing_parameters() == saved);
-        string_is(saved, "Freq", "1600");
+        string_is(saved, "Freq", "");
     }
     CHECK(failure < 64U && queue_calls == calls + 1U);
+    timing_sent(2U); CHECK(queued_request.command_id == 17U);
     cJSON_free(json); cJSON_Delete(root);
-    string_is(pc_test_service_timing_parameters(), "Freq", "1600");
+    string_is(pc_test_service_timing_parameters(), "Freq", "");
     string_is(pc_test_service_timing_parameters(), "CASReadLatency", "20");
     string_is(pc_test_service_timing_parameters(), "CASWriteLatency", "12");
     inject(RK_RESPONSE_COMPLETE, 0U);
     CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
 
-    /* 新请求显式空对象恢复默认时序，不沿用上一次；保持RK原有无参数命令格式。 */
+    /* 新请求空对象不下发时序，也不继承上一请求；不能由此宣称寄存器恢复默认。 */
     round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
     CHECK(cJSON_IsObject(pc_test_service_timing_parameters()) &&
           pc_test_service_timing_parameters()->child == NULL && queued_request.command_id == 17U);
     inject(RK_RESPONSE_COMPLETE, 0U);
     CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
-    /* PARA单独提供写延迟时，只保存本次值，不从上一请求补出读延迟。 */
+    /* PARA单独提供写延迟时，只发送本次值，不从上一请求补出读延迟。 */
     root = cJSON_Parse(START_JSON); CHECK(root);
     CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmType", cJSON_CreateString("parametric")));
     CHECK(cJSON_ReplaceItemInObjectCaseSensitive(root, "algorithmName", cJSON_CreateString("idd_0")));
@@ -1476,6 +1521,7 @@ static void timing_storage_check(void)
     CHECK(cJSON_AddStringToObject(timing, "CASWriteLatency", "8"));
     json = cJSON_PrintUnformatted(root); CHECK(json); cJSON_Delete(root);
     para_command(PC_COMMAND_PARA_START, json, 37U, NULL); cJSON_free(json);
+    timing_sent(1U);
     CHECK(cJSON_IsObject(pc_test_service_timing_parameters()) &&
           cJSON_GetArraySize(pc_test_service_timing_parameters()) == 1 && queued_request.command_id == 21U);
     string_is(pc_test_service_timing_parameters(), "CASWriteLatency", "8");
@@ -1484,8 +1530,177 @@ static void timing_storage_check(void)
     CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
     root = decode(&response, PC_COMMAND_PARA_RESULT, 78U); cJSON_Delete(root);
     round_end();
-    message("PASS: timing RAM copy lifetime, partial values, rejection preservation, allocation faults, unchanged RK command\n");
+    message("PASS: timing RAM copy lifetime, partial values, rejection preservation, allocation faults, timing sent before algorithm\n");
 }
+
+/* 完整16字段、边界数值、发送失败和中途收尾：PC决定数值，MCU仅转换并有序发送。 */
+static void timing_forward_check(void)
+{
+    static const char *const fields[] = {"CASWriteLatency", "CASReadLatency", "tREFI", "tWR", "tRTP",
+        "tRCD", "tRP", "tRASmin", "tRASmax", "tWTR", "tRFCmin", "tFAW", "tCCD", "tRRD", "BL"};
+    static const uint16_t commands[] = {0x25,0x26,0x28,0x29,0x2A,0x2B,0x2C,0x2D,0x2E,0x2F,0x30,0x31,0x32,0x33,0x34};
+    pc_dispatch_response_t response;
+    cJSON *root = cJSON_Parse(START_JSON); CHECK(root);
+    cJSON *timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters");
+    CHECK(cJSON_AddStringToObject(timing, "Freq", ""));
+    for (unsigned i = 0U; i < 15U; ++i) {
+        char value[16]; snprintf(value, sizeof(value), "%lu", (unsigned long)(i == 1U ? UINT32_MAX : i));
+        CHECK(cJSON_AddStringToObject(timing, fields[i], value));
+    }
+    char *json = cJSON_PrintUnformatted(root); CHECK(json); cJSON_Delete(root);
+    round_begin();
+    unsigned before = queue_calls;
+    round_command(PC_COMMAND_START_TEST, json, "accepted", NULL);
+    for (unsigned i = 0U; i < 15U; ++i) {
+        CHECK(queued_request.command_id == commands[i]);
+        CHECK(queued_request.parameter_value == (i == 1U ? UINT32_MAX : i));
+        CHECK(queued_request.timeout_ms == 0U && pc_test_service_busy());
+        CHECK(pc_dispatch_next_response(78U, &response) == 0 && queue_calls == before + i + 1U);
+        timing_sent(1U);
+    }
+    CHECK(queued_request.command_id == 17U && queue_calls == before + 16U);
+    inject(RK_RESPONSE_COMPLETE, 0U); CHECK(pc_dispatch_next_response(78U, &response) == 1);
+    CHECK(!pc_test_service_busy());
+    round_command(PC_COMMAND_START_TEST, json, "accepted", NULL);
+    before = queue_calls;
+    queued_response = (rk_response_t){.cookie = queued_request.cookie, .status = RK_RESPONSE_TX_FAILED};
+    response_ready = 1;
+    CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
+    cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 78U);
+    string_is(body, "errorCode", "txFailed"); cJSON_Delete(body);
+    CHECK(queue_calls == before);
+    round_command(PC_COMMAND_START_TEST, json, "accepted", NULL);
+#if defined(B1_RK_UART)
+    before = queue_calls;
+    mock_power_state = PWR_CTRL_STATE_OFF;
+    queued_response = (rk_response_t){.cookie = queued_request.cookie, .status = RK_RESPONSE_SENT};
+    response_ready = 1;
+    CHECK(pc_dispatch_next_response(78U, &response) == 1 && !pc_test_service_busy());
+    body = decode(&response, PC_COMMAND_COMMAND_RESP, 78U);
+    string_is(body, "errorCode", "powerOff"); cJSON_Delete(body);
+    CHECK(queue_calls == before); mock_power_state = PWR_CTRL_STATE_ON;
+    round_command(PC_COMMAND_START_TEST, json, "accepted", NULL);
+#endif
+    before = queue_calls; round_end();
+    timing_sent(1U); CHECK(queue_calls == before && !pc_test_service_busy());
+    cJSON_free(json);
+    round_begin();
+    root = cJSON_Parse(START_JSON); timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters");
+    CHECK(cJSON_AddStringToObject(timing, "Freq", "1600"));
+    json = cJSON_PrintUnformatted(root); CHECK(json); cJSON_Delete(root);
+    round_command(PC_COMMAND_START_TEST, json, "failed", "invalidState");
+    cJSON_free(json); round_end();
+    message("PASS: all 15 timing commands preserve uint32 values; no ACK wait; TX failure and discard stop further sends\n");
+}
+
+#if defined(PC_POWER_SEQUENCE_TEST)
+static void frequency_start_check(void)
+{
+    pc_dispatch_response_t response;
+    power_fixture = 1; configure_power();
+    cJSON *root = cJSON_Parse(COLD_START); CHECK(root);
+    cJSON *timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters");
+    CHECK(cJSON_AddStringToObject(timing, "Freq", "1600"));
+    CHECK(cJSON_AddStringToObject(timing, "tRCD", "18"));
+    char *json = cJSON_PrintUnformatted(root); CHECK(json);
+    for (unsigned run = 0U; run < 3U; ++run) {
+        if (run == 2U) {
+            cJSON_free(json);
+            CHECK(cJSON_ReplaceItemInObjectCaseSensitive(timing, "Freq", cJSON_CreateString("1800")));
+            json = cJSON_PrintUnformatted(root); CHECK(json);
+        }
+        unsigned on = power_on_calls, before = queue_calls;
+        start_expect(json, NULL);
+        uint32_t token;
+        if (run != 1U) {
+            CHECK(rk_link_frequency_get(&token) == (run == 2U ? 1800 : 1600));
+            CHECK(token && rk_link_frequency_status(token) == 0 && queue_calls == before);
+            if (run == 2U) direct_off_to_hold();
+            /* 在进入ON/普通心跳前完成频率发送事件，证明不会等SPL才回复。 */
+            rk_link_frequency_note_tx(token, 1);
+            cold_to_ready(); confirm_power(1); step_power(0U);
+        } else {
+            CHECK(pc_power_service_diagnostic()->phase == PC_POWER_DONE && power_on_calls == on);
+        }
+        CHECK(pc_dispatch_next_response(105U, &response) == 0);
+        CHECK(queued_request.command_id == 0x2BU && queued_request.parameter_value == 18U);
+        queued_response = (rk_response_t){.cookie = queued_request.cookie, .status = RK_RESPONSE_SENT};
+        response_ready = 1;
+        CHECK(pc_dispatch_next_response(105U, &response) == 1);
+        cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 105U);
+        string_is(body, "status", "completed"); cJSON_Delete(body);
+        CHECK(queued_request.command_id == 17U && queue_calls == before + 2U);
+        CHECK(power_on_calls == on + (run == 1U ? 0U : 1U));
+        result_is(0U, NULL, "SITE-7");
+    }
+    /* 非默认频率未得到本轮查询时，不以普通心跳冒充已经回复频率。 */
+    configure_power(); start_expect(json, NULL); cold_to_ready(); confirm_power(1); step_power(0U);
+    unsigned before = queue_calls;
+    CHECK(pc_dispatch_next_response(105U, &response) == 0);
+    mock_tick += 60000U;
+    CHECK(pc_dispatch_next_response(105U, &response) == 1 && queue_calls == before);
+    cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 105U);
+    string_is(body, "errorCode", "timeout"); cJSON_Delete(body);
+    CHECK(!pc_test_service_busy());
+    start_expect(json, NULL);
+    CHECK(pc_power_service_diagnostic()->phase == PC_POWER_REQUEST_OFF);
+    uint32_t token; (void)rk_link_frequency_get(&token); rk_link_frequency_note_tx(token, 0);
+    direct_off_to_hold(); cold_to_ready(); confirm_power(1); step_power(0U);
+    CHECK(pc_dispatch_next_response(105U, &response) == 1);
+    body = decode(&response, PC_COMMAND_COMMAND_RESP, 105U);
+    string_is(body, "errorCode", "txFailed"); cJSON_Delete(body);
+    CHECK(!pc_test_service_busy() && queue_calls == before);
+    cJSON_free(json); cJSON_Delete(root); round_end();
+    message("PASS: startup frequency cache before power, unchanged frequency reuses boot, changed frequency cold-starts, missed query/TX failure gate algorithms\n");
+}
+#endif
+
+#if defined(PC_POWER_SEQUENCE_TEST) || (defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION)
+static void slt_timing_check(void)
+{
+    pc_dispatch_response_t response;
+#if defined(PC_POWER_SEQUENCE_TEST)
+    power_fixture = 1; configure_power();
+#endif
+    round_begin();
+    cJSON *root = cJSON_Parse(SLT_START); CHECK(root);
+    cJSON *timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters");
+    CHECK(cJSON_AddStringToObject(timing, "Freq", "1600"));
+    CHECK(cJSON_AddStringToObject(timing, "tRASmin", "21"));
+    CHECK(cJSON_AddStringToObject(timing, "tRASmax", "42"));
+    char *json = cJSON_PrintUnformatted(root); CHECK(json); cJSON_Delete(root);
+    unsigned before = queue_calls;
+    round_command(PC_COMMAND_SLT_START, json, "accepted", NULL); cJSON_free(json);
+    for (unsigned i = 0U; i < 12U; ++i) {
+        mock_tick += 20U;
+#if defined(PC_POWER_SEQUENCE_TEST)
+        if (mock_power_state == PWR_CTRL_STATE_WAIT_FIRST_RAIL) mock_power_state = PWR_CTRL_STATE_ON;
+        if (mock_power_state == PWR_CTRL_STATE_WAIT_SECOND_RAIL_OFF) mock_power_state = PWR_CTRL_STATE_OFF;
+#endif
+        pc_dispatch_poll();
+        CHECK(pc_dispatch_next_response(81U, &response) == 0 && queue_calls == before);
+    }
+    uint32_t token;
+    CHECK(rk_link_frequency_get(&token) == 1600);
+    rk_link_frequency_note_tx(token, 1);
+    CHECK(pc_dispatch_next_response(81U, &response) == 0 && queue_calls == before);
+    tlv_frame_t heartbeat = {.sequence = rk_link_next_sequence()};
+    rk_link_ready_note_tx(heartbeat.sequence); rk_link_ready_note_rx(&heartbeat);
+    CHECK(pc_dispatch_next_response(81U, &response) == 0);
+    CHECK(queued_request.command_id == 0x2DU && queued_request.parameter_value == 21U);
+    timing_sent(1U);
+    CHECK(queued_request.command_id == 0x2EU && queued_request.parameter_value == 42U);
+    queued_response = (rk_response_t){.cookie = queued_request.cookie, .status = RK_RESPONSE_SENT};
+    response_ready = 1;
+    CHECK(pc_dispatch_next_response(81U, &response) == 1);
+    cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 81U);
+    string_is(body, "status", "completed"); cJSON_Delete(body);
+    CHECK(queue_calls == before + 2U && pc_test_service_busy());
+    round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "completed", NULL);
+    CHECK(!pc_test_service_busy()); round_end();
+    message("PASS: SLT with parameters waits frequency/SPL then sends timing only; PC 010B owns completion\n");
+}
+#endif
 
 #if defined(PC_POWER_SEQUENCE_TEST) || (defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION)
 /* 推进SLT电源；没有注入任何RK心跳，仍须只按本地电源完成返回completed。 */
@@ -1547,8 +1762,8 @@ static void slt_flow_check(void)
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
     cJSON *timed = cJSON_Parse(SLT_START); CHECK(timed);
     cJSON *timing = cJSON_GetObjectItemCaseSensitive(timed, "TimingParameters"); CHECK(cJSON_IsObject(timing));
-    CHECK(cJSON_AddStringToObject(timing, "CASReadLatency", "20"));
-    CHECK(cJSON_AddStringToObject(timing, "CASWriteLatency", "12"));
+    CHECK(cJSON_AddStringToObject(timing, "CASReadLatency", ""));
+    CHECK(cJSON_AddStringToObject(timing, "CASWriteLatency", ""));
     pc_test_start_view_t timed_start;
     CHECK(pc_slt_start_parse(timed, &timed_start) == PC_TEST_JSON_OK);
     unsigned previous_on = power_on_calls, previous_off = power_off_calls, previous_boot = boot_calls;
@@ -1567,8 +1782,8 @@ static void slt_flow_check(void)
     }
     CHECK(failure < 64U);
     cJSON_Delete(timed);
-    string_is(pc_test_service_timing_parameters(), "CASReadLatency", "20");
-    string_is(pc_test_service_timing_parameters(), "CASWriteLatency", "12");
+    string_is(pc_test_service_timing_parameters(), "CASReadLatency", "");
+    string_is(pc_test_service_timing_parameters(), "CASWriteLatency", "");
     CHECK(!cJSON_GetObjectItemCaseSensitive(pc_test_service_timing_parameters(), "Freq"));
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "failed", "invalidState");
     slt_complete(0);
@@ -1682,7 +1897,12 @@ void test_main(void)
     round_flow_check();
     para_flow_check();
     timing_storage_check();
+    timing_forward_check();
+#if defined(PC_POWER_SEQUENCE_TEST)
+    frequency_start_check();
+#endif
 #if defined(PC_POWER_SEQUENCE_TEST) || (defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION)
+    slt_timing_check();
     slt_flow_check();
 #endif
     finish(0U);
@@ -1782,10 +2002,10 @@ void test_main(void)
     pc_dispatch_poll(); CHECK(response_ready && pc_test_service_busy());
     response_ready = 0;
     result_is(0U, NULL, "SITE-7");
-    /* 真结果路径含MATS：反序双失败明细按die归位；地址0仍是FAIL，未列出的才是PASS。 */
+    /* 真结果路径含MATS：显式零地址PASS输出null，反序非零失败明细按die归位。 */
     for (uint8_t mask = 0U; mask < 4U; ++mask) {
         start_expect(START_JSON, NULL);
-        inject_mask(RK_RESPONSE_COMPLETE, mask, 0U, UINT64_MAX);
+        inject_mask(RK_RESPONSE_COMPLETE, mask, 1U, UINT64_MAX);
         CHECK(pc_dispatch_next_response(19U, &response) == 1);
         root = decode(&response, PC_COMMAND_TEST_RESULT_REPORT, 19U);
         const cJSON *results = cJSON_GetObjectItemCaseSensitive(root, "testResults");
@@ -1797,7 +2017,7 @@ void test_main(void)
             number_is(chip, "testStatus", failed ? 0U : 1U);
             const cJSON *desc = cJSON_GetObjectItemCaseSensitive(chip, "resultDesc");
             string_is(desc, "errorType", "");
-            if (failed) string_is(desc, "firstErrorAddress", die ? "0xFFFFFFFFFFFFFFFF" : "0x0000000000000000");
+            if (failed) string_is(desc, "firstErrorAddress", die ? "0xFFFFFFFFFFFFFFFF" : "0x0000000000000001");
             else CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(desc, "firstErrorAddress")));
             string_is(chip, "physicalAddr", "");
         }

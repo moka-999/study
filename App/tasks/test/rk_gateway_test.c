@@ -40,7 +40,7 @@ pc_dispatch_result_t rk_gateway_test_start(const pc_test_start_view_t *start,
     const rk_command_descriptor_t *command = rk_command_find_by_name(start->algorithm_name);
     if (command == NULL || command->category != RK_COMMAND_CATEGORY_FUNCTIONAL)
         return execution_response(sequence, start->algorithm_index, "notSupported", response);
-    rk_request_t request = {command->command_id, ++s_cookie, RK_GATEWAY_TEST_TIMEOUT_MS};
+    rk_request_t request = {command->command_id, ++s_cookie, RK_GATEWAY_TEST_TIMEOUT_MS, 0U};
     if (rk_link_request(&request) != 0)
         return execution_response(sequence, start->algorithm_index, "busy", response);
     s_name = command->name;

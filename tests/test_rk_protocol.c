@@ -15,7 +15,7 @@ static unsigned sent;
 static int tx_failure, power_on = PWR_CTRL_STATE_ON;
 /* 仅测试桩使用：记录发送尝试，包含未入队的失败帧；不修改生产任务的接口。 */
 static unsigned tx_attempts;
-static struct { uint64_t sequence; uint32_t tick; uint16_t type, command; } tx_log[16];
+static struct { uint64_t sequence, value; uint32_t tick; uint16_t type, command; } tx_log[16];
 static jmp_buf task_exit;
 static unsigned task_iterations, delay_calls, health_calls, rx_calls, rx_batch_calls;
 static unsigned resume_power_after;
@@ -58,7 +58,7 @@ void task_watchdog_progress(int task)
     ++health_calls;
 }
 void led_toggle(int led) { (void)led; }
-int pwr_ctrl_get_state(void) { return power_on; }
+pwr_ctrl_state_t pwr_ctrl_get_state(void) { return (pwr_ctrl_state_t)power_on; }
 int uart_poll_rx(int id, uint8_t *buffer, uint16_t length)
 {
     CHECK(id == 0);
@@ -77,16 +77,22 @@ int uart_poll_rx(int id, uint8_t *buffer, uint16_t length)
 }
 int uart_send(int id, uint8_t *buffer, uint16_t length)
 {
-    CHECK(id == 0 && (length == 22U || length == 16U));
+    CHECK(id == 0 && (length == 22U || length == 16U || length == 30U || length == 34U));
     tlv_frame_t frame;
-    CHECK(tlv_unpack(buffer, length, &frame) == (length == 16U ? 0 : 1));
+    CHECK(tlv_unpack(buffer, length, &frame) == (length == 16U ? 0 : length == 22U ? 1 : 2));
     CHECK((length == 22U && frame.units[0].type == TLV_TYPE_CMD) ||
-          (length == 16U && frame.count == 0U));
+          (length == 16U && frame.count == 0U) ||
+          (length == 30U && frame.units[1].type == TLV_TYPE_TIMING_VALUE) ||
+          (length == 34U && frame.units[1].type == TLV_TYPE_FREQUENCY_VALUE));
     CHECK(tx_attempts < sizeof(tx_log) / sizeof(tx_log[0]));
     tx_log[tx_attempts].sequence = frame.sequence;
     tx_log[tx_attempts].tick = tick;
     tx_log[tx_attempts].command = frame.count ?
         (uint16_t)(frame.payload[0] | ((uint16_t)frame.payload[1] << 8)) : 0U;
+    tx_log[tx_attempts].value = 0U;
+    if (frame.count == 2U)
+        for (unsigned i = 0U; i < frame.units[1].data_len; ++i)
+            tx_log[tx_attempts].value |= (uint64_t)frame.payload[frame.units[1].data_off + i] << (8U * i);
     tx_log[tx_attempts++].type = frame.count ? frame.units[0].type : TLV_TYPE_HEARTBEAT;
     if (tx_failure) return -1;
     ++sent;
@@ -608,7 +614,7 @@ static void test_byte_timeout(void)
 }
 static void test_transaction(void)
 {
-    rk_request_t request = {3, 101, 5000};
+    rk_request_t request = {3, 101, 5000, 0U};
     rk_response_t response;
     CHECK(rk_link_request(NULL) == -1);
     request.command_id = 37; CHECK(rk_link_request(&request) == -1); request.command_id = 3;
@@ -649,6 +655,10 @@ static void test_transaction(void)
 /* 每组故障注入清理桩与事务；RK序号仍由真实分配器持续递增，不在桩里重造。 */
 static void reset_task_test(void)
 {
+    s_timing_gap = 0U;
+    uint32_t frequency_token;
+    (void)rk_link_frequency_get(&frequency_token);
+    rk_link_frequency_end(frequency_token);
     memset(&s_pending, 0, sizeof(s_pending));
     s_rx_diagnostics = (rk_rx_diagnostics_t){0};
     requests.count = responses.count = 0U;
@@ -666,7 +676,7 @@ static void test_idd_transactions(void)
 {
     for (uint16_t command = 21U; command <= 36U; ++command) {
         reset_task_test();
-        rk_request_t request = {command, 1000U + command, 0U};
+        rk_request_t request = {command, 1000U + command, 0U, 0U};
         CHECK(rk_link_request(&request) == 0);
         process_request();
         CHECK(sent == 1U && tx_attempts == 1U && s_pending.waiting);
@@ -711,7 +721,7 @@ static void test_rx_diagnostics(void)
     CHECK(diag.frame_valid && diag.received_sequence == 42U && diag.tlv_count == 3U);
     CHECK(diag.command_sequence == 0U && diag.last_tx_sequence == 0U && diag.expected_command == 0U);
 
-    rk_request_t request = {17U, 730U, 0U};
+    rk_request_t request = {17U, 730U, 0U, 0U};
     CHECK(rk_link_request(&request) == 0); process_request();
     uint64_t sequence = s_pending.sequence;
     rk_pending_t pending = s_pending;
@@ -773,7 +783,7 @@ static void test_rx_diagnostics(void)
 static void test_progress_matching(void)
 {
     reset_task_test();
-    rk_request_t request = {17U, 706U, 0U};
+    rk_request_t request = {17U, 706U, 0U, 0U};
     rk_response_t response;
     CHECK(rk_link_request(&request) == 0); process_request();
     uint64_t sequence = s_pending.sequence;
@@ -813,7 +823,7 @@ static void test_atomic_result(void)
     for (uint8_t mask = 0U; mask < 4U; ++mask) {
         for (uint8_t reverse = 0U; reverse < 2U; ++reverse) {
             reset_task_test();
-            rk_request_t request = {17U, 701U, 0U};
+            rk_request_t request = {17U, 701U, 0U, 0U};
             rk_response_t response;
             CHECK(rk_link_request(&request) == 0); process_request();
             uint64_t sequence = s_pending.sequence;
@@ -821,7 +831,7 @@ static void test_atomic_result(void)
             tlv_frame_t flag = scalar_frame(sequence, TLV_TYPE_RESULT_FAIL, mask != 0U);
             accept_frame(&old); accept_frame(&flag);
             CHECK(s_pending.waiting && rk_link_receive(&response) == 0);
-            tlv_frame_t result = dual_die_frame(mask, reverse, 0U, UINT64_MAX, UINT64_MAX);
+            tlv_frame_t result = dual_die_frame(mask, reverse, 1U, UINT64_MAX, UINT64_MAX);
             result.sequence = sequence;
             tlv_frame_t wrong = result; wrong.payload[0] = 18U;
             accept_frame(&wrong); CHECK(s_pending.waiting);
@@ -836,7 +846,7 @@ static void test_atomic_result(void)
             CHECK(response.result.command_id == 17U && response.result.elapsed_ms == UINT64_MAX);
             for (uint8_t i = 0U; i < response.result.failure_count; ++i) {
                 const rk_failure_detail_t *failure = &response.result.failures[i];
-                CHECK(failure->error_address == (failure->die == 0U ? 0U : UINT64_MAX));
+                CHECK(failure->error_address == (failure->die == 0U ? 1U : UINT64_MAX));
             }
             CHECK(response.sequence == sequence && response.cookie == 701U);
             CHECK(rk_link_receive(&response) == 0);
@@ -853,7 +863,7 @@ static void test_latest_received_sequence(void)
 {
     for (unsigned order = 0U; order < 2U; ++order) {
         reset_task_test();
-        rk_request_t request = {3U, 704U, 0U};
+        rk_request_t request = {3U, 704U, 0U, 0U};
         rk_response_t response;
         CHECK(rk_link_request(&request) == 0); process_request();
         uint64_t command_seq = s_pending.sequence;
@@ -894,7 +904,7 @@ static void test_latest_received_sequence(void)
     }
     /* 只注入事务窗口边界，验证uint64回绕；不修改正式发送序号分配器。 */
     reset_task_test();
-    rk_request_t request = {3U, 705U, 0U};
+    rk_request_t request = {3U, 705U, 0U, 0U};
     rk_response_t response;
     CHECK(rk_link_request(&request) == 0); process_request();
     s_pending.sequence = UINT64_MAX - 1U;
@@ -914,14 +924,14 @@ static void test_latest_received_sequence(void)
 static void test_result_stream(void)
 {
     reset_task_test();
-    rk_request_t request = {17U, 703U, 1000U};
+    rk_request_t request = {17U, 703U, 1000U, 0U};
     rk_response_t response;
     CHECK(rk_link_request(&request) == 0); process_request();
     uint64_t sequence = s_pending.sequence;
     tlv_frame_t frames[3];
     frame_init(&frames[0]); frames[0].sequence = sequence;
     frames[1] = progress_frame(sequence, 17U, 72U);
-    frames[2] = dual_die_frame(3U, 1U, 0U, UINT64_MAX, 5645U);
+    frames[2] = dual_die_frame(3U, 1U, 1U, UINT64_MAX, 5645U);
     frames[2].sequence = sequence;
     tlv_sm_t stream; tlv_sm_init(&stream);
     uint8_t wire[TLV_FRAME_MAX];
@@ -941,7 +951,7 @@ static void test_result_stream(void)
     }
     CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
     CHECK(response.result.failure_count == 2U && response.result.failures[0].die == 1U);
-    CHECK(response.result.failures[1].error_address == 0U && response.result.elapsed_ms == 5645U);
+    CHECK(response.result.failures[1].error_address == 1U && response.result.elapsed_ms == 5645U);
     CHECK(s_pending.progress_percent == 72U && s_pending.progress_sequence == sequence);
 
     /* 完整包到达前已超时：迟到结果只恢复状态，绝不再报一次COMPLETE。 */
@@ -961,7 +971,7 @@ static void test_result_stream(void)
 static void test_unlimited_result_wait(void)
 {
     reset_task_test();
-    rk_request_t request = {3U, 501U, 0U};
+    rk_request_t request = {3U, 501U, 0U, 0U};
     rk_response_t response;
     CHECK(rk_link_request(&request) == 0); process_request();
     CHECK(sent == 1U && s_pending.waiting && !s_pending.timed_out);
@@ -997,7 +1007,7 @@ static void test_timeout_recovery_backpressure(void)
 #endif
     for (unsigned mode = 0U; mode < modes; ++mode) {
         reset_task_test();
-        rk_request_t request = {3U, 601U, 1000U};
+        rk_request_t request = {3U, 601U, 1000U, 0U};
         rk_response_t response, filler = {.cookie = 999U, .status = RK_RESPONSE_TX_FAILED};
         CHECK(rk_link_request(&request) == 0); process_request();
         uint64_t sequence = s_pending.sequence;
@@ -1066,7 +1076,7 @@ static void test_timeout_recovery_backpressure(void)
 
     /* 到期后先收到结果、尚未来得及轮询超时，也只能报TIMEOUT与恢复。 */
     reset_task_test();
-    rk_request_t request = {3U, 603U, 1000U};
+    rk_request_t request = {3U, 603U, 1000U, 0U};
     rk_response_t response;
     CHECK(rk_link_request(&request) == 0); process_request();
     tick = 1000U;
@@ -1164,7 +1174,7 @@ static void test_heartbeat(void)
     tick = interval / 2U; process_heartbeat(&last); CHECK(tx_attempts == 5U && last == tick);
 
     reset_task_test();
-    rk_request_t request = {3U, 301U, 5000U};
+    rk_request_t request = {3U, 301U, 5000U, 0U};
     CHECK(rk_link_request(&request) == 0); process_request();
     CHECK(s_pending.waiting && tx_log[0].type == TLV_TYPE_CMD);
     rk_pending_t pending = s_pending;
@@ -1223,7 +1233,7 @@ static void test_task_fairness(void)
         reset_task_test();
         rx_mode = mode;
         task_iterations = interval / 10U + 2U;
-        rk_request_t request = {3U, 401U, 100U};
+        rk_request_t request = {3U, 401U, 100U, 0U};
         CHECK(rk_link_request(&request) == 0);
         run_task_iterations();
         CHECK(delay_calls == task_iterations && health_calls == task_iterations && rx_calls == task_iterations * 8U);
@@ -1240,7 +1250,7 @@ static void test_task_fairness(void)
      */
     for (int mode = 1; mode <= 2; ++mode) {
         reset_task_test();
-        rk_request_t request = {3U, 402U, 5000U};
+        rk_request_t request = {3U, 402U, 5000U, 0U};
         CHECK(rk_link_request(&request) == 0);
         power_on = 0;
         rx_mode = mode;
@@ -1257,7 +1267,7 @@ static void test_task_fairness(void)
 #endif
     reset_task_test();
 }
-/* 构造一个完整双颗粒包；mask仅为测试输入，不是线上字段。 */
+/* 构造一个完整双颗粒包；mask选择明细，默认置整体FAIL，PASS用例另行清零。 */
 static tlv_frame_t dual_die_frame(uint8_t mask, uint8_t reverse,
                                   uint64_t first_address, uint64_t second_address,
                                   uint64_t elapsed_ms)
@@ -1347,7 +1357,7 @@ static void final_result_rejected(const tlv_frame_t *frame)
 
 static void test_dual_die_final_rules(void)
 {
-    const uint64_t boundaries[] = {0U, UINT64_MAX};
+    const uint64_t boundaries[] = {1U, UINT64_MAX};
     for (uint8_t mask = 0U; mask < 4U; ++mask) {
         for (uint8_t reverse = 0U; reverse < 2U; ++reverse) {
             for (unsigned edge = 0U; edge < 2U; ++edge) {
@@ -1375,7 +1385,7 @@ static void test_dual_die_final_rules(void)
             }
         }
     }
-    tlv_frame_t good = dual_die_frame(3U, 0U, 0U, UINT64_MAX, 0U), frame;
+    tlv_frame_t good = dual_die_frame(3U, 0U, 1U, UINT64_MAX, 0U), frame;
     CHECK(rk_final_result_decode(&good, NULL) == -1);
     final_result_rejected(NULL);
     for (unsigned count = 0U; count <= TLV_MAX_PER_FRAME + 1U; ++count) {
@@ -1424,10 +1434,194 @@ static void test_dual_die_final_rules(void)
     CHECK(cleared(result.failures, sizeof(result.failures))); /* 不能残留上一包失败地址。 */
 }
 
+/* 服务器固定五TLV的PASS包及显式两颗明细：零地址为PASS，重复die仍须拒绝。 */
+static void test_explicit_pass_results(void)
+{
+    static const uint8_t golden[] = {
+        0x5A,0,0x28,0x51,0xCD,0,0,0,0,0,0,0,0x30,
+        0x50,0x01,0,2,0x11,0,0x10,0x17,0,1,0,
+        0x90,0x01,0,8,0,0,0,0,0,0,0,0,0x30,0x01,0,1,0,
+        0x90,0x02,0,8,0x0D,0x16,0,0,0,0,0,0,0x8F,0x68,0xA5
+    };
+    tlv_frame_t frame;
+    rk_final_result_t result;
+    CHECK(tlv_unpack(golden, sizeof(golden), &frame) == 5);
+    CHECK(rk_final_result_decode(&frame, &result) == 0);
+    CHECK(result.command_id == 17U && result.elapsed_ms == 5645U);
+    CHECK(result.failed == 0U && result.failure_count == 0U);
+    CHECK(cleared(result.failures, sizeof(result.failures)));
+    /* 五TLV PASS按每个切分点通过实际状态机，不能因零地址放宽CRC。 */
+    for (unsigned split = 1U; split < sizeof(golden); ++split) {
+        tlv_sm_t stream; tlv_sm_init(&stream); tick = 0U;
+        CHECK(feed(&stream, golden, split) == 0);
+        tick += 50U;
+        CHECK(feed(&stream, golden + split, sizeof(golden) - split) == 1);
+        CHECK(tlv_sm_get_frame(&stream, &frame) == 5);
+        CHECK(rk_final_result_decode(&frame, &result) == 0 && result.failure_count == 0U);
+    }
+    uint8_t wire[sizeof(golden)];
+    memcpy(wire, golden, sizeof(golden)); wire[29] ^= 1U;
+    CHECK(tlv_unpack(wire, sizeof(golden), &frame) == -1);
+    for (uint8_t pairs = 0U; pairs < 4U; ++pairs) {
+        for (uint8_t failed = 0U; failed < 4U; ++failed) {
+            if ((failed & ~pairs) != 0U) continue;
+            for (uint8_t reverse = 0U; reverse < 2U; ++reverse) {
+                frame = dual_die_frame(pairs, reverse, (failed & 1U) ? 1U : 0U,
+                                       (failed & 2U) ? UINT64_MAX : 0U, 0U);
+                frame.payload[frame.units[1].data_off] = failed != 0U;
+                CHECK(rk_final_result_decode(&frame, &result) == 0);
+                CHECK(result.failed == (failed != 0U));
+                CHECK(result.failure_count == ((failed & 1U) != 0U) + ((failed & 2U) != 0U));
+                uint8_t decoded_mask = 0U;
+                for (uint8_t i = 0U; i < result.failure_count; ++i) {
+                    decoded_mask |= (uint8_t)(1U << result.failures[i].die);
+                    CHECK(result.failures[i].error_address == (result.failures[i].die ? UINT64_MAX : 1U));
+                }
+                CHECK(decoded_mask == failed);
+                reset_task_test();
+                rk_request_t request = {17U, 901U, 0U, 0U};
+                rk_response_t response;
+                CHECK(rk_link_request(&request) == 0); process_request();
+                frame.sequence = s_pending.sequence;
+                accept_frame(&frame); accept_frame(&frame); process_request();
+                CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
+                CHECK(memcmp(&response.result, &result, sizeof(result)) == 0);
+                CHECK(!s_pending.waiting && rk_link_receive(&response) == 0);
+                frame.payload[frame.units[1].data_off] = failed == 0U;
+                final_result_rejected(&frame);
+            }
+        }
+    }
+    /* 已见die位独立于失败数量：PASS+PASS、PASS+FAIL都不能重复同一颗。 */
+    for (unsigned mixed = 0U; mixed < 2U; ++mixed) {
+        frame = dual_die_frame(3U, 0U, 0U, mixed ? 1U : 0U, 0U);
+        frame.payload[frame.units[1].data_off] = mixed;
+        frame.payload[frame.units[5].data_off] = 0U;
+        final_result_rejected(&frame);
+    }
+    reset_task_test();
+}
+
+/* RK被动回复：空闲确认ready、在途回复进度，MCU不回发造成应答循环。 */
+static void test_reply_only_heartbeat(void)
+{
+    reset_task_test();
+    TickType_t last = 0U;
+    rk_response_t response;
+    CHECK(rk_link_ready_begin(901U) == 0);
+    tick = 1000U; process_heartbeat(&last);
+    CHECK(tx_attempts == 1U);
+    tlv_frame_t frame; frame_init(&frame); frame.sequence = tx_log[0].sequence;
+    accept_frame(&frame); process_request(); process_heartbeat(&last);
+    CHECK(rk_link_ready_poll(901U) == 1 && tx_attempts == 1U);
+    rk_request_t request = {17U, 902U, 0U, 0U};
+    CHECK(rk_link_request(&request) == 0); process_request();
+    CHECK(tx_attempts == 2U);
+    tick = 2000U; process_heartbeat(&last);
+    frame = progress_frame(tx_log[2].sequence, 17U, 100U);
+    accept_frame(&frame); process_request(); process_heartbeat(&last);
+    CHECK(tx_attempts == 3U && s_pending.waiting && s_pending.progress_percent == 100U);
+    CHECK(rk_link_receive(&response) == 0);
+    /* 结果可在下一心跳前主动到达，不依赖额外普通心跳。 */
+    tick += 10U;
+    frame = task_result_frame(tx_log[2].sequence, 17U, 0U);
+    accept_frame(&frame); process_request(); process_heartbeat(&last);
+    CHECK(tx_attempts == 3U && !s_pending.waiting);
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
+    reset_task_test();
+}
+
+/* 真实编码/任务覆盖：无回应时序不会占算法结果窗口，频率可在ON之前应答。 */
+static void test_timing_and_frequency(void)
+{
+    uint8_t wire[TLV_FREQUENCY_FRAME_SIZE];
+    tlv_frame_t frame;
+    rk_response_t event;
+    reset_task_test();
+    CHECK(tlv_pack_timing(0x27U, 1U, 1U, wire, sizeof(wire)) == 0);
+    CHECK(tlv_pack_timing(0x2BU, UINT32_C(0x78563412), 7U, wire, sizeof(wire)) == 30);
+    CHECK(tlv_unpack(wire, 30U, &frame) == 2);
+    static const uint8_t timing_tlv[] = {0x50,0,0,2,0x2B,0,0x70,0x1B,0,4,0x12,0x34,0x56,0x78};
+    CHECK(memcmp(wire + 13U, timing_tlv, sizeof(timing_tlv)) == 0 && frame.sequence == 7U);
+    memset(wire, 0xCC, sizeof(wire));
+    CHECK(tlv_pack_frequency(-1, 9U, wire, 33U) == 0 && wire[0] == 0xCC);
+    CHECK(tlv_pack_frequency(-1, 9U, wire, sizeof(wire)) == 34);
+    static const uint8_t freq_tlv[] = {0x50,1,0,2,0x35,0,0x80,0x1C,0,8,255,255,255,255,255,255,255,255};
+    CHECK(memcmp(wire + 13U, freq_tlv, sizeof(freq_tlv)) == 0);
+    CHECK(tlv_unpack(wire, 34U, &frame) == 2 && frame.sequence == 9U);
+    CHECK(tlv_pack_frequency(INT64_MIN, 10U, wire, sizeof(wire)) == 34 && wire[30] == 0x80);
+    CHECK(tlv_unpack(wire, 34U, &frame) == 2 && !rk_is_frequency_query(&frame));
+    CHECK(tlv_pack_cmd(0x35U, NULL, 0U, 0x35U, wire, sizeof(wire)) == 22);
+    CHECK(tlv_unpack(wire, 22U, &frame) == 1 && rk_is_frequency_query(&frame));
+    rk_link_frequency_begin(801U, INT64_C(9007199254740993));
+    accept_frame(&frame);
+    CHECK(tx_attempts == 1U && tx_log[0].type == TLV_TYPE_RESULT_CMD && tx_log[0].command == 0x35U);
+    CHECK(tx_log[0].value == UINT64_C(9007199254740993) && rk_link_frequency_status(801U) == 1);
+    CHECK(!s_pending.waiting && rk_link_receive(&event) == 0);
+    rk_link_frequency_end(800U);
+    CHECK(rk_link_frequency_get(NULL) == INT64_C(9007199254740993));
+    rk_link_frequency_end(801U);
+    accept_frame(&frame);
+    CHECK(tx_log[1].value == UINT64_MAX && tx_log[1].sequence == tx_log[0].sequence + 1U);
+    rk_link_frequency_begin(802U, 1600);
+    tx_failure = 1; accept_frame(&frame);
+    CHECK(rk_link_frequency_status(802U) == -1 && !s_pending.waiting);
+    reset_task_test();
+
+    rk_request_t setting = {0x25U, 900U, 0U, UINT32_MAX};
+    CHECK(rk_link_request(&setting) == 0); process_request();
+    CHECK(!s_pending.waiting && tx_log[0].command == 0x25U && tx_log[0].value == UINT32_MAX);
+    /* 结果队列满时保留SENT，不提前领取后续设置。 */
+    responses.count = 8U;
+    setting.command_id = 0x26U; setting.parameter_value = 0U;
+    CHECK(rk_link_request(&setting) == 0); tick += 20U; process_request();
+    CHECK(requests.count == 1U && tx_attempts == 1U && s_pending.delivery);
+    responses.count = 0U; process_request();
+    CHECK(rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_SENT);
+    CHECK(tx_attempts == 2U && tx_log[1].command == 0x26U && tx_log[1].value == 0U);
+    process_request(); CHECK(rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_SENT);
+    rk_request_t algorithm = {17U, 901U, 0U, 0U};
+    CHECK(rk_link_request(&algorithm) == 0); process_request(); CHECK(tx_attempts == 2U);
+    tick += 19U; process_request(); CHECK(tx_attempts == 2U);
+    ++tick; process_request(); CHECK(tx_attempts == 3U && s_pending.waiting);
+    frame = progress_frame(s_pending.sequence, 0x26U, 100U);
+    accept_frame(&frame); CHECK(s_pending.waiting && !s_pending.progress_valid);
+    frame = task_result_frame(s_pending.sequence, 0x26U, 0U);
+    accept_frame(&frame); CHECK(s_pending.waiting && rk_link_receive(&event) == 0);
+    frame = task_result_frame(s_pending.sequence, 17U, 0U);
+    accept_frame(&frame); process_request();
+    CHECK(rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_COMPLETE);
+    reset_task_test();
+    tx_failure = 1; CHECK(rk_link_request(&setting) == 0); process_request(); process_request();
+    CHECK(tx_attempts == 1U && rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_TX_FAILED);
+    reset_task_test();
+#if defined(B1_RK_UART)
+    for (int state = PWR_CTRL_STATE_OFF; state <= PWR_CTRL_STATE_FAULT; ++state) {
+        reset_task_test(); power_on = state;
+        rk_link_frequency_begin(990U, 1234);
+        CHECK(rk_link_ready_begin(991U) == 0);
+        task_iterations = 1U; rx_mode = 3;
+        rx_wire_length = (unsigned)tlv_pack_cmd(0x35U, NULL, 0U, 0x35U, rx_wire, sizeof(rx_wire));
+        run_task_iterations();
+        int allowed = state == PWR_CTRL_STATE_WAIT_FIRST_RAIL || state == PWR_CTRL_STATE_WAIT_SECOND_RAIL ||
+                      state == PWR_CTRL_STATE_ON;
+        CHECK(tx_attempts == (allowed ? 8U : 0U));
+        CHECK(rk_link_frequency_status(990U) == (allowed ? 1 : 0));
+        CHECK(rk_link_ready_poll(991U) == 0 && requests.count == 0U);
+        if (allowed) CHECK(tx_log[0].value == 1234U);
+    }
+#endif
+    reset_task_test();
+    message("PASS: timing send-only sequencing, TX/backpressure, independent early frequency reply and power gates\n");
+}
+
 void test_main(void)
 {
+    test_timing_and_frequency();
     test_rx_diagnostics(); test_rx_tlv_diagnostics();
     message("PASS: RK receive rejection diagnostics; matching rules unchanged\n");
+    test_explicit_pass_results(); test_reply_only_heartbeat();
+    message("PASS: explicit zero-address PASS and reply-only RK heartbeat\n");
     test_dual_die_final_golden(); test_dual_die_final_rules();
     message("PASS: dual-die 3/5/7-TLV final decoder\n");
     test_empty_heartbeat();
