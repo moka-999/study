@@ -79,6 +79,8 @@ uint32_t HAL_GetTick(void);
                "-Wall", "-Wextra", "-Werror", "-ffunction-sections", "-fdata-sections"]
     if args.b1_guard or root.name == "b1":
         command += ["-DB1_RK_UART=4"]
+    if root.name == "b1":
+        command += ["-DTEST_B1_CONSOLE_POWER=1"]
     if args.power_simulation:
         command += ["-DENABLE_V2_POWER_SIMULATION=1"]
     if args.mats_fail_test:

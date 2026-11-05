@@ -6,6 +6,21 @@
 #include "rk_link.h"
 #include "pc_power_service.h"
 #include "b2_service.h"
+#if defined(TEST_B1_CONSOLE_POWER)
+#include "log_console.h"
+static log_console_power_request_t console_request;
+static unsigned console_completions;
+static const char *console_error;
+/* 串口字符与单槽交接另由实际log_console回归；这里仅替代请求/完成端口。 */
+log_console_power_request_t log_console_take_power_request(void)
+{
+    log_console_power_request_t result = console_request;
+    console_request = LOG_CONSOLE_POWER_NONE;
+    return result;
+}
+void log_console_complete_power_request(const char *error)
+{ ++console_completions; console_error = error; }
+#endif
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
 #include "v2_power_sim.h"
 #endif
@@ -15,6 +30,7 @@ static pwr_ctrl_state_t mock_power_state = PWR_CTRL_STATE_OFF;
 static int power_fixture, boot_failure;
 static pwr_ctrl_result_t power_failure;
 static unsigned power_on_calls, power_off_calls, boot_calls;
+static boot_mode_t last_boot_mode;
 static uint32_t boot_io_ms;
 /* 仅故障回归注入同步设置返回值，正式电源编排及配置复用判定仍执行实际C代码。 */
 static int config_result_override;
@@ -163,6 +179,7 @@ pwr_ctrl_result_t monitor_request_power_off(uint32_t now)
 }
 monitor_boot_result_t monitor_set_boot_mode(boot_mode_t mode)
 {
+    last_boot_mode = mode;
     if (config_result_override) {
         CHECK(power_fixture && (unsigned)mode < BOOT_MODE_COUNT);
         ++config_set_calls;
@@ -1103,6 +1120,93 @@ static void power_sequence_check(void)
     config_cache_check();
     message("PASS: PC RK service real power sequence: cold start/reuse/change/reboot, direct off, heartbeat ready, PC voltage range, guards, failures, deadlines, disconnects\n");
 }
+
+#if defined(TEST_B1_CONSOLE_POWER)
+static void console_command(log_console_power_request_t request)
+{
+    CHECK(console_request == LOG_CONSOLE_POWER_NONE);
+    console_request = request;
+    pc_dispatch_poll();
+    CHECK(console_request == LOG_CONSOLE_POWER_NONE);
+}
+static void console_cold_finish(void)
+{
+    unsigned completed = console_completions, on = power_on_calls, arms = rk_arms, queued = queue_calls;
+    CHECK(pc_power_service_diagnostic()->phase == PC_POWER_OFF_HOLD);
+    step_power(sequence_config.off_hold_ms);
+    CHECK(last_boot_mode == BOOT_MODE_FSPI_M1 && power_on_calls == on);
+    step_power(sequence_config.boot_settle_ms);
+    CHECK(power_on_calls == on + 1U && mock_power_state == PWR_CTRL_STATE_WAIT_FIRST_RAIL);
+    CHECK(ddr_power_get_memory_type() == DDR_MEMORY_LPDDR4X);
+    CHECK(ddr_power_get_training_mv(DDR_RAIL_VDD1) == 1800U);
+    CHECK(ddr_power_get_training_mv(DDR_RAIL_VDD2) == 1100U);
+    CHECK(ddr_power_get_training_mv(DDR_RAIL_VDDQ) == 600U);
+    CHECK(console_completions == completed);
+    mock_power_state = PWR_CTRL_STATE_ON; step_power(1U);
+    CHECK(console_completions == completed + 1U && console_error == NULL);
+    CHECK(!pc_power_service_busy() && !pc_test_service_busy());
+    CHECK(rk_arms == arms && queue_calls == queued); /* 不等待SPL心跳、不发算法或建SLT占用。 */
+}
+static void console_power_check(void)
+{
+    pc_dispatch_response_t response;
+    configure_power();
+    CHECK(pc_power_service_configure(NULL, NULL) == 0);
+    console_command(LOG_CONSOLE_POWER_START_RK);
+    CHECK(strcmp(console_error, "notConfigured") == 0 && !pc_power_service_busy());
+
+    configure_power();
+    const uint16_t biased[] = {1700U, 1060U, 570U};
+    CHECK(ddr_power_configure_training(DDR_MEMORY_LPDDR4X, biased) == IF_OK);
+    CHECK(pc_power_service_configure(&sequence_config, NULL) == 0);
+    console_command(LOG_CONSOLE_POWER_START_RK);
+    power_command(PC_COMMAND_POWER_OFF, "failed", "busy");
+    start_expect(START_JSON, "busy");
+    pc_dispatch_disconnected(); /* 无PC/断线均不取消已经受理的本地动作。 */
+    console_cold_finish();
+    CHECK(pc_dispatch_next_response(500U, &response) == 0);
+
+    /* 已经ON也重新下电，确保Boot和训练目标真正重新进入启动流程。 */
+    console_command(LOG_CONSOLE_POWER_START_RK);
+    direct_off_to_hold(); console_cold_finish();
+    console_command(LOG_CONSOLE_POWER_END_RK);
+    step_power(0U);
+    CHECK(pc_power_service_diagnostic()->phase == PC_POWER_WAIT_OFF);
+    unsigned completed = console_completions, off = power_off_calls;
+    mock_power_state = PWR_CTRL_STATE_OFF; step_power(1U);
+    CHECK(console_completions == completed + 1U && console_error == NULL && !pc_power_service_busy());
+    console_command(LOG_CONSOLE_POWER_END_RK); step_power(0U);
+    CHECK(power_off_calls == off && console_error == NULL && !pc_power_service_busy());
+
+    /* PC电源结果仍由原连接消费，本地请求不能抢走其完成事件。 */
+    configure_power(); power_command(PC_COMMAND_POWER_ON, "accepted", NULL);
+    console_command(LOG_CONSOLE_POWER_END_RK);
+    CHECK(strcmp(console_error, "busy") == 0);
+    step_power(10U); step_power(5U); mock_power_state = PWR_CTRL_STATE_ON; step_power(1U);
+    power_completion(PC_COMMAND_POWER_ON, NULL);
+    start_expect(START_JSON, NULL);
+    off = power_off_calls;
+    console_command(LOG_CONSOLE_POWER_END_RK);
+    CHECK(strcmp(console_error, "busy") == 0 && pc_test_service_busy() && power_off_calls == off);
+    result_is(0U, NULL, "SITE-7");
+
+    /* DAC失败、供电失败和等待超时均报告一次，不补发或假报ON。 */
+    configure_power(); boot_failure = 1;
+    unsigned on = power_on_calls;
+    console_command(LOG_CONSOLE_POWER_START_RK); step_power(10U);
+    CHECK(strcmp(console_error, "executionFailed") == 0 && !pc_power_service_busy() && power_on_calls == on);
+    configure_power(); power_failure = PWR_CTRL_ERR_FAULT;
+    console_command(LOG_CONSOLE_POWER_START_RK); step_power(10U); step_power(5U);
+    CHECK(strcmp(console_error, "executionFailed") == 0 && !pc_power_service_busy());
+    configure_power(); console_command(LOG_CONSOLE_POWER_START_RK); step_power(10U); step_power(5U);
+    step_power(sequence_config.transition_timeout_ms);
+    CHECK(strcmp(console_error, "timeout") == 0 && !pc_power_service_busy());
+    completed = console_completions; step_power(1000U);
+    CHECK(console_completions == completed);
+    configure_power();
+    message("PASS: console start/end RK: nominal training, fspiM1, cold boot, no heartbeat/algorithm, PC mutual exclusion, disconnect and failures\n");
+}
+#endif
 #endif
 
 #if defined(PC_TEST_ROUND_TEST)
@@ -1909,6 +2013,9 @@ void test_main(void)
 #endif
 #if defined(PC_POWER_SEQUENCE_TEST)
     power_sequence_check();
+#if defined(TEST_B1_CONSOLE_POWER)
+    console_power_check();
+#endif
     finish(0U);
 #endif
 #if defined(ENABLE_V2_MATS_FAIL_TEST) && ENABLE_V2_MATS_FAIL_TEST

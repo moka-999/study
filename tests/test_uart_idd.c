@@ -508,6 +508,53 @@ static void test_console_led(void)
     message("PASS: B1 console LED modes, GPIO isolation and 500ms blink\n");
 }
 
+static void test_console_power(void)
+{
+    console_input("log mcu\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    console_input("start rk x\nstart rK\nend rk x\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    console_input("sta"); CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    console_input("rt rk\r\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_START_RK);
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    clear_console_output(); console_input("end rk\nstart rk\n");
+    CHECK(strstr(console_output, "busy") && log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    log_console_complete_power_request(NULL); clear_console_output(); log_console_process();
+    CHECK(strstr(console_output, "1800/1100/600mV; fspiM1") && strstr(console_output, "power ON"));
+    console_input("end rk\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_END_RK);
+    clear_console_output(); log_console_complete_power_request(NULL); log_console_process();
+    CHECK(strstr(console_output, "power OFF"));
+
+    /* 入队通知未发出前不领取；完成回复遇拥塞保留，重复命令不覆盖它。 */
+    fail_console_send = 1; console_input("start rk\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    fail_console_send = 0; log_console_process();
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_START_RK);
+    fail_console_send = 1; log_console_complete_power_request("executionFailed");
+    log_console_process(); console_input("end rk\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    clear_console_output(); fail_console_send = 0;
+    log_console_process(); log_console_process();
+    CHECK(strstr(console_output, "start rk failed: executionFailed"));
+    console_input("end rk\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_END_RK);
+    console_input("log rk\n");
+    clear_console_output(); log_console_complete_power_request(NULL); log_console_process();
+    CHECK(strstr(console_output, "power OFF")); /* 切换日志来源不丢已受理动作的结论。 */
+    clear_rk_console_output(); console_input("start rk\nend rk\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    check_rk_console_output("start rk\nend rk\n", 16U);
+    console_input("log mcu\nstart ");
+    uart[2].ErrorCode = 8U;
+    isr = 1; HAL_UART_ErrorCallback(&uart[2]); isr = 0;
+    tick += 100U; log_console_process(); console_input("rk\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    clear_console_output(); clear_rk_console_output();
+    message("PASS: B1 console power command framing, single slot, backpressure and mode isolation\n");
+}
+
 static void test_log_console(void)
 {
     uint8_t buffer[UART_RX_BUF_SIZE];
@@ -703,6 +750,7 @@ static void test_log_console(void)
     clear_rk_console_output();
     CHECK(_write(2, "hidden", 6) == 6 && console_output_length == 0U);
     test_console_led();
+    test_console_power();
     /* 默认值在重新初始化后恢复，两种编译配置各执行一次本用例。 */
     log_console_start(); clear_console_output();
     CHECK(log_console_write("mcu", 3U) == 3U); rk_log_input("rk");
