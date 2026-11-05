@@ -36,6 +36,8 @@ static const rk_tlv_rule_t s_tlv_rules[] = {
     {TLV_TYPE_RESULT_FAIL,    1U,  1U,              RK_RESULT_FIELD_FAIL,           1U},
     {TLV_TYPE_REGISTER_ADDRESS, 4U, 4U,            RK_RESULT_FIELD_COUNT,          0U},
     {TLV_TYPE_PARAM_ACTION,   1U,  1U,              RK_RESULT_FIELD_COUNT,          1U},
+    {TLV_TYPE_TIMING_VALUE,   4U,  4U,              RK_RESULT_FIELD_COUNT,          0U},
+    {TLV_TYPE_FREQUENCY_VALUE, 8U, 8U,              RK_RESULT_FIELD_COUNT,          0U},
 };
 
 /* 返回只读规则；NULL代表未知扩展类型，由上层决定是否消费。 */
@@ -179,6 +181,45 @@ int tlv_pack_idd_action(uint16_t cmd, uint8_t action, uint64_t seq,
     return tlv_pack_frame(&frame, seq, out, out_max);
 }
 
+int rk_is_timing_command(uint16_t cmd)
+{
+    return cmd >= 0x25U && cmd <= 0x34U && cmd != 0x27U;
+}
+
+int tlv_pack_timing(uint16_t cmd, uint32_t value, uint64_t seq, uint8_t *out, uint16_t out_max)
+{
+    if (!rk_is_timing_command(cmd) || !out || out_max < TLV_TIMING_FRAME_SIZE) return 0;
+    tlv_frame_t frame;
+    frame_init(&frame);
+    uint8_t command[2] = {(uint8_t)cmd, (uint8_t)(cmd >> 8)};
+    uint8_t bytes[4];
+    for (unsigned i = 0U; i < sizeof(bytes); ++i) bytes[i] = (uint8_t)(value >> (8U * i));
+    if (tlv_pack(&frame, TLV_TYPE_CMD, command, sizeof(command)) != 0 ||
+        tlv_pack(&frame, TLV_TYPE_TIMING_VALUE, bytes, sizeof(bytes)) != 0) return 0;
+    return tlv_pack_frame(&frame, seq, out, out_max);
+}
+
+int tlv_pack_frequency(int64_t value, uint64_t seq, uint8_t *out, uint16_t out_max)
+{
+    if (!out || out_max < TLV_FREQUENCY_FRAME_SIZE) return 0;
+    tlv_frame_t frame;
+    frame_init(&frame);
+    uint8_t command[2] = {RK_CMD_QUERY_FREQUENCY, 0U};
+    uint8_t bytes[8];
+    for (unsigned i = 0U; i < sizeof(bytes); ++i) bytes[i] = (uint8_t)((uint64_t)value >> (8U * i));
+    if (tlv_pack(&frame, TLV_TYPE_RESULT_CMD, command, sizeof(command)) != 0 ||
+        tlv_pack(&frame, TLV_TYPE_FREQUENCY_VALUE, bytes, sizeof(bytes)) != 0) return 0;
+    return tlv_pack_frame(&frame, seq, out, out_max);
+}
+
+int rk_is_frequency_query(const tlv_frame_t *frame)
+{
+    if (!frame || frame->count != 1U || frame->units[0].type != TLV_TYPE_CMD ||
+        frame->units[0].data_len != 2U || frame->units[0].data_off > TLV_PAYLOAD_MAX - 2U ||
+        frame->payload_used < frame->units[0].data_off + 2U) return 0;
+    return read_le(frame->payload + frame->units[0].data_off, 2U) == RK_CMD_QUERY_FREQUENCY;
+}
+
 int tlv_pack_heartbeat(uint64_t seq, uint8_t *out, uint16_t out_max)
 {
     tlv_frame_t frame;
@@ -245,9 +286,12 @@ int rk_final_result_decode(const tlv_frame_t *frame, rk_final_result_t *result)
             if (!awaiting_die || value >= RK_RESULT_DIE_COUNT ||
                 decoded.failure_count >= RK_RESULT_DIE_COUNT ||
                 (seen_dies & (1U << value)) != 0U) return -1;
-            rk_failure_detail_t *failure = &decoded.failures[decoded.failure_count++];
-            failure->error_address = pending_address;
-            failure->die = (uint8_t)value;
+            /* 零地址显式表示该颗PASS；仍登记die，防止PASS明细绕过重复检查。 */
+            if (pending_address != 0U) {
+                rk_failure_detail_t *failure = &decoded.failures[decoded.failure_count++];
+                failure->error_address = pending_address;
+                failure->die = (uint8_t)value;
+            }
             seen_dies |= (uint8_t)(1U << value);
             awaiting_die = 0U;
         } else {

@@ -133,26 +133,62 @@ pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type
     return PC_TEST_JSON_OK;
 }
 
-/* 对象必填，空对象表示默认时序；读/写延迟可分别提供，保留字符串原值，不推导另一项。 */
-static pc_test_json_result_t parse_timing_parameters(const cJSON *timing)
+/* 业务映射按RK设置命令排序；Freq单独走启动查询，不能插入此设置序列。 */
+static const char *const s_timing_fields[] = {
+    "CASWriteLatency", "CASReadLatency", "tREFI", "tWR", "tRTP", "tRCD", "tRP",
+    "tRASmin", "tRASmax", "tWTR", "tRFCmin", "tFAW", "tCCD", "tRRD", "BL", "Freq"
+};
+
+uint16_t pc_timing_command(unsigned index)
 {
-    static const char *const fields[] = {
-        "Freq", "CASReadLatency", "CASWriteLatency", "tRC", "tRCD", "tRFC",
-        "tRP", "tRAS", "tRRD", "BurstLength", "ODT", "tREFI"
-    };
+    return index < PC_TIMING_PARAMETER_COUNT ? (uint16_t)(index + (index < 2U ? 0x25U : 0x26U)) : 0U;
+}
+
+/* 逐位累积避免double舍入；只限制线上整数位宽，不替PC判断时序数值是否适用。 */
+static int timing_integer(const char *text, int frequency, int64_t *out)
+{
+    int negative = frequency && *text == '-';
+    if (negative) ++text;
+    if (!*text) return 0;
+    uint64_t limit = frequency ? (uint64_t)INT64_MAX + (unsigned)negative : UINT32_MAX;
+    uint64_t value = 0U;
+    for (; *text; ++text) {
+        if (*text < '0' || *text > '9') return 0;
+        unsigned digit = (unsigned)(*text - '0');
+        if (value > (limit - digit) / 10U) return 0;
+        value = value * 10U + digit;
+    }
+    *out = negative ? (value == (uint64_t)INT64_MAX + 1U ? INT64_MIN : -(int64_t)value) : (int64_t)value;
+    return 1;
+}
+
+/* 必填对象；空项不继承上一请求，也不把空字符串转换成0。失败不修改输出。 */
+static pc_test_json_result_t parse_timing_parameters(const cJSON *timing, pc_timing_parameters_t *out)
+{
     if (!timing) return PC_TEST_JSON_ERROR_MISSING_FIELD;
     if (!cJSON_IsObject(timing)) return PC_TEST_JSON_ERROR_FIELD_TYPE;
+    pc_timing_parameters_t parsed = {.frequency = -1};
     uint32_t seen = 0U;
     for (const cJSON *item = timing->child; item; item = item->next) {
         size_t field;
-        for (field = 0U; field < sizeof(fields) / sizeof(fields[0]); ++field) {
-            if (item->string && strcmp(item->string, fields[field]) == 0) break;
+        for (field = 0U; field < sizeof(s_timing_fields) / sizeof(s_timing_fields[0]); ++field) {
+            if (item->string && strcmp(item->string, s_timing_fields[field]) == 0) break;
         }
-        if (field == sizeof(fields) / sizeof(fields[0]) || (seen & (1U << field)))
+        if (field == sizeof(s_timing_fields) / sizeof(s_timing_fields[0]) || (seen & (1U << field)))
             return PC_TEST_JSON_ERROR_FIELDS;
         if (!cJSON_IsString(item) || !item->valuestring) return PC_TEST_JSON_ERROR_FIELD_TYPE;
         seen |= 1U << field;
+        if (!item->valuestring[0]) continue;
+        int64_t value;
+        if (!timing_integer(item->valuestring, field == PC_TIMING_PARAMETER_COUNT, &value))
+            return PC_TEST_JSON_ERROR_INTEGER_RANGE;
+        if (field == PC_TIMING_PARAMETER_COUNT) parsed.frequency = value;
+        else {
+            parsed.present |= (uint16_t)(1U << field);
+            parsed.values[field] = (uint32_t)value;
+        }
     }
+    *out = parsed;
     return PC_TEST_JSON_OK;
 }
 
@@ -183,7 +219,7 @@ static pc_test_json_result_t parse_start(const cJSON *root,
         return PC_TEST_JSON_ERROR_FIELD_TYPE;
     }
 
-    pc_test_json_result_t result = parse_timing_parameters(timing);
+    pc_test_json_result_t result = parse_timing_parameters(timing, &candidate.timing);
     if (result != PC_TEST_JSON_OK) return result;
     candidate.timing_parameters = timing;
     if (slt) {

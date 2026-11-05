@@ -115,6 +115,7 @@ add_executable(b1
     App/protocol/pc/pc_power_service.c
     App/protocol/common/crc.c
     App/protocol/rk/frame.c
+    App/protocol/rk/idd_session.c
     App/protocol/rk/state_machine.c
     App/tasks/pc/tcp_task.c
     App/tasks/rk/rk_task.c

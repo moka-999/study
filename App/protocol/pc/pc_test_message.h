@@ -22,6 +22,18 @@ typedef enum {
     PC_TEST_JSON_ERROR_POWER_RANGE,      /* 三轨目标不能用TPS寄存器准确表示。 */
 } pc_test_json_result_t;
 
+#define PC_TIMING_PARAMETER_COUNT 15U
+/* PC负责参数单位、器件适用性及安全范围；MCU只检查十进制整数能否无损编码。
+ * present按下方命令映射的序号置位；空串/缺省不置位，frequency缺省为-1。
+ */
+typedef struct {
+    int64_t frequency;
+    uint32_t values[PC_TIMING_PARAMETER_COUNT];
+    uint16_t present;
+} pc_timing_parameters_t;
+/* 0..14映射0x25、0x26、0x28..0x34；越界返回0，不使用未实现的0x27。 */
+uint16_t pc_timing_command(unsigned index);
+
 /*
  * 字符串指针直接引用cJSON树，调用者必须在使用完view后再cJSON_Delete(root)。
  * algorithmIndex为PC测试计划项编号，不是RK算法编号；不自行递增或重排。
@@ -38,6 +50,7 @@ typedef struct {
     uint8_t external_ready;      /* 1=power/bootMode均为null，保持RK现有供电和启动状态。 */
     uint32_t timeout_ms;         /* 最终结果等待毫秒数；0=不限制，非零最多86400000。 */
     const cJSON *timing_parameters; /* 成功解析后借用必填对象；空对象表示默认时序，不代表已应用。 */
+    pc_timing_parameters_t timing; /* 无借用指针的数值副本，发送时不换单位、不取整。 */
 } pc_test_start_view_t;
 
 /** 将已定义的PC启动介质名称转为DAC业务枚举；0成功，-1无效，失败不改输出。 */
@@ -86,7 +99,8 @@ pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type
  *       TPS可编码不等于DDR安全范围已经批准。
  *       algorithmName只校验字符串类型，具体算法支持情况由命令表决定。
  *       TimingParameters必须为对象，默认时序传{}；也可只含已定义字段中的几项，值须为
- *       字符串，空字符串仍保留。仅校验字段和类型，不猜测单位/范围，不向RK下发。
+ *       字符串，空字符串仍保留且不下发该项。Freq为int64，其余15项为uint32十进制整数。
+ *       只检查格式和编码位宽，不判断DDR适用范围；旧tRC/ODT/tRAS/tRFC/BurstLength拒绝。
  *       CASReadLatency与CASWriteLatency分别表示读、写延迟，可单独提供；不接受CASLatency。
  */
 pc_test_json_result_t pc_test_start_parse(const cJSON *root,

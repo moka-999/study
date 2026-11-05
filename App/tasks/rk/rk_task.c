@@ -20,6 +20,10 @@
  * 未取走的块留在UART队列，半帧保留在状态机中，不因达到配额而清空。
  */
 #define RK_RX_BATCH_MAX 8U
+/* 无应答模式留20ms发送间隔，覆盖RK的5ms轮询及主循环处理；不是生效确认。 */
+#define RK_TIMING_GAP_MS 20U
+static TickType_t s_timing_sent_tick;
+static uint8_t s_timing_gap;
 
 typedef struct {
     rk_request_t request;
@@ -131,6 +135,23 @@ static int result_wait_expired(void)
  */
 static void accept_frame(const tlv_frame_t *frame)
 {
+    /* 启动查询独立于算法窗口；收到后立即回复，不等待普通心跳或测试请求。
+     * 算法在途时不替意外重启的RK沿用旧启动参数，也不改变已有结果等待。
+     */
+    if (rk_is_frequency_query(frame)) {
+        if (s_pending.waiting) return;
+        uint32_t token;
+        int64_t value = rk_link_frequency_get(&token);
+        uint8_t wire[TLV_FREQUENCY_FRAME_SIZE];
+        int length = tlv_pack_frequency(value, rk_link_next_sequence(), wire, sizeof(wire));
+        int success = length == TLV_FREQUENCY_FRAME_SIZE && uart_send(0, wire, (uint16_t)length) == 0;
+        rk_link_frequency_note_tx(token, success);
+        return;
+    }
+#if defined(B1_RK_UART)
+    /* 上电过渡期间只开放频率查询；心跳、进度和结果仍须ON，不绕过就绪门禁。 */
+    if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON) return;
+#endif
     /* 普通心跳无需有在途算法；启动编排等待它之后才会投递测试请求。 */
     // 启动就绪模块只检查普通心跳；双TLV进度和最终结果在下方分别处理。
     rk_link_ready_note_rx(frame);
@@ -209,6 +230,10 @@ static void process_request(void)
     // 没有在途等待后，仍须确认旧响应/恢复事件已交付且队列可用，才能取新请求。
     if (s_pending.delivery || s_pending.recovered ||
         rkRequestQueue == NULL || rkResponseQueue == NULL) return;
+    if (s_timing_gap) {
+        if ((TickType_t)(xTaskGetTickCount() - s_timing_sent_tick) < pdMS_TO_TICKS(RK_TIMING_GAP_MS)) return;
+        s_timing_gap = 0U;
+    }
     //准备新的请求
     rk_request_t request;
     // 从队列中获取新的请求 并保存
@@ -217,20 +242,31 @@ static void process_request(void)
     s_pending.request = request;
     // 检查请求的算法号是否有效，以及超时时间是否合理
     uint64_t ticks = (uint64_t)request.timeout_ms * configTICK_RATE_HZ / 1000U;
-    if (rk_command_find_by_id(request.command_id) == NULL ||
+    int timing = rk_is_timing_command(request.command_id);
+    if ((!timing && rk_command_find_by_id(request.command_id) == NULL) ||
+        (timing ? request.timeout_ms != 0U : request.parameter_value != 0U) ||
         (request.timeout_ms != 0U && (ticks == 0U || ticks > INT32_MAX))) {
         finish_request(RK_RESPONSE_INVALID);
         return;
     }
     //分配新的Seq，打包请求帧，并发送到UART
     s_pending.sequence = rk_link_next_sequence();
-    uint8_t wire[TLV_CMD_FRAME_SIZE];
-    int length = tlv_pack_cmd(request.command_id, NULL, 0U,
-                              s_pending.sequence, wire, sizeof(wire));
+    uint8_t wire[TLV_TIMING_FRAME_SIZE];
+    int length = timing ? tlv_pack_timing(request.command_id, request.parameter_value,
+                                        s_pending.sequence, wire, sizeof(wire)) :
+                         tlv_pack_cmd(request.command_id, NULL, 0U,
+                                      s_pending.sequence, wire, sizeof(wire));
     // 检查打包结果和发送结果，如果失败则标记TX_FAILED
-    if (length != TLV_CMD_FRAME_SIZE || uart_send(0, wire, (uint16_t)length) != 0) {
+    if (length != (int)(timing ? TLV_TIMING_FRAME_SIZE : TLV_CMD_FRAME_SIZE) ||
+        uart_send(0, wire, (uint16_t)length) != 0) {
         /* uart_send失败保证未向TX环写入任何字节；不回插队列冒丢失风险。 */
         finish_request(RK_RESPONSE_TX_FAILED);
+        return;
+    }
+    if (timing) {
+        s_timing_sent_tick = xTaskGetTickCount();
+        s_timing_gap = 1U;
+        finish_request(RK_RESPONSE_SENT);
         return;
     }
     // 记录发送时间和最近发送的Seq，标记为等待状态
@@ -242,6 +278,7 @@ static void process_request(void)
 /* B1掉电不静默清结果；未执行请求逐条返回POWER_OFF，不假装完成测试。 */
 static void process_power_off(void)
 {
+    s_timing_gap = 0U;
     if (s_pending.waiting) {
         s_pending.waiting = 0U;
         if (s_pending.timed_out) s_pending.recovered = 1U;
@@ -253,6 +290,14 @@ static void process_power_off(void)
         s_pending.sequence = 0U;
         finish_request(RK_RESPONSE_POWER_OFF);
     }
+}
+#endif
+/* B1启动早期可响应0x35，但不改变电源状态、不提前发送算法或普通心跳。 */
+#if defined(B1_RK_UART)
+static int startup_rx_allowed(void)
+{
+    pwr_ctrl_state_t state = pwr_ctrl_get_state();
+    return state == PWR_CTRL_STATE_WAIT_FIRST_RAIL || state == PWR_CTRL_STATE_WAIT_SECOND_RAIL;
 }
 #endif
 /* last_tick为上次发送尝试的RTOS tick，仅RK任务持有；初值为任务启动时刻。
@@ -297,7 +342,7 @@ void StartRkTask(void *argument)
     for (;;) {
 #if defined(B1_RK_UART)
         // 电源状态不是ON时重置接收状态、处理等待请求，每轮最多丢弃8个接收块。
-        if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON) {
+        if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON && !startup_rx_allowed()) {
             tlv_sm_reset(&stream);
             process_power_off();
             for (unsigned block = 0U; block < RK_RX_BATCH_MAX; ++block) {
@@ -336,7 +381,12 @@ void StartRkTask(void *argument)
         //半帧是否超时
         (void)tlv_sm_check_timeout(&stream, RK_BYTE_TIMEOUT_MS);
         // 推进请求发送、等待时限和内部结果交付。
+#if defined(B1_RK_UART)
+        if (pwr_ctrl_get_state() == PWR_CTRL_STATE_ON) process_request();
+        else process_power_off();
+#else
         process_request();
+#endif
         //到时间发送心跳
         process_heartbeat(&last_heartbeat);
         // 记录RK任务仍在推进，供独立看门狗检查使用；不要求RK实际在线。

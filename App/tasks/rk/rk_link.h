@@ -30,9 +30,10 @@ const rk_command_descriptor_t *rk_command_find_by_name(const char *name);
 
 /* 业务层投递的请求副本；发送帧由RK任务统一组装，调用者不操作UART。 */
 typedef struct {
-    uint16_t command_id;       /* FUNC 1..20或IDD 21..36；当前均只发送编号，不附带动作。 */
+    uint16_t command_id;       /* FUNC/IDD 1..36只发编号；时序为0x25/0x26/0x28..0x34。 */
     uint32_t cookie;           /* 调用方关联令牌，不是任何一侧的线上Seq。 */
     uint32_t timeout_ms;       /* 结果等待毫秒数；0不限时，非0超时也不自动重发测试。 */
+    uint32_t parameter_value;  /* 仅0x25/0x26/0x28..0x34使用；无应答设置，算法必须填0。 */
 } rk_request_t;
 typedef enum {
     RK_RESPONSE_COMPLETE,  /* 完整3/5/7 TLV结果通过接收窗口/算法检查；两颗结论由失败明细确定。 */
@@ -40,7 +41,8 @@ typedef enum {
     RK_RESPONSE_TX_FAILED, /* 本端整帧未能进入UART发送队列；不自动重发。 */
     RK_RESPONSE_INVALID,   /* 已出队请求不合法，例如命令不支持或时限超范围。 */
     RK_RESPONSE_POWER_OFF, /* B1供电状态离开ON；未完成/未发送请求不能算测试通过。 */
-    RK_RESPONSE_RECOVERED  /* 已报TIMEOUT的RK执行状态恢复已知；仅解除等待，不再报测试结果。 */
+    RK_RESPONSE_RECOVERED, /* 已报TIMEOUT的RK执行状态恢复已知；仅解除等待，不再报测试结果。 */
+    RK_RESPONSE_SENT      /* 时序整帧已进入UART队列；不表示RK收到、设置成功或硬件生效。 */
 } rk_response_status_t;
 
 /* 本地业务事件，不直接作为RK帧或PC JSON发送；仅COMPLETE的result有效。
@@ -103,6 +105,16 @@ typedef struct {
 int rk_link_get_rx_diagnostics(rk_rx_diagnostics_t *out);
 /* 新命令/心跳独立u64序号，启动从0递增，临界区保护；失败允许序号间隙。 */
 uint64_t rk_link_next_sequence(void);
+
+/* TCP在本轮启动前绑定频率；token非0，值按PC原数传递，负数由RK解释为默认。
+ * RK任务只读快照及记录发送结果；64位值使用短临界区保护。没有绑定时回复-1。
+ * status返回0未发送、1整帧已入UART、-1发送失败/令牌失效；不是频率生效应答。
+ */
+void rk_link_frequency_begin(uint32_t token, int64_t value);
+int64_t rk_link_frequency_get(uint32_t *token);
+void rk_link_frequency_note_tx(uint32_t token, int success);
+int rk_link_frequency_status(uint32_t token);
+void rk_link_frequency_end(uint32_t token);
 
 /** TCP电源编排上电前调用；token非0、每轮更新。清除旧就绪，0成功/-1参数错误。
  * 不发串口数据。确认必须发生在此后成功发出的MCU心跳Seq窗口内。

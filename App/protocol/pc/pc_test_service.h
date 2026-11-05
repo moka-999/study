@@ -11,7 +11,9 @@
  * start中的字符串/JSON只借用至返回；在途上下文保存静态算法目录及必要字段副本。
  * request_command仅允许0103/FUNC或0108/PARA，名称须属于对应RK算法类别。
  * PARA先只下发编号并等待最终结果；当前统计是执行全程，不是标准IDD有效窗口。
- * 时序参数仅复制到RAM，尚不下发RK；accepted/completed不表示时序已经应用。
+ * Freq在启动查询0x35中回复，目标变化通过既有冷启动流程处理；外部模式不接受非负Freq。
+ * 普通时序在准备完成后逐项发送，不等待RK回应；发送失败停止，不自动重发。
+ * accepted/completed不表示参数已生效；统计在时序发完、算法入队前开始。
  */
 pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response);
@@ -34,8 +36,9 @@ int pc_test_round_update_modes(uint8_t mask, const uint8_t modes[3]);
 pc_dispatch_result_t pc_test_round_end(uint32_t failed_mask,
     uint32_t sequence, pc_dispatch_response_t *response);
 
-/** 010A的start须经专用解析器验证。仅准备电源/Boot；不向RK发送算法，
- * 不等待RK普通心跳、EDK启动或测试进度。completed之后仍占用，直到收到010B。
+/** 010A的start须经专用解析器验证。不向RK发送算法或检查EDK/测试进度。
+ * 默认时序保持原有电源/Boot准备；非负Freq须完成本轮查询回复，非空普通时序须等
+ * 本轮SPL普通心跳后发送；completed只表示本地准备/发送完成，仍占用至010B。
  */
 pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response);

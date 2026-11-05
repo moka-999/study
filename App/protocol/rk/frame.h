@@ -13,20 +13,23 @@
 #define TLV_SYNC_FOOTER       0xA5U  /* 帧末字节：前面的FCRC通过后还要检查它。 */
 
 /* Type是TLV字段类型，不是算法编号，也不是PC命令号。
- * 高4位表示基础类型（1=bool，3=uint8，5=uint16，7=uint32，9=uint64），低12位是字段tag。
+ * 高4位表示基础类型（1=bool，3=uint8，5=uint16，7=uint32，8=int64，9=uint64），低12位是字段tag。
  * 例如发送异或算法：Type=0x5000，ValueLength=2，Value=03 00（CmdID=3）。
  * 下列长度指Value，不包括Type和ValueLength各自占用的2字节。
  */
 #define TLV_TYPE_HEARTBEAT    0x0000U /* 仅接收兼容：空Value心跳；本端发送改为零TLV帧。 */
 #define TLV_TYPE_CMD          0x5000U /* 下行命令容器：起始2字节为小端CmdID。 */
-#define TLV_TYPE_RESULT_CMD   0x5001U /* 上行进度/结果所属算法：小端uint16，Value=2字节。 */
-#define TLV_TYPE_RESULT_ADDR  0x9001U /* 上行结果：小端uint64首错地址，8字节；不单独判PASS。 */
-#define TLV_TYPE_RESULT_DIE   0x3001U /* 失败颗粒编号：uint8、仅0/1，1字节；对应PC mirrorIndex。 */
+#define TLV_TYPE_RESULT_CMD   0x5001U /* 进度/结果所属算法或0x35查询回复编号：u16LE，2字节。 */
+#define TLV_TYPE_RESULT_ADDR  0x9001U /* 上行结果：u64LE、8字节；0表示该颗PASS，须整包核验1017。 */
+#define TLV_TYPE_RESULT_DIE   0x3001U /* 明细颗粒编号：uint8、仅0/1，1字节；对应PC mirrorIndex。 */
 #define TLV_TYPE_RESULT_TIME  0x9002U /* 上行结果：小端uint64测试耗时，8字节，单位ms。 */
 #define TLV_TYPE_PROGRESS     0x3016U /* 与0x5001同帧：uint8进度0..100，1字节，不是完成标志。 */
 #define TLV_TYPE_RESULT_FAIL  0x1017U /* 整体结论：1字节bool，0=两颗PASS、1=至少一颗FAIL。 */
 #define TLV_TYPE_REGISTER_ADDRESS 0x7018U /* tag24寄存器地址：4字节u32LE；地址本身不指定读写操作。 */
 #define TLV_TYPE_PARAM_ACTION 0x101AU /* 独立动作：tag26、1字节bool，1进入、0退出。 */
+#define TLV_TYPE_TIMING_VALUE 0x701BU /* SPL时序设置参数，4字节u32LE。 */
+#define TLV_TYPE_FREQUENCY_VALUE 0x801CU /* 启动频率查询的应答，8字节int64LE；负数保留RK默认。 */
+#define RK_CMD_QUERY_FREQUENCY 0x35U
 
 /* 容量单位均为字节。线上Length只统计TLV区，不能与整帧长度混用。 */
 #define TLV_PAYLOAD_MIN       4U     /* 非空TLV区下限；零TLV心跳另允许Length=0，1..3非法。 */
@@ -38,6 +41,8 @@
 #define TLV_MAX_PER_FRAME     16U    /* 单帧TLV个数上限；未知扩展也占一个名额。 */
 #define TLV_CMD_FRAME_SIZE    22U    /* 无参数命令：外层16+TLV头4+CmdID2。 */
 #define TLV_IDD_ACTION_FRAME_SIZE 27U /* 编号命令22字节再加101A的4字节头和1字节Value。 */
+#define TLV_TIMING_FRAME_SIZE 30U
+#define TLV_FREQUENCY_FRAME_SIZE 34U
 #define TLV_HEARTBEAT_FRAME_SIZE TLV_FRAME_MIN /* 本端普通心跳不附加任何TLV。 */
 
 /* 保留完整Value，不拆除命令号；data_off只在所属帧内有效。 */
@@ -61,7 +66,7 @@ typedef struct {
  */
 typedef struct {
     uint16_t command_id;    /* 0x5001：必须与在途请求的算法编号一致。 */
-    uint64_t error_address; /* 0x9001：首错地址，0表示未提供地址，不能据此判PASS。 */
+    uint64_t error_address; /* 旧详情接口保留原始9001值；正式结论须用最终包解码器核验。 */
     uint64_t elapsed_ms;    /* 0x9002：RK报告的算法耗时，不是MCU通信耗时。 */
     uint8_t die;            /* 0x3001：0=第一颗、1=第二颗，原样输出为PC mirrorIndex。 */
     uint8_t failed;         /* 0x1017：0=PASS、1=FAIL；必须确认该字段实际收到。 */
@@ -69,9 +74,9 @@ typedef struct {
 
 #define RK_RESULT_DIE_COUNT 2U /* 双颗粒结果中的DDR编号仅为0和1，不是B1/B2编号。 */
 
-/* 失败颗粒的一组相邻9001+3001；按die匹配颗粒，不按数组位置猜编号。 */
+/* 最终解码器仅保留非零地址的失败明细；按die匹配颗粒，不按数组位置猜编号。 */
 typedef struct {
-    uint64_t error_address; /* 0x9001的完整64位地址；0也保留，不据此判PASS。 */
+    uint64_t error_address; /* 非零9001的完整64位首错地址；零地址PASS不进入失败数组。 */
     uint8_t die;            /* 紧随该地址的0x3001：0=第一颗、1=第二颗。 */
 } rk_failure_detail_t;
 
@@ -118,6 +123,15 @@ int tlv_pack_cmd(uint16_t cmd, const uint8_t *data, uint16_t data_len,
  */
 int tlv_pack_idd_action(uint16_t cmd, uint8_t action, uint64_t seq,
                         uint8_t *out, uint16_t out_max);
+/* 时序设置支持0x25/0x26/0x28..0x34；5000编号与701B值各为独立TLV。
+ * 成功30字节，参数/容量错误0且不写输出；只限制编码，不校验DDR安全范围。
+ */
+int rk_is_timing_command(uint16_t cmd);
+int tlv_pack_timing(uint16_t cmd, uint32_t value, uint64_t seq, uint8_t *out, uint16_t out_max);
+/* 回复启动查询：5001=0x35＋801C=int64LE；成功34字节，失败0，不把RK查询Seq回显。 */
+int tlv_pack_frequency(int64_t value, uint64_t seq, uint8_t *out, uint16_t out_max);
+/* 只认单个5000、2字节0x35查询；CRC须已由解包器验证，不使用算法Seq窗口。 */
+int rk_is_frequency_query(const tlv_frame_t *frame);
 /* 零TLV心跳固定16字节，Length=0；错误返回0。 */
 int tlv_pack_heartbeat(uint64_t seq, uint8_t *out, uint16_t out_max);
 /* 输入从5A开始的完整帧及真实可读总字节数，不是Seq起点或TLV长度。
@@ -132,7 +146,8 @@ int tlv_unpack(const uint8_t *wire, uint16_t wire_len, tlv_frame_t *out);
  */
 int rk_report_decode(const tlv_frame_t *frame, rk_report_t *report);
 /* 解码一个完整最终包：5001+1017+9002，以及0/1/2组相邻9001+3001。
- * 必需标量各一次；失败颗粒die为0/1且不能重复，字段宽度沿用TLV规则表。
+ * 必需标量各一次；die为0/1且不能重复，包括零地址PASS明细，宽度沿用TLV规则表。
+ * 9001=0表示该颗PASS，非零才计入failures；1017须与非零失败明细是否存在一致。
  * 标量可换序，但地址后必须立即跟所属die；不接受残缺、扩展或矛盾的最终包。
  * 成功0；参数/格式错误-1并清空result。frame/result不重叠，无硬件或JSON副作用。
  * 调用前须由tlv_unpack或状态机检查CRC；此函数不判断Seq、在途算法或业务完成。

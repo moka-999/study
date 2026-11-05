@@ -1,21 +1,21 @@
 # B1 project rules
 
-FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时序传{}，缺失或null回invalidArgument。12个子字段可部分提供字符串，读/写延迟分别为CASReadLatency/CASWriteLatency，不接受旧CASLatency，不继承上一请求；当前只存RAM、不写RK寄存器。旧请求补字段后必须重算Length。
+FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时序传{}，缺失或null回invalidArgument。16个子字段可部分提供字符串：CASReadLatency/CASWriteLatency/Freq/tREFI/tWR/tRTP/tRCD/tRP/tRASmin/tRASmax/tWTR/tRFCmin/tFAW/tCCD/tRRD/BL。Freq为int64，其余为u32十进制整数；PC判定取值及适用性，MCU只检查格式/位宽并原值编码。空串/省略不下发普通时序，Freq缺省回复-1；不继承上一请求。Freq变化走既有冷启动并在0x35查询中回复，普通时序在SPL就绪后无应答逐项发送，再下发算法；发送完成不代表生效。见[接入记录](../test/doc/rk_timing_frequency_20261105.md)。旧请求补字段后必须重算Length。
 
 ## RK协议替换约束（2026-09-23）
 
 - 用户指定RK工程师的`D:/pro/tlv_proto`为基线；与V2共享`frame/state_machine/rk_link/rk_task`，保留B1的UART4/USART2、DMA、OFF门禁和任务存活监测，不引入V2板级GPIO。
 - Type/Length/Seq大端、Value整数和CRC小端；HCRC覆盖前3字节，FCRC覆盖Seq＋TLV。普通心跳Length=0、零TLV、16字节；接收兼容0x0000空Value。非空Length为4..1024，1..3非法。
-- RK上行填最近收到的MCU Seq；MCU只按本次命令至最新成功入UART队列Seq过滤，允许滞后/重复，完整结果还须匹配单在途算法。旧结果被重标当前窗口Seq且同算法时无法区分。
-- 进度严格为5001算法＋3016进度，0..100仅参考。最终为单个3/5/7 TLV包：5001/1017/9002各一次，0～2组相邻9001+3001失败明细，die仅0/1且唯一，1017与数量一致，零地址保留。整包、Seq和算法通过才一次交付；旧四详情/独立FAIL不再汇总，错误包保持busy，无重发。见`../test/doc/rk_dual_die_result_20261010.md`。
+- RK运行期上行填最近收到的MCU Seq；MCU只按本次命令至最新成功入UART队列Seq过滤，允许滞后/重复，完整结果还须匹配单在途算法。旧结果被重标当前窗口Seq且同算法时无法区分。启动频率0x35独立回复5001+801C/int64；上电过渡仅开放此查询，普通时序在SPL就绪后发送5000+701B/u32，不等设置ACK，见`../test/doc/rk_timing_frequency_20261105.md`。
+- 进度严格为5001算法＋3016进度，0..100仅参考。最终为单个3/5/7 TLV包：5001/1017/9002各一次，0～2组相邻9001+3001明细。零地址表示该颗PASS，非零才计入失败数组；die仅0/1且唯一（含PASS明细），1017须与是否存在非零失败地址一致。整包、Seq和算法通过才一次交付；旧四详情/独立FAIL不再汇总，错误包保持busy，无重发。见`../test/doc/rk_protocol_review_20261105.md`。
 - `rkRequestQueue/rkResponseQueue`各8槽，只允许单个在途测试；无500ms自动重传。最终结果超时后暂停后续发送，直到匹配迟到结果或B1断电；队列满不丢完成结果。
 - 1..20为参考文档定义的无参数功能测试，17=MATS；PARA的21..36按idd_0等名称接入编号下发，进入/退出及有效测量窗口待接。0103/0108允许操作者已确认RK测试程序就绪、MCU电源状态为ON的外部启动路径：power/bootMode均null、reboot=false。完整启动另接正式电源编排，缺配置/RK确认仍拒绝；不移植V2模拟旁路。外部路径见`docs/real_test_sync_20260929.md`，完整编排见`../test/doc/power_sequence_20261012.md`。
-- MCU→RK心跳周期为1000ms（1秒），由同一RK任务推进；B1非ON时不发送，发送失败或错过周期不补发。PC心跳仍为请求/应答，不受此周期控制。
-- PC 0105顶层siteId标识B1，measurementData是共享统计；testResults固定两项mirrorIndex=0/1，失败明细按die匹配，未列者PASS。testStatus为0=FAIL/1=PASS；PASS地址null，FAIL保留16位十六进制（含零），真实errorType为空。physicalAddr保留空串，B1始终真实、禁止MATS假FAIL。
+- MCU→RK心跳周期为1000ms（1秒），由同一RK任务推进；B1非ON时不发送，发送失败或错过周期不补发。当前RK收帧后空闲回零TLV心跳、在途回进度，最终结果可主动发送；MCU不再对RK应答回心跳。PC心跳仍为请求/应答，不受此周期控制。
+- PC 0105顶层siteId标识B1，measurementData是共享统计；testResults固定两项mirrorIndex=0/1，非零失败明细按die匹配，零地址及未列者PASS。testStatus为0=FAIL/1=PASS；PASS地址null，FAIL保留16位非零十六进制地址，真实errorType为空。physicalAddr保留空串，B1始终真实、禁止MATS假FAIL。
 - RK字节间超时与V2统一为100ms；仅丢弃超时半帧，不改变算法等待或Seq窗口。B1构建拒绝ENABLE_V2_MATS_FAIL_TEST、电源模拟及旧网关联调开关。
 - 通用同步及离线复跑入口见`../test/doc/v2_b1_sync_20261010.md`；板型差异不靠整目录覆盖消除。
 - B1结果灯不作RK通信指示，PC温控边界不变。代码/离线/构建与B1实板验收分开记录，见`docs/rk_protocol_migration_20260923.md`。
-- 整轮先0106 `{}`；轮内FUNC用0103/0105，PARA用0108/0109，SLT用010A/010B，最后0107提交errorchip数组。镜像0/1/2分别映射LPDDR0/LPDDR1/eMCP，其他编号整包拒绝；070x已删除，合法旧请求回notSupported。0108沿用FUNC开始包字段、类别为parametric，0109只允许MCU方向。0107不取消RK或提前释放占用，只阻止尚未入队的FUNC/PARA及废弃未交付结果。SLT只匹配slt/memtest86，index=null，按参数准备电源/Boot，不等RK心跳或检查EDK；原连接010B确认实际结束，断线后不自动认领旧SLT。0106按B2已知镜像模式显示常温/高温闪，未知灭；轮内局部模式更新显示，0107后仅缓存，不覆盖最终PASS/FAIL。
+- 整轮先0106 `{}`；轮内FUNC用0103/0105，PARA用0108/0109，SLT用010A/010B，最后0107提交errorchip数组。镜像0/1/2分别映射LPDDR0/LPDDR1/eMCP，其他编号整包拒绝；070x已删除，合法旧请求回notSupported。0108沿用FUNC开始包字段、类别为parametric，0109只允许MCU方向。0107不取消RK或提前释放占用，只阻止尚未入队的FUNC/PARA及废弃未交付结果。SLT只匹配slt/memtest86，index=null，默认空时序按参数准备电源/Boot；非负Freq等待本轮查询回复，非空普通时序等SPL普通心跳后发送，不检查EDK；原连接010B确认实际结束，断线后不自动认领旧SLT。0106按B2已知镜像模式显示常温/高温闪，未知灭；轮内局部模式更新显示，0107后仅缓存，不覆盖最终PASS/FAIL。
 
 ## 20260920-2134原理图适配边界
 
@@ -116,7 +116,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
   按类别查找FUNC 1..20或PARA 21..36，不猜未知名称。正式TCP领取完整3/5/7 TLV结果并发送0105或0109，包含testTimeMs、
   首错地址及实际采样的18项均值/峰值/最小值；无有效样本报null，不造假零值。
   真正投递算法前重开统计，不计冷启动等待；结果领取后冻结，0601只读查询不因算法在途返回busy。
-  断线不撤销算法，新连接不领取旧0105/0109。电流快速独立采集，AD保留约240ms三轨高精度扫描；非JEDEC同步IDD窗口。101A动作bool（1进入/0退出）及7018寄存器地址u32LE仅准备编解码，当前任务不自动附加；见同级test/doc/para_integration_20261026.md。
+  断线不撤销算法，新连接不领取旧0105/0109。电流快速独立采集，AD保留约240ms三轨高精度扫描；非JEDEC同步IDD窗口。101A动作已另备内部IDD会话：实际发完进入帧后默认等5ms、逐点保存5s电流、冻结后发退出；正式0108未切换，判限/JSON及UART完成/监测事件绑定待接，见同级test/doc/idd_session_prepare_20261105.md。7018寄存器地址u32LE仍仅编解码准备。
   统计内部保留µA，上报mA允许小数；缓存不重复计数，见同级test/doc/sampling_schedule_20261026.md。
 - PC heartbeat is frozen as client request 0x0002 with `{}` and server response
   0x0001 with `{}` using the MCU connection-local send Seq.
