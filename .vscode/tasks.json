@@ -17,7 +17,7 @@
             ],
             "group": {
                 "kind": "build",
-                "isDefault": true
+                "isDefault": false
             },
             "runOptions": {
                 "instanceLimit": 1
@@ -39,13 +39,13 @@
             ],
             "group": {
                 "kind": "build",
-                "isDefault": false
+                "isDefault": true
             },
             "runOptions": {
                 "instanceLimit": 1
             },
             "problemMatcher": [],
-            "detail": "合并烧录Boot＋App，入口0x08000000、App位于0x08020000；空白板和日常下载使用同一入口。烧录任务会暂停、复位MCU，请先停止测试并断开PC。B1使用真实驱动，复位会关闭RK/DDR。"
+            "detail": "读取板级头中的本地IP，生成并校验完整Boot＋App的b1.elf和b1.bin；只编译，不连接ST-Link。"
         }
     ]
 }

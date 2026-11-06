@@ -29,7 +29,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
 ## 精简Boot＋单App下载（2026-10-28）
 
 - Boot=0x08000000/128KiB，App=0x08020000/1920KiB；合并ELF/BIN一次SWD下载，无OTA、双槽、回滚、30秒确认。0901～0903仍保留编号并回notSupported。
-- Ctrl+Shift+B或`tools/dev.ps1 flash -ConfirmIdle YES`自动编译、内部Flash备份、下载、回读和复位；`build`只编译。产物`build/standalone/Debug/b1.elf|bin`包含Boot＋App；不需要同级Bootloader。B1禁止V2模拟/假FAIL。
+- B1 的 Ctrl+Shift+B 只编译并校验完整 Boot＋App，输出 `build/standalone/Debug/b1.elf` 和 `b1.bin`。上电调试地址集中在 `Core/Inc/board_network_config.h` 的完整 `B1_TEST_IP` 宏中。需要下载时单独选择 VS Code 烧录任务或 `tools/dev.ps1 flash -ConfirmIdle YES`，脚本备份内部Flash、下载、回读并复位。B1禁止V2模拟/假FAIL。
 - SWD Normal/SWrst/950kHz适配四线J5：1=GND、2=SWCLK、3=SWDIO、4=3V3_MCU参考，无NRST，板卡自行供电。下载先停止RK/温控并断开PC。Boot及App均保留RAM初始化前关PC6/PC7/PG11；不修改Option Bytes，不全擦。
 - W25装配按目标板分别确认：当前验板目标未焊MCU W25Q256，`Core/Inc/board_storage_config.h`默认`BOARD_W25_PRESENT=0`，Boot和App跳过器件，0102使用宏定义信息。已装器件板须改1并重编、下载完整Boot＋App，恢复Boot检查/准备FRU、App只读；启用器件时初始化或FRU失败会停在Boot，不进入App。具体镜像及验收状态见同级test的任务清单，不能按IP推断是否装W25。
 - 已装W25时，Boot初始化/迁移FRU并回读，App只读；有效记录不重复擦写，未知有效格式不覆盖。固件版本、旧MCU包/启动日志及RK两块8MiB预留区不访问。无OTA安装器，不把外部固件烧入内部Flash。

@@ -29,13 +29,7 @@
 #include <string.h>
 
 /* USER CODE BEGIN 0 */
-/* 本地调试IP末段：整数1～254，默认201；只用于B2首次配置前。 */
-#ifndef B1_TEST_IP_LAST_OCTET
-#define B1_TEST_IP_LAST_OCTET 201
-#endif
-#if B1_TEST_IP_LAST_OCTET < 1 || B1_TEST_IP_LAST_OCTET > 254
-#error "B1_TEST_IP_LAST_OCTET must be 1..254"
-#endif
+#include "board_network_config.h"
 /* USER CODE END 0 */
 /* Private function prototypes -----------------------------------------------*/
 static void ethernet_link_status_updated(struct netif *netif);
@@ -83,8 +77,13 @@ void MX_LWIP_Init(void)
   GATEWAY_ADDRESS[3] = 1;
 
 /* USER CODE BEGIN IP_ADDRESSES */
-  /* 仅覆盖上电调试地址；B2仍可按testerId和槽位切换正式IP，不写FRU。 */
-  IP_ADDRESS[3] = (uint8_t)B1_TEST_IP_LAST_OCTET;
+  /* lwIP解析结果采用网络字节序，直接复制四字节；本地/24网关沿用同网段的.1。 */
+  if (!ip4addr_aton(B1_TEST_IP, &ipaddr)) {
+    Error_Handler();
+    return;
+  }
+  memcpy(IP_ADDRESS, &ipaddr.addr, sizeof(IP_ADDRESS));
+  memcpy(GATEWAY_ADDRESS, IP_ADDRESS, sizeof(GATEWAY_ADDRESS) - 1U);
 /* USER CODE END IP_ADDRESSES */
 
   /* Initialize the LwIP stack with RTOS */

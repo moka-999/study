@@ -28,12 +28,38 @@ else()
     message(FATAL_ERROR "B1_LOG_DEFAULT_SOURCE must be MCU or RK")
 endif()
 
-# B2尚未通知编号时的本地调试地址；正式动态IP不受该构建参数限制。
-set(B1_TEST_IP_LAST_OCTET 201 CACHE STRING "B1 local test IP last octet: 1..254")
-if(NOT B1_TEST_IP_LAST_OCTET MATCHES "^[1-9][0-9]*$"
-   OR B1_TEST_IP_LAST_OCTET LESS 1 OR B1_TEST_IP_LAST_OCTET GREATER 254)
-    message(FATAL_ERROR "B1_TEST_IP_LAST_OCTET must be an integer from 1 to 254")
+# 板级头是默认IP的唯一来源，改头文件时直接运行Ninja也会重新校验。
+set(network_header "${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/board_network_config.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${network_header}")
+file(STRINGS "${network_header}" ip_definition REGEX "^[ \t]*#[ \t]*define[ \t]+B1_TEST_IP[ \t]+")
+list(LENGTH ip_definition ip_definition_count)
+if(NOT ip_definition_count EQUAL 1 OR NOT ip_definition MATCHES "^[ \t]*#[ \t]*define[ \t]+B1_TEST_IP[ \t]+\"([0-9]+[.][0-9]+[.][0-9]+[.][0-9]+)\"[ \t]*($|//|/[*])")
+    message(FATAL_ERROR "Invalid B1_TEST_IP in ${network_header}: define exactly one quoted IPv4 address")
 endif()
+set(b1_test_ip "${CMAKE_MATCH_1}")
+string(REPLACE "." ";" ip_octets "${b1_test_ip}")
+foreach(octet IN LISTS ip_octets)
+    if(NOT octet MATCHES "^(0|[1-9][0-9]?[0-9]?)$" OR octet GREATER 255)
+        message(FATAL_ERROR "Invalid B1_TEST_IP octet in ${b1_test_ip}: use decimal 0..255 without leading zeros")
+    endif()
+endforeach()
+list(GET ip_octets 3 host_octet)
+if(host_octet LESS 1 OR host_octet GREATER 254)
+    message(FATAL_ERROR "Invalid B1_TEST_IP ${b1_test_ip}: host must be 1..254 for the local /24")
+endif()
+
+# 兼容显式指定末段的既有构建命令；空值表示完整采用板级头。
+set(B1_TEST_IP_LAST_OCTET "" CACHE STRING "Optional B1 local IP last octet: 1..254")
+if(NOT B1_TEST_IP_LAST_OCTET STREQUAL "")
+    if(NOT B1_TEST_IP_LAST_OCTET MATCHES "^[1-9][0-9]?[0-9]?$" OR B1_TEST_IP_LAST_OCTET GREATER 254)
+        message(FATAL_ERROR "B1_TEST_IP_LAST_OCTET must be an integer from 1 to 254")
+    endif()
+    list(REMOVE_AT ip_octets 3)
+    list(APPEND ip_octets "${B1_TEST_IP_LAST_OCTET}")
+    list(JOIN ip_octets "." b1_test_ip)
+    set_property(SOURCE LWIP/App/lwip.c APPEND PROPERTY COMPILE_DEFINITIONS "B1_TEST_IP=\"${b1_test_ip}\"")
+endif()
+file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/b1_test_ip.txt" CONTENT "${b1_test_ip}\n" @ONLY)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -188,11 +214,6 @@ target_compile_definitions(b1 PRIVATE
     CJSON_NESTING_LIMIT=16
     B1_RK_UART=${B1_RK_UART}
     B1_LOG_DEFAULT_SOURCE=${B1_LOG_DEFAULT_VALUE}
-)
-
-# IP宏仅作用于lwIP初始化文件，切换地址时不重编译无关驱动。
-set_property(SOURCE LWIP/App/lwip.c APPEND PROPERTY COMPILE_DEFINITIONS
-    B1_TEST_IP_LAST_OCTET=${B1_TEST_IP_LAST_OCTET}
 )
 
 # 版本宏只作用于持久化布局实现，避免字符串定义散落到业务代码。

@@ -48,6 +48,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, default=ROOT / "build/standalone/Debug")
     args = parser.parse_args()
+    # Ctrl+Shift+B用于只取ELF/BIN；显式烧录任务必须由用户另外选择。
+    tasks = json.loads((ROOT / ".vscode/tasks.json").read_text(encoding="utf-8-sig"))["tasks"]
+    defaults = [task for task in tasks if task.get("group") == {"kind": "build", "isDefault": True}]
+    require(len(defaults) == 1 and defaults[0]["args"][-2:] == ["${workspaceFolder}/tools/dev.ps1", "build"],
+            "B1默认构建任务必须只调用dev.ps1 build")
     text = HEADER.read_text(encoding="utf-8")
     ports = dict(re.findall(r"#define B1_(\w+)_PORT\s+GPIO([A-I])", text))
     pins = {name: int(pin) for name, pin in re.findall(r"#define B1_(\w+)_PIN\s+GPIO_PIN_(\d+)", text)}

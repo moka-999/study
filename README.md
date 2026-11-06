@@ -21,6 +21,8 @@ PC双方发送Seq独立递增、ServiceID固定0的合同已接入：每条连�
 
 ## 构建与检查
 
+在 VS Code 打开本 B1 文件夹。修改 [board_network_config.h](Core/Inc/board_network_config.h) 中的 `#define B1_TEST_IP "192.168.1.201"`，保存后按 **Ctrl+Shift+B**。编译完成后，到 `build/standalone/Debug/` 取 `b1.elf` 和 `b1.bin`。本地使用 /24，网关为同网段的 .1，端口为 8888。
+
 ```powershell
 .\tools\dev.ps1 check
 .\tools\dev.ps1 build
@@ -28,7 +30,7 @@ PC双方发送Seq独立递增、ServiceID固定0的合同已接入：每条连�
 
 产物为`build/standalone/Debug/b1.elf`、`b1.bin`、`b1.manifest.json`及76字节`b1.version.bin`；可选Release。build/check不操作设备，flash才连接并复位MCU。
 
-两块B1同时调试时，分别构建不同IP的完整ELF：
+批量构建时也可显式覆盖末段。以下示例使用板级头的默认网段：
 
 ```powershell
 .\tools\dev.ps1 build -TestIpLastOctet 201
@@ -40,7 +42,7 @@ PC双方发送Seq独立递增、ServiceID固定0的合同已接入：每条连�
 | `192.168.1.201:8888` | `build/standalone/Debug/b1_192.168.1.201.elf` |
 | `192.168.1.202:8888` | `build/standalone/Debug-ip202/b1_192.168.1.202.elf` |
 
-`-TestIpLastOctet`允许1～254，未传仍为201；202使用独立构建目录。一键下载202时同样添加`-TestIpLastOctet 202`，默认Ctrl+Shift+B仍为201。各板MAC由自身UID生成；B2成功通知编号后仍按正式规则改IP，不写FRU。两份文件分别烧到两块板，PC在同一子网分别连接；不能给两块板烧同一默认IP后直接并网。
+`-TestIpLastOctet`允许1～254，省略时采用头文件的完整地址。显式选择202仍使用独立构建目录。各板MAC由自身UID生成；B2成功配置编号后按正式规则改IP。多板同时调试时分配不同地址。
 
 UART4固定连接RK UART0_M0运行协议，`B1_RK_UART`只允许4；USART2连接RK UART2_M0_DEBUG接收日志，USART1连接串口助手。三路RX在RTOS运行后启动；RK未上电时UART4不主动发命令或心跳，日志接收不修改电源门禁。
 
@@ -55,7 +57,7 @@ USART1、USART2当前均为115200/8N1、无流控（RK调试端实际波特率�
 
 ## 空白板和日常一键烧录
 
-在VS Code打开本B1文件夹，停止RK测试/温控并断开PC，接好ST-Link和板卡电源，结束其它调试会话后按 **Ctrl+Shift+B**。脚本自动编译、检查、备份内部2MiB Flash、直接写BIN并回读、复位运行。空白板与原OTA板同一入口，不用网线或.ota，不需单独下载Boot，不等30秒确认。
+需要下载时，停止RK测试/温控并断开PC，接好ST-Link和板卡电源，结束其它调试会话。在 VS Code 的“终端 → 运行任务”中选择 **⚡ B1 一键编译烧录（ST-Link，会复位）**。脚本编译、检查、备份内部2MiB Flash、写BIN、回读并复位。空白板与原OTA板使用同一入口。
 
 ```powershell
 .\tools\dev.ps1 flash -ConfirmIdle YES

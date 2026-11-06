@@ -6,7 +6,7 @@
     [string]$Version = '',
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Debug',
-    [ValidateRange(1, 254)][int]$TestIpLastOctet = 201,
+    [ValidateRange(1, 254)][int]$TestIpLastOctet,
     [string]$Serial = '',
     [ValidateSet('NO', 'YES')][string]$ConfirmIdle = 'NO'
 )
@@ -14,9 +14,13 @@
 $ErrorActionPreference = 'Stop'
 # 保留UTF-8 BOM，兼容Windows PowerShell 5读取中文注释。
 $repo = Split-Path -Parent $PSScriptRoot
-# 默认201沿用日常目录；其他地址独立构建，避免覆盖另一块板的镜像。
+# 日常快捷键始终输出到固定目录；显式末段沿用已有分板目录。
 $buildName = $Configuration
-if ($TestIpLastOctet -ne 201) { $buildName += "-ip$TestIpLastOctet" }
+$ipOverride = ''
+if ($PSBoundParameters.ContainsKey('TestIpLastOctet')) {
+    $ipOverride = [string]$TestIpLastOctet
+    if ($TestIpLastOctet -ne 201) { $buildName += "-ip$TestIpLastOctet" }
+}
 $buildDir = Join-Path $repo "build/standalone/$buildName"
 $cache = Join-Path $buildDir 'CMakeCache.txt'
 
@@ -85,7 +89,7 @@ $cmakeArgs = @(
     '-S', $repo, '-B', $buildDir, '-G', 'Ninja',
     "-DCMAKE_BUILD_TYPE=$Configuration", "-DCMAKE_MAKE_PROGRAM=$ninja",
     "-DPython3_EXECUTABLE=$python",
-    "-DB1_TEST_IP_LAST_OCTET=$TestIpLastOctet"
+    "-DB1_TEST_IP_LAST_OCTET=$ipOverride"
 )
 $compiler = Find-BundledExe 'gnu-tools-for-stm32' 'arm-none-eabi-gcc.exe' 'CMAKE_C_COMPILER'
 $env:PATH = "$(Split-Path -Parent $compiler);$env:PATH"
@@ -116,10 +120,11 @@ $image = Join-Path $buildDir 'b1.bin'
 & $python -B -X utf8 (Join-Path $PSScriptRoot 'direct_flash.py') --image $image --target b1-h743 --check-only
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # 在镜像地址检查通过后导出带IP的完整ELF，方便两块B1分别烧录。
-$namedElf = Join-Path $buildDir "b1_192.168.1.$TestIpLastOctet.elf"
+$testIp = (Get-Content -LiteralPath (Join-Path $buildDir 'b1_test_ip.txt') -Raw).Trim()
+$namedElf = Join-Path $buildDir "b1_$testIp.elf"
 Copy-Item -LiteralPath (Join-Path $buildDir 'b1.elf') -Destination $namedElf -Force
-Write-Host "B1本地调试地址：192.168.1.${TestIpLastOctet}:8888；B2配置后仍可动态切换。"
-Write-Host "完整Boot+App ELF：$namedElf"
+Write-Host "B1本地调试地址：${testIp}:8888；B2配置后仍可动态切换。"
+Write-Host "完整Boot+App：$(Join-Path $buildDir 'b1.elf')、$image"
 if ($Task -eq 'flash') {
     $download = @('-B', '-X', 'utf8', (Join-Path $PSScriptRoot 'direct_flash.py'),
         '--image', $image, '--target', 'b1-h743', '--confirm-idle', 'YES',
