@@ -15,7 +15,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
 - RK字节间超时与V2统一为100ms；仅丢弃超时半帧，不改变算法等待或Seq窗口。B1构建拒绝ENABLE_V2_MATS_FAIL_TEST、电源模拟及旧网关联调开关。
 - 通用同步及离线复跑入口见`../test/doc/v2_b1_sync_20261010.md`；板型差异不靠整目录覆盖消除。
 - B1结果灯不作RK通信指示，PC温控边界不变。代码/离线/构建与B1实板验收分开记录，见`docs/rk_protocol_migration_20260923.md`。
-- 整轮先0106 `{}`；轮内FUNC用0103/0105，PARA用0108/0109，SLT用010A/010B，最后0107提交errorchip数组。镜像0/1/2分别映射LPDDR0/LPDDR1/eMCP，其他编号整包拒绝；070x已删除，合法旧请求回notSupported。0108沿用FUNC开始包字段、类别为parametric，0109只允许MCU方向。0107不取消RK或提前释放占用，只阻止尚未入队的FUNC/PARA及废弃未交付结果。SLT只匹配slt/memtest86，index=null，默认空时序按参数准备电源/Boot；非负Freq等待本轮查询回复，非空普通时序等SPL普通心跳后发送，不检查EDK；原连接010B确认实际结束，断线后不自动认领旧SLT。0106按B2已知镜像模式显示常温/高温闪，未知灭；轮内局部模式更新显示，0107后仅缓存，不覆盖最终PASS/FAIL。
+- 整轮先0106 `{}`；轮内FUNC用0103/0105，PARA用0108/0109，SLT用010A/010B，最后0107提交errorchip数组。镜像0/1/2分别映射LPDDR0/LPDDR1/eMCP，其他编号整包拒绝；070x已删除，合法旧请求回notSupported。0108沿用FUNC开始包字段、类别为parametric，0109只允许MCU方向。0107不取消RK或提前释放占用，只阻止尚未入队的FUNC/PARA及废弃未交付结果。SLT只匹配slt/memtest86，index=null，默认空时序按参数准备电源/Boot；仅在RK查询时回复本轮Freq，未查询也继续，非空普通时序等SPL普通心跳后发送，不检查EDK；原连接010B确认实际结束，断线后不自动认领旧SLT。0106按B2已知镜像模式显示常温/高温闪，未知灭；轮内局部模式更新显示，0107后仅缓存，不覆盖最终PASS/FAIL。
 
 ## 20260920-2134原理图适配边界
 
