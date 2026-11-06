@@ -1737,15 +1737,35 @@ static void frequency_start_check(void)
         CHECK(power_on_calls == on + (run == 1U ? 0U : 1U));
         result_is(0U, NULL, "SITE-7");
     }
-    /* 非默认频率未得到本轮查询时，不以普通心跳冒充已经回复频率。 */
-    configure_power(); start_expect(json, NULL); cold_to_ready(); confirm_power(1); step_power(0U);
+    /* 复现PC的完整gtest-rand请求：只注入普通心跳及本地发送事件，全程不注入0x35。 */
+    const char request[] = "{\"algorithmType\":\"functional\",\"algorithmName\":\"gtest-rand\",\"algorithmIndex\":1,"
+        "\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"1100\"},"
+        "\"TimingParameters\":{\"Freq\":\"2133\",\"CASReadLatency\":\"36\",\"CASWriteLatency\":\"36\","
+        "\"tREFI\":\"4\",\"tWR\":\"40\",\"tRTP\":\"16\",\"tRCD\":\"38\",\"tRP\":\"40\","
+        "\"tRASmin\":\"81\",\"tRASmax\":\"160\",\"tWTR\":\"20\",\"tRFCmin\":\"729\","
+        "\"tFAW\":\"77\",\"tCCD\":\"16\",\"tRRD\":\"16\",\"BL\":\"8\"},\"reboot\":true,\"bootMode\":\"emmc\"}";
+    configure_power();
     unsigned before = queue_calls;
+    round_command(PC_COMMAND_START_TEST, request, "accepted", NULL);
+    CHECK(rk_link_frequency_get(NULL) == 2133);
+    cold_to_ready();
+    CHECK(pc_dispatch_next_response(105U, &response) == 0 && queue_calls == before);
+    confirm_power(1); step_power(0U);
     CHECK(pc_dispatch_next_response(105U, &response) == 0);
-    mock_tick += 60000U;
-    CHECK(pc_dispatch_next_response(105U, &response) == 1 && queue_calls == before);
+    CHECK(queued_request.command_id == 0x25U && queued_request.parameter_value == 36U);
+    timing_sent(14U);
+    CHECK(queued_request.command_id == 0x34U && queued_request.parameter_value == 8U);
+    queued_response = (rk_response_t){.cookie = queued_request.cookie, .status = RK_RESPONSE_SENT};
+    response_ready = 1;
+    CHECK(pc_dispatch_next_response(105U, &response) == 1);
     cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 105U);
-    string_is(body, "errorCode", "timeout"); cJSON_Delete(body);
-    CHECK(!pc_test_service_busy());
+    string_is(body, "status", "completed"); number_is(body, "algorithmIndex", 1U); cJSON_Delete(body);
+    CHECK(queue_calls == before + 16U && queued_request.command_id == 2U);
+    inject(RK_RESPONSE_COMPLETE, 0U);
+    CHECK(pc_dispatch_next_response(106U, &response) == 1 && !pc_test_service_busy());
+    body = decode(&response, PC_COMMAND_TEST_RESULT_REPORT, 106U);
+    string_is(body, "algorithmName", "gtest-rand"); cJSON_Delete(body);
+    before = queue_calls;
     start_expect(json, NULL);
     CHECK(pc_power_service_diagnostic()->phase == PC_POWER_REQUEST_OFF);
     uint32_t token; (void)rk_link_frequency_get(&token); rk_link_frequency_note_tx(token, 0);
@@ -1755,7 +1775,7 @@ static void frequency_start_check(void)
     string_is(body, "errorCode", "txFailed"); cJSON_Delete(body);
     CHECK(!pc_test_service_busy() && queue_calls == before);
     cJSON_free(json); cJSON_Delete(root); round_end();
-    message("PASS: startup frequency cache before power, unchanged frequency reuses boot, changed frequency cold-starts, missed query/TX failure gate algorithms\n");
+    message("PASS: optional 0x35, gtest-rand completed and 0105 without query, cold boot reuse and frequency TX failure\n");
 }
 #endif
 
@@ -1784,10 +1804,7 @@ static void slt_timing_check(void)
         pc_dispatch_poll();
         CHECK(pc_dispatch_next_response(81U, &response) == 0 && queue_calls == before);
     }
-    uint32_t token;
-    CHECK(rk_link_frequency_get(&token) == 1600);
-    rk_link_frequency_note_tx(token, 1);
-    CHECK(pc_dispatch_next_response(81U, &response) == 0 && queue_calls == before);
+    CHECK(rk_link_frequency_get(NULL) == 1600);
     tlv_frame_t heartbeat = {.sequence = rk_link_next_sequence()};
     rk_link_ready_note_tx(heartbeat.sequence); rk_link_ready_note_rx(&heartbeat);
     CHECK(pc_dispatch_next_response(81U, &response) == 0);
@@ -1802,7 +1819,7 @@ static void slt_timing_check(void)
     CHECK(queue_calls == before + 2U && pc_test_service_busy());
     round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "completed", NULL);
     CHECK(!pc_test_service_busy()); round_end();
-    message("PASS: SLT with parameters waits frequency/SPL then sends timing only; PC 010B owns completion\n");
+    message("PASS: SLT sends timing after SPL heartbeat without a frequency query; PC 010B owns completion\n");
 }
 #endif
 
@@ -1920,13 +1937,21 @@ static void slt_flow_check(void)
 #endif
         cJSON *start = cJSON_Parse(SLT_START); CHECK(start);
         CHECK(cJSON_ReplaceItemInObjectCaseSensitive(start, "reboot", cJSON_CreateBool(reboot)));
+        if (reboot) CHECK(cJSON_AddStringToObject(cJSON_GetObjectItemCaseSensitive(start, "TimingParameters"), "Freq", "2133"));
         char *json = cJSON_PrintUnformatted(start); CHECK(json);
         round_command(PC_COMMAND_SLT_START, json, "accepted", NULL);
         CHECK(cJSON_IsObject(pc_test_service_timing_parameters()) &&
-              pc_test_service_timing_parameters()->child == NULL);
+              cJSON_GetArraySize(pc_test_service_timing_parameters()) == (int)reboot);
         round_command(PC_COMMAND_SLT_START, json, "failed", "busy");
         cJSON_free(json); cJSON_Delete(start);
         slt_complete(0);
+        /* 仅填Freq时可先完成电源准备；DDR随后查询仍取本次值，010B收尾后恢复默认。 */
+        if (reboot) {
+            uint32_t token;
+            CHECK(rk_link_frequency_get(&token) == 2133 && token && rk_link_frequency_status(token) == 0);
+            rk_link_frequency_note_tx(token, 1);
+            CHECK(pc_dispatch_next_response(81U, &response) == 0);
+        }
 #if defined(PC_POWER_SEQUENCE_TEST)
         CHECK(power_on_calls == previous_on + 1U && power_off_calls == previous_off + 1U);
         CHECK(boot_calls == previous_boot + 1U && rk_arms == arms);
@@ -1934,7 +1959,7 @@ static void slt_flow_check(void)
         CHECK(v2_power_sim_cycles() == previous_cycles + 1U);
 #endif
         round_command(PC_COMMAND_SLT_RESULT, SLT_RESULT, "completed", NULL);
-        CHECK(!pc_test_service_busy());
+        CHECK(!pc_test_service_busy() && rk_link_frequency_get(NULL) == -1);
     }
     /* 0107提前结束不伪造SLT结束，也不取消已受理的启动；迟到010B仅回收占用。 */
 #if defined(PC_POWER_SEQUENCE_TEST)

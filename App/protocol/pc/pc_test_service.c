@@ -58,7 +58,7 @@ static struct {
     cJSON *timing_parameters;   /* 自有RAM原文副本；发送完成不代表RK已经应用。 */
     pc_timing_parameters_t timing;
     uint8_t timing_cursor, timing_inflight, configuring;
-    uint8_t frequency_required, ready_required, report_prepared;
+    uint8_t check_frequency_tx, ready_required, report_prepared;
     uint32_t startup_since_ms;
 } s_test;
 static uint8_t s_round_active; /* 仅属于当前TCP连接；算法占用与轮次是否收尾分开记录。 */
@@ -178,6 +178,7 @@ pc_dispatch_result_t pc_test_round_end(uint32_t failed_mask,
         return operation_response(PC_COMMAND_ROUND_END, NULL, sequence, "failed", "executionFailed", response);
     s_round_active = 0U;
     s_test.discarded = 1U;
+    rk_link_frequency_end(s_test.cookie);
     if (s_test.active && !s_test.slt) {
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
         v2_power_sim_test_end(0);
@@ -274,7 +275,7 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
     rk_request_t request = {algorithm->command_id, cookie, start->timeout_ms, 0U};
     const char *error = NULL;
     uint8_t preparing = 0U, cursor = 0U, inflight = 0U, booting = 0U;
-    uint8_t frequency_required = 0U, ready_required = 0U;
+    uint8_t ready_required = 0U;
 #if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
     if (!start->external_ready) {
         pc_power_target_t target = {0};
@@ -289,9 +290,10 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
         booting = preparing && pc_power_service_diagnostic()->phase != PC_POWER_DONE;
     } else
 #else
-    /* 电源模拟不会重启真实RK；提供Freq时仍须等真实RK本轮查询，不能模拟应用成功。 */
+    /* 模拟电源时也只按查询回复Freq；本次还要发普通时序才等真实SPL心跳。 */
     if (!start->external_ready && start->timing.frequency >= 0) {
-        booting = frequency_required = ready_required = 1U;
+        booting = 1U;
+        ready_required = start->timing.present != 0U;
     } else
 #endif
     {
@@ -325,7 +327,7 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
     s_test.timing_inflight = inflight;
     s_test.configuring = inflight || booting;
     s_test.report_prepared = preparing;
-    s_test.frequency_required = frequency_required || (booting && start->timing.frequency >= 0);
+    s_test.check_frequency_tx = booting && start->timing.frequency >= 0;
     s_test.ready_required = ready_required;
     s_test.startup_since_ms = ready_required ? HAL_GetTick() : 0U;
     if (!start->external_ready) s_last_frequency = start->timing.frequency;
@@ -378,7 +380,7 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     s_test.timing = start->timing;
     s_test.timing_cursor = s_test.timing_inflight = 0U;
     s_test.configuring = s_test.report_prepared = 1U;
-    s_test.frequency_required = start->timing.frequency >= 0;
+    s_test.check_frequency_tx = start->timing.frequency >= 0;
     s_test.ready_required = start->timing.present != 0U;
     s_last_frequency = start->timing.frequency;
     rk_link_frequency_begin(cookie, start->timing.frequency);
@@ -399,6 +401,7 @@ pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *result,
     int ready = operation_response(PC_COMMAND_SLT_RESULT, NULL, sequence,
         error ? "failed" : "completed", error, response);
     if (!error && ready == PC_DISPATCH_RESPONSE_READY) {
+        rk_link_frequency_end(s_test.cookie);
         s_test.active = s_test.owner_connected = 0U;
         /* PC已提供实际结束通知；不改0107的汇总灯，也不把报告转发回PC。 */
     }
@@ -408,7 +411,7 @@ pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *result,
 /* 启动/发送错误是业务失败，不伪造芯片FAIL。部分已发送设置不回滚、不自动重发。 */
 static int preparation_failed(const char *error, uint32_t sequence, pc_dispatch_response_t *response)
 {
-    if (s_test.frequency_required) pc_power_service_invalidate();
+    if (s_test.check_frequency_tx) pc_power_service_invalidate();
     rk_link_frequency_end(s_test.cookie);
     /* SLT已完成上电后仍可能自行运行；配置失败不能冒充PC的010B结束通知。 */
     s_test.active = s_test.slt && !s_test.preparing;
@@ -429,7 +432,7 @@ static int poll_preparation(uint32_t sequence, pc_dispatch_response_t *response)
         if (error) return preparation_failed(error, sequence, response);
         s_test.preparing = 0U;
         s_test.configuring = 1U;
-        if (s_test.frequency_required || s_test.ready_required) s_test.startup_since_ms = HAL_GetTick();
+        if (s_test.ready_required) s_test.startup_since_ms = HAL_GetTick();
     }
     if (s_test.timing_inflight) {
         rk_response_t event;
@@ -441,7 +444,7 @@ static int poll_preparation(uint32_t sequence, pc_dispatch_response_t *response)
     }
     /* 丢弃后收完已入队设置，不继续投递；SLT仍保留原有占用，不自动取消其执行。 */
     if (!s_test.owner_connected || s_test.discarded) {
-        if (s_test.frequency_required) pc_power_service_invalidate();
+        if (s_test.check_frequency_tx) pc_power_service_invalidate();
         rk_link_frequency_end(s_test.cookie);
         s_test.configuring = 0U;
         if (!s_test.slt) s_test.active = 0U;
@@ -452,19 +455,22 @@ static int poll_preparation(uint32_t sequence, pc_dispatch_response_t *response)
     if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON)
         return preparation_failed("powerOff", sequence, response);
 #endif
-    if (s_test.frequency_required || s_test.ready_required) {
-        int frequency = s_test.frequency_required ? rk_link_frequency_status(s_test.cookie) : 1;
-        int ready = s_test.ready_required ? rk_link_ready_poll(s_test.cookie) : 1;
-        if (frequency < 0) return preparation_failed("txFailed", sequence, response);
+    /* 0表示RK尚未查询，可继续；只有实际回复发送失败才终止本次准备。 */
+    if (s_test.check_frequency_tx && rk_link_frequency_status(s_test.cookie) < 0)
+        return preparation_failed("txFailed", sequence, response);
+    if (s_test.ready_required) {
+        int ready = rk_link_ready_poll(s_test.cookie);
         if (ready < 0) return preparation_failed("notReady", sequence, response);
-        if (!frequency || !ready) {
+        if (!ready) {
             if ((uint32_t)(HAL_GetTick() - s_test.startup_since_ms) >= PC_CONFIG_STARTUP_TIMEOUT_MS)
                 return preparation_failed("timeout", sequence, response);
             return 0;
         }
-        s_test.frequency_required = s_test.ready_required = 0U;
+        s_test.ready_required = 0U;
     }
-    rk_link_frequency_end(s_test.cookie);
+    s_test.check_frequency_tx = 0U;
+    /* 无普通时序的SLT可在DDR查询前向PC报告准备完成，保留本次Freq至收尾。 */
+    if (!s_test.slt || s_test.timing.present) rk_link_frequency_end(s_test.cookie);
     unsigned next = s_test.timing_cursor;
     while (next < PC_TIMING_PARAMETER_COUNT && !(s_test.timing.present & (1U << next))) ++next;
     if (next < PC_TIMING_PARAMETER_COUNT) {
@@ -590,6 +596,7 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
 
 void pc_test_service_disconnected(void)
 {
+    rk_link_frequency_end(s_test.cookie);
     s_round_active = 0U;
     s_test.discarded = 1U;
     s_test.owner_connected = 0U;

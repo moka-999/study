@@ -252,7 +252,7 @@ TimingParameters子字段均为可选字符串，可只填部分项或空字符�
 | tRRD | string | 行激活间隔 |
 | BL | string | 突发长度 |
 
-完整启动顺序为缓存参数 → 原电源/Boot流程 → DDR阶段回复Freq → SPL就绪 → 逐项发送其他时序 → 算法。Freq目标变化须冷启动；普通时序变化本身不要求重启。设置暂不等待RK回应；发送失败停止后续项。外部已启动模式可发普通时序，非负Freq回invalidState。详见[接入记录](rk_timing_frequency_20261105.md)。
+完整启动先缓存参数，再按既有电源/Boot流程启动。DDR阶段若RK查询就回复Freq。收到本轮SPL普通心跳后即可逐项发送其他时序并投递算法，即使RK全程没有查询Freq也照常推进。Freq目标变化须冷启动；普通时序变化本身不要求重启。设置暂不等待RK回应；发送失败停止后续项。外部已启动模式可发普通时序，非负Freq回invalidState。详见[接入记录](rk_timing_frequency_20261105.md)。
 
 #### 电压与重启规则
 
@@ -515,7 +515,7 @@ PC→MCU。启动整次SLT，MCU准备电源和EDK启动介质；具体算法及
 
 - 七个根字段全部必填；TimingParameters默认填{}，缺失或null回invalidArgument。不带timeoutMs；电压范围、步进和安全责任沿用4.7。
 - 应答：0006 accepted → completed，requestCommandId=266、algorithmIndex=null；completed仅表示电源/Boot准备及本轮参数发送完成，不证明参数生效或SLT测试完成。
-- 默认空时序不等待RK；非负Freq须完成本轮查询回复，非空普通时序须等本轮SPL普通心跳后发送，额外启动等待上限60秒。MCU不下发串口算法，也不检查EDK或报告服务；上电后配置失败仍保留SLT占用，须原连接010B确认实际结束。
+- 仅填Freq或使用默认空时序时，电源/Boot准备完成即可回completed。RK查询时才回复本轮Freq。若有普通时序，须等本轮SPL普通心跳后逐项发送，等待心跳上限60秒。MCU不下发串口算法，也不检查EDK或报告服务；上电后配置失败仍保留SLT占用，须原连接010B确认实际结束。
 - PC确认实际启动、取得SLT报告后发送010B；示例emmc须与实际EDK部署位置一致。
 
 ### 4.15 SLT结果回送（0x010B）
