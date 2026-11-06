@@ -33,8 +33,15 @@ static uint8_t s_skip_lf;
 /* 一块输入最多加上上一块暂存的7字节前缀；未送完时不继续取控制台输入。 */
 static uint8_t s_rk_pending[UART_RX_BUF_SIZE + sizeof(s_rk_escape) - 1U];
 static size_t s_rk_pending_length;
-/* 调试器可读取本次开机的TX拥塞丢字节数；主动隐藏另一来源不计为错误。 */
+/* 已选来源因出口拥塞或控制回复优先而丢掉的字节；主动隐藏另一来源不计。 */
 static volatile uint32_t s_dropped_bytes;
+
+/* 调用方持有短临界区；多任务共享累计值，达到上限后保持。 */
+static void count_drop(size_t bytes)
+{
+    s_dropped_bytes = bytes > UINT32_MAX - s_dropped_bytes ?
+                      UINT32_MAX : s_dropped_bytes + (uint32_t)bytes;
+}
 
 /* 调用方已进入短临界区；USART1发送取锁必须为0等待，避免屏蔽中断时睡眠。 */
 static void flush_reply(void)
@@ -51,30 +58,26 @@ static void flush_reply(void)
     }
 }
 
-static size_t write_source(uint8_t source, const uint8_t *data, size_t length)
+static size_t write_source(uint8_t source, const uint8_t *data, size_t length, size_t chunk_limit)
 {
     if (data == NULL || __get_IPSR() != 0U) return 0U;
     size_t offset = 0U;
     while (offset < length) {
-        uint16_t chunk = (uint16_t)((length - offset > LOG_TX_CHUNK_SIZE) ?
-                                   LOG_TX_CHUNK_SIZE : length - offset);
+        uint16_t chunk = (uint16_t)((length - offset > chunk_limit) ? chunk_limit : length - offset);
         /* 将来源检查与排队作为一个原子操作，防止切换确认后混入旧来源。
-         * 每次最多复制128字节，不在临界区等待发送完成。 */
+         * 普通流每次最多复制128字节，协议记录单次最多256字节，不等待TX排空。 */
         taskENTER_CRITICAL();
         if (!s_started) {
             taskEXIT_CRITICAL();
             return 0U;
         }
         if (s_source != source || s_reply != NULL) {
+            if (s_source == source) count_drop(length - offset);
             taskEXIT_CRITICAL();
             return length; /* 未选中或等待控制回复时，日志不缓存、不补发。 */
         }
         int status = uart_send(UART_PORT_CONSOLE, (uint8_t *)data + offset, chunk);
-        if (status != IF_OK) {
-            size_t lost = length - offset;
-            s_dropped_bytes = lost > UINT32_MAX - s_dropped_bytes ?
-                              UINT32_MAX : s_dropped_bytes + (uint32_t)lost;
-        }
+        if (status != IF_OK) count_drop(length - offset);
         taskEXIT_CRITICAL();
         if (status != IF_OK) break;
         offset += chunk;
@@ -84,8 +87,24 @@ static size_t write_source(uint8_t source, const uint8_t *data, size_t length)
 
 size_t log_console_write(const char *text, size_t length)
 {
-    return write_source(LOG_SOURCE_MCU, (const uint8_t *)text, length);
+    return write_source(LOG_SOURCE_MCU, (const uint8_t *)text, length, LOG_TX_CHUNK_SIZE);
 }
+
+int log_console_mcu_selected(void)
+{
+    taskENTER_CRITICAL();
+    int selected = s_started && s_source == LOG_SOURCE_MCU;
+    taskEXIT_CRITICAL();
+    return selected;
+}
+
+void log_console_write_record(const char *text, size_t length)
+{
+    if (length && length <= LOG_CONSOLE_RECORD_SIZE)
+        (void)write_source(LOG_SOURCE_MCU, (const uint8_t *)text, length, LOG_CONSOLE_RECORD_SIZE);
+}
+
+uint32_t log_console_dropped_bytes(void) { return s_dropped_bytes; }
 
 void log_console_start(void)
 {
@@ -288,7 +307,7 @@ void log_console_process(void)
 
     /* MCU模式仍持续消费RK日志，避免切换时回放积压或堵住接收恢复。 */
     length = uart_poll_rx(UART_PORT_RK_DEBUG, buffer, sizeof(buffer));
-    if (length > 0) (void)write_source(LOG_SOURCE_RK, buffer, (size_t)length);
+    if (length > 0) (void)write_source(LOG_SOURCE_RK, buffer, (size_t)length, LOG_TX_CHUNK_SIZE);
 }
 
 int log_console_take_status_request(void)

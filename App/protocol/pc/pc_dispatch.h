@@ -27,6 +27,8 @@ typedef enum {
 typedef struct {
     uint8_t data[PC_DISPATCH_RESPONSE_CAPACITY]; /* 18字节头+JSON正文。 */
     uint32_t length;                           /* data中的有效字节数。 */
+    uint16_t command_id, request_command;      /* 发送诊断：本帧命令；仅0006使用原请求号。 */
+    uint32_t result_index;                     /* 仅0105/0109使用，不额外写入线上帧。 */
 } pc_dispatch_response_t;
 
 /**

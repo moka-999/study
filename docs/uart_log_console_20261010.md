@@ -91,3 +91,20 @@ B1 OTA Release 双槽验证通过：145132 字节、1468 处地址修正，A1→
 本次新增`start rk`/`end rk`，复用现有电源服务；不修改电源驱动、轨间延时、RK协议或V2运行代码。实际C/QEMU回归已覆盖两种日志默认值、分片/换行/断流、重复输入、发送拥塞、模式隔离，以及标称训练目标、fspiM1、ON后冷重启、正常下电、PC互斥、断线继续和I/O失败/超时。PC整轮、原PC业务、B1完整`check`、Debug构建及Boot＋App文件布局检查通过；合并BIN为386660字节，CRC32为`34EC6C89`。新ELF位于`D:/pro/test/output/b1-console-power-20261105/b1.elf`；安装及真实启动由用户在设备空闲时验证，本轮未连接或烧录设备。
 
 复跑：V2共用脚本`tests/verify_uart_idd_c.py --app-root D:/pro/b1 --compiler <arm-none-eabi-gcc.exe> --log-default 0`（另测1），以及`tests/verify_pc_rk_service.py --app-root D:/pro/b1 --power-sequence`。两项分别运行正式串口解析/单槽交接和正式PC电源服务，硬件、调度器端口为测试桩。
+
+## 7. 在 `log mcu` 看 PC 和 RK 测试协议
+
+USART1 输入 `log mcu` 并换行。时间为 MCU 上电后的毫秒数，RX/TX 均从 MCU 看。`log rk` 继续显示 USART2 的 RK 调试台。
+
+| 串口标签 | 读法 |
+|---|---|
+| `[PC]`、`[PC RX]` | `conn` 区分每次 TCP 连接。收齐 PC 帧时记录命令、PC Seq 和总长度。测试受理后另列算法、index、启动方式、Freq、普通时序项数和训练目标电压（VDD1/VDD2/VDDQ，mV）。提前 0107 或断线废弃待交付结果时记录原因。 |
+| `[PC TX]` | 0006 显示原请求号及实际状态正文。0105/0109 显示 index、MCU 自身 Seq、总长度及 `tcpQueued`。该值是本地 TCP 已接收的字节数。短写后继续发送，最终失败保留已提交的字节数和 lwIP errno。 |
+| `[RK TX]`、`[RK RX]` | 每帧一行。RK Seq 后依次显示 `Type[Value字节数]=十六进制原始Value`，保留顺序和小端字节。发送记录的 `uart=queued` 表示已进入本地协议 UART 发送队列。可选 0x35 查询及回复按实际发生记录，首次有效 SPL 心跳显示 `freqQuery=0/1`，无绑定时为 `unbound`。 |
+| `[RESULT]` | 首次领取 RK 合法最终结果时显示算法、PC index、RK 耗时及两颗判定，随后可用 `[PC TX]` 的 0105/0109 查交付。显式零地址和未列出的颗粒均显示 PASS，RK RX 行保留两种线帧的区别。 |
+
+以 `gtest-mul` 为例，`5000[2]=0500` 是发给 RK 的算法号，`9001[8]=3800200000000000 3001[1]=00` 对应 die0 首错地址 `0x0000000000200038`。设置 tRCD 为 38 时可见 `5000[2]=2B00 701B[4]=26000000`。频率为 2133 且 RK 请求时可见 `5001[2]=3500 801C[8]=5508000000000000`。线上采用独立的 PC 和 RK Seq。
+
+PC 心跳、0601/0602 电流轮询和普通 RK 心跳只累计次数。`status` 的 `[traffic]` 显示各自的 RX、TX、错误数和最近时间。进度打印首帧及首次跨过 25%、50%、75%、100% 的帧，同类拒绝最多每秒显示一次。`[console] droppedBytes` 累计所选日志因出口拥塞或控制回复优先被丢弃的字节。每条记录整行入队，出口满即丢弃。过长的扩展帧以 `...` 标明省略，标准 3/5/7 TLV 结果可完整显示。
+
+维护入口在 B1 的 `App/diagnostics/`。`pc_trace.c` 负责 PC 收发、颗粒判定和原有 `[power]` 阶段行的显示，`rk_trace.c` 负责 RK 帧、进度和拒绝原因，`protocol_trace.c` 负责时间戳、单行输出和计数。串口模式选择由 `Core/Src/log_console.c` 管理。

@@ -8,6 +8,8 @@
 #include "uart_router.h"
 #include "state_machine.h"
 #include "rk_link.h"
+#include "rk_trace.h"
+#include "protocol_trace.h"
 #include "task_watchdog.h"
 #if defined(B1_RK_UART)
 #include "pwr_ctrl.h"
@@ -76,6 +78,7 @@ static void note_rx_reject(rk_rx_reject_reason_t reason, const tlv_frame_t *fram
     s_rx_diagnostics.expected_command = s_pending.waiting ? s_pending.request.command_id : 0U;
     s_rx_diagnostics.received_command = received_command;
     taskEXIT_CRITICAL();
+    rk_trace_rejected(reason, frame);
 }
 
 /* 格式不完整时按是否含进度字段分类；不把缺字段的最终结果误记成进度。 */
@@ -139,13 +142,18 @@ static void accept_frame(const tlv_frame_t *frame)
      * 算法在途时不替意外重启的RK沿用旧启动参数，也不改变已有结果等待。
      */
     if (rk_is_frequency_query(frame)) {
-        if (s_pending.waiting) return;
+        if (s_pending.waiting) {
+            rk_trace_query_while_busy(frame);
+            return;
+        }
         uint32_t token;
         int64_t value = rk_link_frequency_get(&token);
         uint8_t wire[TLV_FREQUENCY_FRAME_SIZE];
         int length = tlv_pack_frequency(value, rk_link_next_sequence(), wire, sizeof(wire));
         int success = length == TLV_FREQUENCY_FRAME_SIZE && uart_send(0, wire, (uint16_t)length) == 0;
         rk_link_frequency_note_tx(token, success);
+        rk_trace_received(frame);
+        rk_trace_sent(RK_CMD_QUERY_FREQUENCY, wire, length, success);
         return;
     }
 #if defined(B1_RK_UART)
@@ -158,7 +166,10 @@ static void accept_frame(const tlv_frame_t *frame)
     // 空指针直接返回；零TLV或兼容的单个0x0000空Value心跳不进入结果处理。
     if (frame == NULL || frame->count == 0U ||
         (frame->count == 1U && frame->units[0].type == TLV_TYPE_HEARTBEAT &&
-         frame->units[0].data_len == 0U)) return;
+         frame->units[0].data_len == 0U)) {
+        if (frame) trace_count(TRACE_RK_HEARTBEAT, TRACE_RX);
+        return;
+    }
     // 如果当前没有等待的请求，记录拒绝原因并返回
     if (!s_pending.waiting) {
         note_rx_reject(RK_RX_REJECT_NO_PENDING, frame, 0U);
@@ -180,6 +191,7 @@ static void accept_frame(const tlv_frame_t *frame)
             //检查是否是当前的算法号
             note_rx_reject(RK_RX_REJECT_ALGORITHM, frame, report.result.command_id);
         } else {
+            rk_trace_progress(frame, s_pending.progress_valid, report.progress_percent);
             s_pending.progress_percent = report.progress_percent;
             s_pending.progress_sequence = frame->sequence;
             s_pending.progress_valid = 1U;
@@ -204,6 +216,7 @@ static void accept_frame(const tlv_frame_t *frame)
         finish_request(RK_RESPONSE_TIMEOUT);
     }
     // 合法最终结果已到达，结束等待；仍须交付响应或恢复事件后才能取新请求。
+    rk_trace_received(frame);
     s_pending.waiting = 0U;
     /* 已向业务层判超时的请求不能改成第二次成功；迟到结果仅证明RK已结束。 */
     if (s_pending.timed_out) {
@@ -257,20 +270,23 @@ static void process_request(void)
                          tlv_pack_cmd(request.command_id, NULL, 0U,
                                       s_pending.sequence, wire, sizeof(wire));
     // 检查打包结果和发送结果，如果失败则标记TX_FAILED
-    if (length != (int)(timing ? TLV_TIMING_FRAME_SIZE : TLV_CMD_FRAME_SIZE) ||
-        uart_send(0, wire, (uint16_t)length) != 0) {
+    int queued = length == (int)(timing ? TLV_TIMING_FRAME_SIZE : TLV_CMD_FRAME_SIZE) &&
+                 uart_send(0, wire, (uint16_t)length) == 0;
+    TickType_t queued_at = xTaskGetTickCount();
+    rk_trace_sent(request.command_id, wire, length, queued);
+    if (!queued) {
         /* uart_send失败保证未向TX环写入任何字节；不回插队列冒丢失风险。 */
         finish_request(RK_RESPONSE_TX_FAILED);
         return;
     }
     if (timing) {
-        s_timing_sent_tick = xTaskGetTickCount();
+        s_timing_sent_tick = queued_at;
         s_timing_gap = 1U;
         finish_request(RK_RESPONSE_SENT);
         return;
     }
     // 记录发送时间和最近发送的Seq，标记为等待状态
-    s_pending.sent_tick = xTaskGetTickCount();
+    s_pending.sent_tick = queued_at;
     s_pending.last_tx_sequence = s_pending.sequence;
     s_pending.waiting = 1U;
 }
@@ -322,7 +338,8 @@ static void process_heartbeat(TickType_t *last_tick)
     if (length == TLV_HEARTBEAT_FRAME_SIZE && uart_send(0, wire, (uint16_t)length) == 0) {
         rk_link_ready_note_tx(sequence);
         if (s_pending.waiting) s_pending.last_tx_sequence = sequence;
-    }
+        trace_count(TRACE_RK_HEARTBEAT, TRACE_TX);
+    } else trace_count(TRACE_RK_HEARTBEAT, TRACE_ERROR);
 }
 
 /* argument未使用；每10ms推进一次，OFF也上报任务存活，不正常返回。 */

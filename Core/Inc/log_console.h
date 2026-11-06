@@ -3,6 +3,7 @@
 #define B1_LOG_CONSOLE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* 编译默认值由CMake生成：0=MCU，1=RK；每次启动恢复，不持久化运行时选择。 */
 #ifndef B1_LOG_DEFAULT_SOURCE
@@ -49,6 +50,12 @@ void log_console_complete_power_request(const char *error);
  * 不等待TX空间，不保证可靠送达；用于诊断，不能承载业务协议或故障处置。
  * printf的stdout/stderr也使用此出口；请勿再直接写huart1绕过来源选择。 */
 size_t log_console_write(const char *text, size_t length);
+
+/* 任务上下文：已选择MCU日志返回1。单条记录含换行最多256字节，整条入队或丢弃。 */
+#define LOG_CONSOLE_RECORD_SIZE 256U
+int log_console_mcu_selected(void);
+void log_console_write_record(const char *text, size_t length);
+uint32_t log_console_dropped_bytes(void);
 
 /* 默认任务消费一条status请求：1有请求、0无；重复请求合并，控制回复先入队。
  * 不含业务查询；未选择MCU时拒绝查询，切换RK时清除尚未消费的请求。 */

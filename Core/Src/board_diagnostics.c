@@ -1,6 +1,7 @@
 #include "board_diagnostics.h"
 #include "board_adc_config.h"
 #include "log_console.h"
+#include "protocol_trace.h"
 #include "main.h"
 #include "board_identity.h"
 #include "monitor_task.h"
@@ -64,7 +65,8 @@ void board_diagnostics_boot_error(void)
 
 /* 报告缓冲为静态内存，不分配堆；96字节/10ms限速低于115200波特率的吞吐。
  * 出口忙最多等待2秒后丢弃报告，不阻塞采样/电源/RK任务，不影响故障处置。 */
-#define STATUS_CAPACITY 2048U
+/* 为三类高频协议计数和串口丢弃统计保留快照空间。 */
+#define STATUS_CAPACITY 2560U
 #define STATUS_CHUNK_SIZE 96U
 #define STATUS_INTERVAL_MS 10U
 #define STATUS_DEADLINE_MS 2000U
@@ -213,6 +215,7 @@ static void build_report(uint32_t now)
     report_append("[RK history] rejected=%lu lastReason=%u lastTick=%lu (not current busy)\r\n",
                   (unsigned long)rk.rejected_total, (unsigned int)rk.last_reason,
                   (unsigned long)rk.last_tick);
+    trace_report(report_append);
     report_append("[status] end; snapshot only, OFF means sensors may be uninitialized\r\n");
 }
 

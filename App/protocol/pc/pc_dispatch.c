@@ -63,6 +63,7 @@ static pc_dispatch_result_t build_response(
     uint32_t json_length,
     pc_dispatch_response_t *response)
 {
+    response->command_id = response_command_id;
     return pc_protocol_build_response(response_command_id, mcu_tx_sequence,
                                       json, json_length,
                                       response->data, sizeof(response->data),
@@ -88,6 +89,7 @@ static pc_dispatch_result_t build_command_failure_with_index(
     pc_dispatch_result_t result;
 
     if (!request || !error_code) return PC_DISPATCH_ERROR;
+    response->request_command = request->command_id;
     body = cJSON_CreateObject();
     if (!body ||
         !cJSON_AddNumberToObject(body, "requestCommandId", request->command_id) ||
@@ -130,6 +132,7 @@ static pc_dispatch_result_t build_command_status(
     pc_dispatch_result_t result;
 
     if (!request || !status) return PC_DISPATCH_ERROR;
+    response->request_command = request->command_id;
     body = cJSON_CreateObject();
     if (!body ||
         !cJSON_AddNumberToObject(body, "requestCommandId", request->command_id) ||

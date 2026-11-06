@@ -1,4 +1,5 @@
 #include "rk_link.h"
+#include "rk_trace.h"
 #include "task.h"
 #include <string.h>
 #if defined(B1_RK_UART)
@@ -123,16 +124,26 @@ void rk_link_ready_note_tx(uint64_t sequence)
     taskEXIT_CRITICAL();
 }
 
+/* 本次启动的频率快照。首次心跳与查询标志在同一临界区读取。 */
+static struct {
+    uint32_t token;
+    int64_t value;
+    int status;
+} s_frequency;
+
 void rk_link_ready_note_rx(const tlv_frame_t *frame)
 {
     if (frame == NULL || !(frame->count == 0U ||
         (frame->count == 1U && frame->units[0].type == TLV_TYPE_HEARTBEAT &&
          frame->units[0].data_len == 0U))) return;
     taskENTER_CRITICAL();
-    if (s_ready.token != 0U && s_ready.tx_seen &&
+    int first = !s_ready.ready && s_ready.token != 0U && s_ready.tx_seen &&
         (uint64_t)(frame->sequence - s_ready.first_tx) <=
-        (uint64_t)(s_ready.last_tx - s_ready.first_tx)) s_ready.ready = 1U;
+        (uint64_t)(s_ready.last_tx - s_ready.first_tx);
+    int queried = s_frequency.token ? s_frequency.status != 0 : -1;
+    if (first) s_ready.ready = 1U;
     taskEXIT_CRITICAL();
+    if (first) rk_trace_ready(frame->sequence, queried);
 }
 
 int rk_link_request(const rk_request_t *request)
@@ -154,13 +165,6 @@ int rk_link_receive(rk_response_t *response)
     return response != NULL && rkResponseQueue != NULL &&
            xQueueReceive(rkResponseQueue, response, 0U) == pdTRUE;
 }
-
-/* 此缓存只服务本次启动，不能把前一PC请求的频率带入下一次无参数启动。 */
-static struct {
-    uint32_t token;
-    int64_t value;
-    int status;
-} s_frequency;
 
 void rk_link_frequency_begin(uint32_t token, int64_t value)
 {

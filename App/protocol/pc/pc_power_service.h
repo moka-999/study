@@ -46,7 +46,7 @@ typedef struct {
 } pc_power_rk_adapter_t;
 
 /* 内部调试快照，不增加PC字段；失败时保留出错阶段、时刻及RK令牌。 */
-typedef struct {
+typedef struct pc_power_diagnostic {
     pc_power_action_t action;
     pc_power_phase_t phase;
     pc_power_phase_t failed_phase;

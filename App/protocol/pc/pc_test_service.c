@@ -1,4 +1,5 @@
 #include "pc_test_service.h"
+#include "pc_trace.h"
 #include "pc_tester_info.h"
 #include "pc_power_service.h"
 #include "rk_link.h"
@@ -75,6 +76,8 @@ static int pack(uint16_t command, uint32_t sequence, const cJSON *body,
     if (!body || !response) return PC_DISPATCH_ERROR;
     if (!cJSON_PrintPreallocated((cJSON *)body, json, sizeof(json), 0))
         return PC_DISPATCH_ERROR;
+    response->command_id = command;
+    response->result_index = s_test.index;
     return pc_protocol_build_response(command, sequence, (const uint8_t *)json,
         (uint32_t)strlen(json), response->data, sizeof(response->data), &response->length) == 0
         ? PC_DISPATCH_RESPONSE_READY : PC_DISPATCH_ERROR;
@@ -84,6 +87,8 @@ static int pack(uint16_t command, uint32_t sequence, const cJSON *body,
 static int operation_response(uint16_t command, const uint32_t *index, uint32_t sequence,
     const char *status, const char *error, pc_dispatch_response_t *response)
 {
+    if (!response) return PC_DISPATCH_ERROR;
+    response->request_command = command;
     cJSON *body = cJSON_CreateObject();
     int result = PC_DISPATCH_ERROR;
     int has_index = command == PC_COMMAND_START_TEST || command == PC_COMMAND_PARA_START || command == PC_COMMAND_SLT_START ||
@@ -172,6 +177,7 @@ pc_dispatch_result_t pc_test_round_end(uint32_t failed_mask,
     if (set_round_lights(failed_mask, 0) != HAL_OK)
         return operation_response(PC_COMMAND_ROUND_END, NULL, sequence, "failed", "executionFailed", response);
     s_round_active = 0U;
+    if (s_test.active && !s_test.discarded && !s_test.slt) pc_trace_discard(s_test.cookie, "0107");
     s_test.discarded = 1U;
     rk_link_frequency_end(s_test.cookie);
     if (s_test.active && !s_test.slt) {
@@ -328,6 +334,7 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
     if (!start->external_ready) s_last_frequency = start->timing.frequency;
     if (booting) rk_link_frequency_begin(cookie, start->timing.frequency);
     if (ready_required) (void)rk_link_ready_begin(cookie);
+    pc_trace_start(request_command, start, s_test.name, cookie);
     cJSON_Delete(s_test.timing_parameters);
     s_test.timing_parameters = timing;
     return PC_DISPATCH_RESPONSE_READY;
@@ -380,6 +387,7 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     s_last_frequency = start->timing.frequency;
     rk_link_frequency_begin(cookie, start->timing.frequency);
     if (s_test.ready_required) (void)rk_link_ready_begin(cookie);
+    pc_trace_start(PC_COMMAND_SLT_START, start, s_test.name, cookie);
     cJSON_Delete(s_test.timing_parameters);
     s_test.timing_parameters = timing;
     return result;
@@ -525,6 +533,8 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
             if (!s_test.discarded && result.status == RK_RESPONSE_COMPLETE) monitor_idd_finish();
             else monitor_idd_cancel();
 #endif
+            if (result.status == RK_RESPONSE_COMPLETE)
+                pc_trace_result(s_test.name, s_test.index, &result.result);
             s_test.delivery = result;
             s_test.delivery_pending = 1U;
         }
@@ -581,6 +591,7 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
 
 void pc_test_service_disconnected(void)
 {
+    if (s_test.active && !s_test.discarded && !s_test.slt) pc_trace_discard(s_test.cookie, "disconnect");
     rk_link_frequency_end(s_test.cookie);
     s_round_active = 0U;
     s_test.discarded = 1U;

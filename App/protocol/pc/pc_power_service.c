@@ -3,8 +3,7 @@
 #include "main.h"
 #include <string.h>
 #if defined(B1_RK_UART)
-#include "log_console.h"
-#include <stdio.h>
+#include "pc_trace.h"
 #endif
 
 static pc_power_config_t s_config;
@@ -70,14 +69,7 @@ static void enter(pc_power_phase_t phase)
     /* 在同步DAC/总线操作之后重新取时，不能把I/O耗时算成输出稳定等待。 */
     s_diag.phase_since_ms = HAL_GetTick();
 #if defined(B1_RK_UART)
-    /* B1复用本地日志出口，拥塞可丢弃且不等待；V2不得把文字混入RK协议串口。 */
-    static const char *const names[] = {"idle", "requestOff", "waitOff", "offHold",
-        "bootSettle", "waitOn", "waitRkReady", "done"};
-    char line[144];
-    int size = snprintf(line, sizeof(line), "[power] action=%u phase=%s ms=%lu error=%s at=%s\r\n",
-        (unsigned)s_diag.action, names[phase], (unsigned long)s_diag.phase_since_ms,
-        s_diag.error ? s_diag.error : "none", names[s_diag.failed_phase]);
-    if (size > 0 && (size_t)size < sizeof(line)) (void)log_console_write(line, (size_t)size);
+    pc_trace_power_phase(&s_diag);
 #endif
 }
 

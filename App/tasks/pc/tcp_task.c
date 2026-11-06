@@ -21,6 +21,7 @@
 #include "lwip/sockets.h"
 #include "lwip/netif.h"
 #include "pc_dispatch.h"
+#include "pc_trace.h"
 #include "pc_state_machine.h"
 #include "task_watchdog.h"
 #include "b2_service.h"
@@ -36,14 +37,18 @@
  * send()返回值是“本次实际送入TCP发送缓冲的字节数”，可能小于length，
  * 这不是协议错误。因此从sent偏移继续发送，直到完整PDU提交或socket报错。
  */
-static int pc_send_all(int socket_fd, const uint8_t *data, size_t length)
+static int pc_send_all(int socket_fd, const pc_dispatch_response_t *response, uint32_t sequence)
 {
     size_t sent = 0U;
-    while (sent < length) {
-        int result = send(socket_fd, data + sent, length - sent, 0);
-        if (result <= 0) return -1;
+    while (sent < response->length) {
+        int result = send(socket_fd, response->data + sent, response->length - sent, 0);
+        if (result <= 0) {
+            pc_trace_tx(response, sequence, sent, result < 0 ? errno : 0);
+            return -1;
+        }
         sent += (size_t)result;
     }
+    pc_trace_tx(response, sequence, sent, 0);
     return 0;
 }
 
@@ -135,6 +140,8 @@ void StartTcpServerTask(void *argument)
             continue;
         }
         TCP_DIAG(3, 0xBEEF0005);       /* 已连接 */
+        pc_trace_connected();
+        const char *close_reason = "protocolError";
 
         /*
          * recv每20ms返回一次EWOULDBLOCK/EAGAIN，使任务有机会推进B2状态及下面的
@@ -169,9 +176,17 @@ void StartTcpServerTask(void *argument)
             /* 领取真实RK异步结果，业务层已完成JSON组包；本任务只传输及推进Seq。 */
             pc_dispatch_response_t async_response;
             int ready = pc_dispatch_next_response(mcu_tx_sequence, &async_response);
-            if (ready < 0 || (ready > 0 && pc_send_all(connfd, async_response.data,
-                                                    async_response.length) != 0)) break;
-            if (ready > 0) ++mcu_tx_sequence;
+            if (ready < 0) {
+                close_reason = "dispatchError";
+                break;
+            }
+            if (ready > 0) {
+                if (pc_send_all(connfd, &async_response, mcu_tx_sequence) != 0) {
+                    close_reason = "sendFailed";
+                    break;
+                }
+                ++mcu_tx_sequence;
+            }
             int n = recv(connfd, rx, sizeof(rx), 0);
 
             if (n > 0) {
@@ -205,16 +220,18 @@ void StartTcpServerTask(void *argument)
                             close_for_protocol_error = 1;
                             break;
                         }
+                        pc_trace_rx(&frame);
                         dispatch_result = pc_dispatch_handle(&frame,
                                                              mcu_tx_sequence,
                                                              &response);
                         if (dispatch_result == PC_DISPATCH_ERROR) {
+                            close_reason = "dispatchError";
                             close_for_protocol_error = 1;
                             break;
                         }
                         if (dispatch_result == PC_DISPATCH_RESPONSE_READY) {
-                            if (pc_send_all(connfd, response.data,
-                                            response.length) != 0) {
+                            if (pc_send_all(connfd, &response, mcu_tx_sequence) != 0) {
+                                close_reason = "sendFailed";
                                 close_for_protocol_error = 1;
                                 break;
                             }
@@ -236,10 +253,12 @@ void StartTcpServerTask(void *argument)
             } else if (n == 0) {
                 /* TCP有序关闭：PC调用close/shutdown，当前连接生命周期结束。 */
                 TCP_DIAG(4, 0xBEEF00E5);
+                close_reason = "peerClosed";
                 break;
             } else if (errno != EWOULDBLOCK && errno != EAGAIN) {
                 /* 负数且不是SO_RCVTIMEO产生的暂时无数据，属于真实socket错误。 */
                 TCP_DIAG(4, 0xBEEF00E6);
+                close_reason = "recvFailed";
                 break;
             }
 
@@ -250,10 +269,12 @@ void StartTcpServerTask(void *argument)
             if (pc_sm_is_receiving(&pc_sm) &&
                 (xTaskGetTickCount() - pc_last_byte_tick) > pdMS_TO_TICKS(500U)) {
                 TCP_DIAG(4, 0xBEEF00E8);
+                close_reason = "partialTimeout";
                 break;
             }
         }
 
+        pc_trace_closed(close_reason);
         pc_dispatch_disconnected();
         close(connfd);
         TCP_DIAG(3, 0xBEEF0006);       /* 已断开 */

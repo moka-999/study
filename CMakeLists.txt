@@ -106,6 +106,9 @@ add_executable(b1
     HAL_Drv/uart_hw.c
     HAL_Drv/uart_router.c
     # 两套协议/任务独立构建；不加入V2测试任务或旧PG12复位分发器。
+    App/diagnostics/protocol_trace.c
+    App/diagnostics/pc_trace.c
+    App/diagnostics/rk_trace.c
     App/protocol/pc/pc_protocol.c
     App/protocol/pc/pc_state_machine.c
     App/protocol/pc/pc_dispatch.c
@@ -154,6 +157,7 @@ target_include_directories(b1 PRIVATE
     BSP/TPS62868
     BSP/PAC1934
     BSP/MCP4725
+    App/diagnostics
     App/protocol/pc
     App/protocol/rk
     App/tasks

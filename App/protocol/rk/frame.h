@@ -81,7 +81,7 @@ typedef struct {
 } rk_failure_detail_t;
 
 /* 一个完整3/5/7 TLV最终包；只存RK给出的失败明细，不生成PC结果项。 */
-typedef struct {
+typedef struct rk_final_result {
     uint16_t command_id;    /* 唯一0x5001，算法编号，是否匹配请求由任务层检查。 */
     uint64_t elapsed_ms;    /* 唯一0x9002，整体测试耗时，单位ms，0有效。 */
     uint8_t failed;         /* 唯一0x1017：0=全部PASS，1=至少一颗FAIL。 */

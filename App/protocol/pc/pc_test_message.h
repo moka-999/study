@@ -38,7 +38,7 @@ uint16_t pc_timing_command(unsigned index);
  * 字符串指针直接引用cJSON树，调用者必须在使用完view后再cJSON_Delete(root)。
  * algorithmIndex为PC测试计划项编号，不是RK算法编号；不自行递增或重排。
  */
-typedef struct {
+typedef struct pc_test_start_view {
     const char *algorithm_type;  /* functional、slt或parametric；借用root。 */
     const char *algorithm_name;  /* 借用root内字符串，不能单独释放。 */
     uint32_t algorithm_index;    /* PC计划项编号，有限的0..UINT32_MAX整数。 */
