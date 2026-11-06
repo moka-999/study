@@ -60,6 +60,12 @@ pwr_ctrl_state_t pwr_ctrl_get_state(void);
     command += [str(root / p) for p in ('App/protocol/rk/frame.c', 'App/protocol/rk/state_machine.c',
                                        'App/protocol/common/crc.c', 'App/tasks/rk/rk_link.c')]
     support = Path(__file__).resolve().parent / 'support'
+    if root.name == 'b1':
+        (build / 'main.h').write_text('#include "port.h"\n#define HAL_GetTick xTaskGetTickCount\n', encoding='utf-8')
+        command += ['-DTEST_B1_PROTOCOL_TRACE=1', '-I' + str(support), '-I' + str(root / 'App/diagnostics'),
+                    '-I' + str(root / 'Core/Inc'), str(support / 'trace_capture.c'),
+                    str(root / 'App/diagnostics/protocol_trace.c'), str(root / 'App/diagnostics/rk_trace.c'),
+                    '-Wl,--defsym=end=_ebss']
     command += [str(support / 'qemu_start.s'), '-nostartfiles', '--specs=nosys.specs',
                 '-T' + str(support / 'qemu_test.ld'), '-Wl,--gc-sections', '-o', str(build / 'test.elf')]
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)

@@ -98,6 +98,7 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState level)
 static char console_output[8192];
 static size_t console_output_length;
 static int fail_console_send;
+static unsigned console_send_count;
 static uint8_t rk_console_output[8192];
 static size_t rk_console_output_length;
 static int fail_rk_console_send;
@@ -123,7 +124,8 @@ static int send_tx(uart_if_t *port, uint8_t *data, uint16_t length)
         rk_console_output_length += length;
     }
     if (port->handle == &uart[2]) {
-        CHECK(!isr && critical && length <= 128U);
+        CHECK(!isr && critical && length <= LOG_CONSOLE_RECORD_SIZE);
+        ++console_send_count;
         if (fail_console_send) return IF_ERR;
         CHECK(console_output_length + length < sizeof(console_output));
         memcpy(console_output + console_output_length, data, length);
@@ -704,7 +706,18 @@ static void test_log_console(void)
     char big[300]; memset(big, 'm', sizeof(big));
     CHECK(log_console_write(big, sizeof(big)) == sizeof(big));
     CHECK(console_output_length == sizeof(big) && memcmp(console_output, big, sizeof(big)) == 0);
+    /* 最大协议记录必须一次入USART1；出口满则整条丢弃，恢复后不补发。 */
+    clear_console_output();
+    unsigned before = console_send_count;
+    CHECK(log_console_mcu_selected());
+    log_console_write_record(big, LOG_CONSOLE_RECORD_SIZE);
+    CHECK(console_send_count == before + 1U && console_output_length == LOG_CONSOLE_RECORD_SIZE);
+    CHECK(memcmp(console_output, big, LOG_CONSOLE_RECORD_SIZE) == 0);
     fail_console_send = 1;
+    uint32_t lost = log_console_dropped_bytes();
+    log_console_write_record(big, LOG_CONSOLE_RECORD_SIZE);
+    CHECK(log_console_dropped_bytes() == lost + LOG_CONSOLE_RECORD_SIZE);
+    CHECK(console_output_length == LOG_CONSOLE_RECORD_SIZE);
     CHECK(log_console_write("full", 4U) == 0U);
     fail_console_send = 0;
 
@@ -749,6 +762,11 @@ static void test_log_console(void)
     check_rk_console_output("status\n", 7U);
     clear_rk_console_output();
     CHECK(_write(2, "hidden", 6) == 6 && console_output_length == 0U);
+    CHECK(!log_console_mcu_selected());
+    lost = log_console_dropped_bytes();
+    log_console_write_record(big, LOG_CONSOLE_RECORD_SIZE);
+    CHECK(console_output_length == 0U && log_console_dropped_bytes() == lost);
+    check_rk_console_output(NULL, 0U);
     test_console_led();
     test_console_power();
     /* 默认值在重新初始化后恢复，两种编译配置各执行一次本用例。 */

@@ -7,6 +7,9 @@
 #include <setjmp.h>
 #include <string.h>
 #include "rk_task_under_test.h"
+#if defined(TEST_B1_PROTOCOL_TRACE)
+#include "trace_capture.h"
+#endif
 #define S1(x) #x
 #define S(x) S1(x)
 #define CHECK(x) do { if (!(x)) fail("FAIL " S(__LINE__) ": " #x "\n"); } while (0)
@@ -1615,6 +1618,80 @@ static void test_timing_and_frequency(void)
     message("PASS: timing send-only sequencing, TX/backpressure, independent early frequency reply and power gates\n");
 }
 
+#if defined(TEST_B1_PROTOCOL_TRACE)
+/* 从真实事务入口取日志。分别模拟只发FAIL和显式发零地址PASS，保留实际TLV顺序。 */
+static void test_protocol_trace(void)
+{
+    tlv_frame_t frame;
+    uint8_t wire[TLV_CMD_FRAME_SIZE];
+    TickType_t last_heartbeat = 0U;
+    reset_task_test();
+    trace_capture_begin();
+    rk_link_frequency_begin(71U, 2133);
+    CHECK(rk_link_ready_begin(71U) == 0);
+    CHECK(tlv_pack_cmd(RK_CMD_QUERY_FREQUENCY, NULL, 0U, UINT64_MAX, wire, sizeof(wire)) == sizeof(wire));
+    CHECK(tlv_unpack(wire, sizeof(wire), &frame) == 1);
+    accept_frame(&frame);
+    CHECK(strstr(trace_capture_text(), "[RK RX] seq=18446744073709551615 5000[2]=3500\r\n"));
+    CHECK(strstr(trace_capture_text(), "5001[2]=3500 801C[8]=5508000000000000 uart=queued\r\n"));
+    tick = 1000U; process_heartbeat(&last_heartbeat);
+    frame_init(&frame); frame.sequence = tx_log[1].sequence;
+    accept_frame(&frame);
+    CHECK(strstr(trace_capture_text(), "freqQuery=1\r\n"));
+    trace_capture_begin(); accept_frame(&frame);
+    CHECK(trace_capture_text()[0] == '\0');
+
+    rk_link_frequency_begin(72U, 2133);
+    CHECK(rk_link_ready_begin(72U) == 0);
+    tick += 1000U; process_heartbeat(&last_heartbeat);
+    frame.sequence = tx_log[2].sequence; accept_frame(&frame);
+    CHECK(strstr(trace_capture_text(), "freqQuery=0\r\n"));
+    CHECK(!strstr(trace_capture_text(), "3500"));
+    rk_link_frequency_end(72U);
+    reset_task_test();
+    rk_request_t timing = {0x2BU, 1U, 0U, 38U};
+    CHECK(rk_link_request(&timing) == 0); process_request();
+    CHECK(strstr(trace_capture_text(), "5000[2]=2B00 701B[4]=26000000 uart=queued"));
+    reset_task_test(); trace_capture_begin();
+    tx_failure = 1;
+    CHECK(rk_link_request(&timing) == 0); process_request();
+    CHECK(strstr(trace_capture_text(), "5000[2]=2B00 701B[4]=26000000 uart=failed"));
+    CHECK(!strstr(trace_capture_text(), "uart=queued"));
+
+    for (unsigned explicit_pass = 0; explicit_pass <= 1; ++explicit_pass) {
+        reset_task_test(); trace_capture_begin();
+        rk_request_t algorithm = {5U, 2U, 0U, 0U};
+        CHECK(rk_link_request(&algorithm) == 0); process_request();
+        CHECK(strstr(trace_capture_text(), "5000[2]=0500 uart=queued"));
+        frame = progress_frame(s_pending.sequence, 5U, 3U); accept_frame(&frame);
+        frame = progress_frame(s_pending.sequence, 5U, 4U); accept_frame(&frame);
+        frame = progress_frame(s_pending.sequence, 5U, 25U); accept_frame(&frame);
+        CHECK(strstr(trace_capture_text(), "3016[1]=03") && !strstr(trace_capture_text(), "3016[1]=04"));
+        CHECK(strstr(trace_capture_text(), "3016[1]=19"));
+        size_t progress_length = strlen(trace_capture_text());
+        frame = progress_frame(s_pending.sequence, 5U, 24U); accept_frame(&frame);
+        frame = progress_frame(s_pending.sequence, 5U, 25U); accept_frame(&frame);
+        CHECK(strlen(trace_capture_text()) == progress_length);
+        frame = dual_die_frame(explicit_pass ? 3U : 1U, 0U, 0x200038U, 0U, 5497U);
+        frame.sequence = s_pending.sequence;
+        frame.payload[0] = 5U;
+        accept_frame(&frame);
+        CHECK(strstr(trace_capture_text(), "5001[2]=0500 1017[1]=01 9001[8]=3800200000000000 3001[1]=00"));
+        CHECK((strstr(trace_capture_text(), "9001[8]=0000000000000000 3001[1]=01") != NULL) == explicit_pass);
+        CHECK(strstr(trace_capture_text(), "9002[8]=7915000000000000\r\n"));
+    }
+    trace_capture_begin();
+    tick = 10000U;
+    accept_frame(&frame); /* 已完成后同一帧再次到达。 */
+    CHECK(strstr(trace_capture_text(), "reject=noPending"));
+    size_t reject_length = strlen(trace_capture_text());
+    accept_frame(&frame); CHECK(strlen(trace_capture_text()) == reject_length);
+    tick += 1000U; accept_frame(&frame); CHECK(strlen(trace_capture_text()) > reject_length);
+    trace_capture_stop();
+    message("PASS: B1 RK wire TLV log, optional frequency, heartbeat, timing, progress and 5/7-TLV result\n");
+}
+#endif
+
 void test_main(void)
 {
     test_timing_and_frequency();
@@ -1632,6 +1709,9 @@ void test_main(void)
     test_atomic_result(); test_latest_received_sequence(); test_result_stream();
     test_heartbeat(); test_ready_heartbeat(); test_task_fairness();
     test_idd_action_codec(); test_idd_transactions(); test_register_address_codec();
+#if defined(TEST_B1_PROTOCOL_TRACE)
+    test_protocol_trace();
+#endif
     message("PASS: FUNC/IDD categories, IDD number-only transactions, standalone action and register address codecs\n");
     message("PASS: RK protocol and transaction, empty heartbeat, progress, atomic dual-die result, actual C offline only\n"); finish(0);
 }

@@ -26,8 +26,9 @@ def main():
         command = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard",
                    "-mfpu=fpv5-d16", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
                    "-ffunction-sections", "-fdata-sections", f"-DB1_LOG_DEFAULT_SOURCE={default}",
-                   *["-I" + str(p) for p in (build, tests / "support", root / "Core/Inc")],
+                   *["-I" + str(p) for p in (build, tests / "support", root / "Core/Inc", root / "App/diagnostics")],
                    str(tests / "test_b1_diagnostics.c"), str(root / "Core/Src/board_diagnostics.c"),
+                   str(root / "App/diagnostics/protocol_trace.c"),
                    str(tests / "support/qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
                    "-T" + str(tests / "support/qemu_test.ld"), "-Wl,--gc-sections,--defsym=end=_ebss",
                    "-o", str(elf)]

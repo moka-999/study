@@ -5,6 +5,9 @@
 #include "pc_tester_info.h"
 #include "monitor_task.h"
 #include "result_led.h"
+#if defined(B1_RK_UART)
+#include "pc_trace.h"
+#endif
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -134,8 +137,8 @@ static void test_measurement_units(void)
 
 /* 解析回归不执行硬件；任何电源、DAC、采样、Flash或其他业务调用均失败。 */
 #if defined(B1_RK_UART)
-size_t log_console_write(const char *text, size_t length)
-{ (void)text; (void)length; fail("FAIL unexpected power log\n"); }
+void pc_trace_power_phase(const struct pc_power_diagnostic *diagnostic)
+{ (void)diagnostic; fail("FAIL unexpected power log\n"); }
 #endif
 uint32_t HAL_GetTick(void) { if (query_monitor) return 1000U; fail("FAIL unexpected HAL_GetTick\n"); }
 pwr_ctrl_state_t pwr_ctrl_get_state(void) { fail("FAIL unexpected power access\n"); }

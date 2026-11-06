@@ -72,6 +72,7 @@ pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *view, uint32
                "-T" + str(Path(__file__).resolve().parent / "support/qemu_test.ld"), "-Wl,--gc-sections", "-o", str(build / "test.elf")]
     if (root / "b1.ioc").exists():
         command.insert(1, "-DB1_RK_UART=4")
+        command.insert(1, "-I" + str(root / "App/diagnostics"))
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode:

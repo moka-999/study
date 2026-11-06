@@ -1,15 +1,15 @@
 # B1 / V2 一键烧录
 
-更新：2026-11-05。两板恢复精简Boot＋单App，最终仍是一个ELF/BIN，一次下载。没有OTA、A1/A2、回滚、固件搬运或30秒健康确认。
+更新：2026-11-06。两板使用精简Boot＋单App，最终是完整ELF/BIN，一次下载。
 
 ## 1. 日常使用
 
-VS Code打开对应工程，接好ST-Link和板卡电源，停止RK测试及温控、断开PC/网络助手，再按 **Ctrl+Shift+B**。自动完成编译、地址检查、内部Flash备份、写入、回读校验和复位。B1每次MCU复位都会关闭RK/DDR。
+B1 工程按 **Ctrl+Shift+B** 只编译并校验。B1 需要烧录时在“终端 → 运行任务”中选择“⚡ B1 一键编译烧录（ST-Link，会复位）”；V2 仍用 **Ctrl+Shift+B** 烧录。执行烧录前接好ST-Link和板卡电源、停止RK测试及温控、断开PC。烧录任务会备份内部Flash、写入、回读并复位。B1每次MCU复位都会关闭RK/DDR。
 
 | 工程 | 默认快捷键配置 | 完整烧录文件 |
 |---|---|---|
 | V2：`D:/pro/test` | 真实RK；电源/测量模拟；MATS第一颗假FAIL；已装W25 | `build/standalone/Debug/test.elf`或`test.bin` |
-| B1：`D:/pro/b1` | 真实驱动和结果；当前未焊W25的目标板默认跳过器件；验板默认关闭内部看门狗 | `build/standalone/Debug/b1.elf`或`b1.bin` |
+| B1：`D:/pro/b1` | 只编译；真实驱动和结果；当前未焊W25的目标板默认跳过器件；验板默认关闭内部看门狗 | `build/standalone/Debug/b1.elf`或`b1.bin` |
 
 每个工程独立构建，不依赖同级旧Bootloader工程。
 
@@ -28,7 +28,9 @@ VS Code打开对应工程，接好ST-Link和板卡电源，停止RK测试及温�
 
 ### 1.1 两块B1同时调试
 
-在`D:/pro/b1`分别构建两份完整Boot＋App镜像：
+在 B1 的 `Core/Inc/board_network_config.h` 修改 `B1_TEST_IP` 的完整地址，保存后按 **Ctrl+Shift+B**。去 `build/standalone/Debug/` 取 `b1.elf` 或 `b1.bin`。本地掩码为 /24，网关沿用同网段 .1。[板级配置头](http://192.168.1.122:3000/LILIHONG/stm32h743/raw/branch/app-b1/Core/Inc/board_network_config.h)
+
+使用默认网段批量构建两份镜像时，也可以覆盖末段。
 
 ```powershell
 .\tools\dev.ps1 build -TestIpLastOctet 201
@@ -42,7 +44,7 @@ VS Code打开对应工程，接好ST-Link和板卡电源，停止RK测试及温�
 
 两份ELF分别烧入对应板卡。PC可使用`192.168.1.200`、掩码`255.255.255.0`，与两块板接入同一交换机；PC分别建立到两个地址的TCP连接，每块板仍只接受一个客户端。
 
-`-TestIpLastOctet`允许1～254，端口仍为8888；选地址时避开PC及其他设备。未传参数和默认Ctrl+Shift+B仍使用201，其他地址使用独立构建目录。用脚本下载第二块板时执行`.\tools\dev.ps1 flash -TestIpLastOctet 202 -ConfirmIdle YES`，同样须先确保RK/温控空闲、PC断开。
+`-TestIpLastOctet`允许1～254，端口为8888。省略此参数时使用头文件的完整地址；显式指定202仍使用独立构建目录。用脚本下载第二块板时执行`.\tools\dev.ps1 flash -TestIpLastOctet 202 -ConfirmIdle YES`，同样须先确保RK/温控空闲、PC断开。
 
 MAC仍由各自STM32 UID派生。这个参数只修改B2首次配置前的本地地址；B2有效通知后仍按正式规则动态改IP，不写FRU、不增加协议字段。两份均为B1真实驱动，不带V2电源模拟或MATS假FAIL。2026-11-04按本轮未焊W25目标板重建的`.201`使用`BOARD_W25_PRESENT=0`；`.202`未重建，仍是此前启用W25的产物。IP参数不选择装配配置，之后重编两地址时均读取同一份`board_storage_config.h`，必须先核对目标板。
 

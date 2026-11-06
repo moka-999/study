@@ -2,6 +2,7 @@
 #include "b1_diagnostics_port.h"
 #include "board_diagnostics.h"
 #include "log_console.h"
+#include "protocol_trace.h"
 #include "result_led.h"
 #include <string.h>
 
@@ -23,6 +24,7 @@ static _Noreturn void finish(uint32_t code)
     for (;;) {}
 }
 static _Noreturn void fail(const char *text) { message(text); finish(1U); }
+uint32_t log_console_dropped_bytes(void) { return 1234U; }
 void test_abort(void) { fail("FAIL CPU exception\n"); }
 GPIO_TypeDef test_gpio;
 GPIO_TypeDef test_gpio_g;
@@ -127,6 +129,10 @@ void test_main(void)
     CHECK(strstr(output, "[AD reference] configured=AVDD assumedMv=3333") != NULL);
     CHECK(strstr(output, "[IDD1/2/Q uA] unavailable") != NULL);
     CHECK(strstr(output, "[TPS status 1/2/Q] unavailable") != NULL);
+    CHECK(strstr(output, "[traffic] PC heartbeat rx=0 tx=0 errors=0 lastMs=0") != NULL);
+    CHECK(strstr(output, "[traffic] PC sample rx=0 tx=0 errors=0 lastMs=0") != NULL);
+    CHECK(strstr(output, "[traffic] RK heartbeat rx=0 tx=0 errors=0 lastMs=0") != NULL);
+    CHECK(strstr(output, "[console] droppedBytes=1234") != NULL);
     CHECK(strstr(output, "[LED] states=0,0,0 PG0..6 ODR=0x00 IDR=0x00") != NULL);
     CHECK(strstr(output, "[status] end") != NULL);
     saved = calls; advance(100); CHECK(calls == saved); /* 不周期刷屏。 */

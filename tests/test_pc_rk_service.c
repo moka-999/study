@@ -6,6 +6,11 @@
 #include "rk_link.h"
 #include "pc_power_service.h"
 #include "b2_service.h"
+#if defined(TEST_B1_PROTOCOL_TRACE)
+#include "pc_trace.h"
+#include "protocol_trace.h"
+#include "trace_capture.h"
+#endif
 #if defined(TEST_B1_CONSOLE_POWER)
 #include "log_console.h"
 static log_console_power_request_t console_request;
@@ -1714,7 +1719,18 @@ static void frequency_start_check(void)
             json = cJSON_PrintUnformatted(root); CHECK(json);
         }
         unsigned on = power_on_calls, before = queue_calls;
+#if defined(TEST_B1_PROTOCOL_TRACE)
+        trace_capture_begin();
+#endif
         start_expect(json, NULL);
+#if defined(TEST_B1_PROTOCOL_TRACE)
+        CHECK(strstr(trace_capture_text(), "power=LPDDR4X target_mV=1800/1100/600"));
+        CHECK(strstr(trace_capture_text(), run == 2U ? "boot=emmc Freq=1800 timingCount=1" :
+                                                     "boot=emmc Freq=1600 timingCount=1"));
+        CHECK(strstr(trace_capture_text(), "[power] action=3 phase="));
+        CHECK(strstr(trace_capture_text(), " error=none at=idle\r\n"));
+        trace_capture_stop();
+#endif
         uint32_t token;
         if (run != 1U) {
             CHECK(rk_link_frequency_get(&token) == (run == 2U ? 1800 : 1600));
@@ -2020,6 +2036,74 @@ static void slt_flow_check(void)
 #endif
 #endif
 
+#if defined(TEST_B1_PROTOCOL_TRACE)
+/* 模拟TCP已经收齐一个PDU，校验业务及组帧实际发布给日志的元数据。 */
+static void trace_exchange(uint16_t command, const char *json, uint32_t sequence)
+{
+    pc_protocol_frame_t frame = {.command_id = command, .sequence = sequence,
+        .json = (const uint8_t *)json, .json_length = (uint32_t)strlen(json)};
+    frame.length = PC_PROTOCOL_HEADER_SIZE + frame.json_length;
+    pc_dispatch_response_t reply;
+    pc_trace_rx(&frame);
+    CHECK(pc_dispatch_handle(&frame, sequence, &reply) == PC_DISPATCH_RESPONSE_READY);
+    pc_trace_tx(&reply, sequence, reply.length, 0);
+}
+
+static void pc_protocol_trace_check(void)
+{
+    static const char start[] = "{\"algorithmType\":\"functional\",\"algorithmName\":\"gtest-mul\","
+        "\"algorithmIndex\":1,\"power\":null,\"TimingParameters\":{},\"reboot\":false,\"bootMode\":null}";
+    pc_dispatch_response_t result;
+    pc_dispatch_disconnected();
+    mock_power_state = PWR_CTRL_STATE_ON;
+    trace_capture_begin(); pc_trace_connected();
+    trace_exchange(PC_COMMAND_ROUND_BEGIN, "{}", 1U);
+    trace_exchange(PC_COMMAND_START_TEST, start, 2U);
+    CHECK(strstr(trace_capture_text(), "[PC RX] conn=1 cmd=0106 seq=1 len=20\r\n"));
+    CHECK(strstr(trace_capture_text(), "req=0106") && strstr(trace_capture_text(), "\"completed\""));
+    CHECK(strstr(trace_capture_text(), "cmd=0103 type=functional test=gtest-mul idx=1"));
+    CHECK(strstr(trace_capture_text(), "boot=external Freq=-1 timingCount=0"));
+    CHECK(strstr(trace_capture_text(), "req=0103") && strstr(trace_capture_text(), "\"accepted\""));
+    trace_capture_begin();
+    for (unsigned i = 0; i < 10U; ++i) {
+        trace_exchange(PC_COMMAND_CLIENT_HEARTBEAT, "{}", 3U);
+        trace_exchange(PC_COMMAND_QUERY_POWER_MONITOR, "{}", 4U);
+    }
+    trace_exchange(PC_COMMAND_QUERY_POWER_MONITOR, "{", 5U);
+    CHECK(trace_capture_text()[0] == '\0');
+    trace_report(trace_capture_append);
+    CHECK(strstr(trace_capture_text(), "PC heartbeat rx=10 tx=10 errors=0"));
+    CHECK(strstr(trace_capture_text(), "PC sample rx=11 tx=10 errors=1"));
+    trace_capture_begin();
+    inject(RK_RESPONSE_COMPLETE, UINT64_C(0x200038));
+    queued_response.result.elapsed_ms = 5497U;
+    pc_json_configure_allocator(no_memory, free);
+    CHECK(pc_dispatch_next_response(6U, &result) == 0);
+    pc_json_configure_allocator(NULL, NULL);
+    CHECK(pc_dispatch_next_response(6U, &result) == PC_DISPATCH_RESPONSE_READY);
+    const char *first = strstr(trace_capture_text(),
+        "[RESULT] gtest-mul idx=1 time=5497ms die0=FAIL@0x0000000000200038 die1=PASS");
+    CHECK(first && !strstr(first + 1, "[RESULT]"));
+    CHECK(result.command_id == PC_COMMAND_TEST_RESULT_REPORT && result.result_index == 1U);
+    pc_trace_tx(&result, 6U, 24U, 104);
+    CHECK(strstr(trace_capture_text(), "cmd=0105 idx=1 seq=6 len="));
+    CHECK(strstr(trace_capture_text(), "tcpQueued=24 sendFailed errno=104"));
+    trace_capture_begin(); pc_trace_tx(&result, 6U, result.length, 0);
+    char bytes[48];
+    snprintf(bytes, sizeof(bytes), "len=%lu tcpQueued=%lu\r\n", (unsigned long)result.length, (unsigned long)result.length);
+    CHECK(strstr(trace_capture_text(), bytes));
+    trace_exchange(PC_COMMAND_START_TEST, start, 7U);
+    trace_exchange(PC_COMMAND_ROUND_END, "{\"errorchip\":[]}", 8U);
+    CHECK(strstr(trace_capture_text(), "discard pending result reason=0107"));
+    inject(RK_RESPONSE_COMPLETE, 0U);
+    CHECK(pc_dispatch_next_response(9U, &result) == 0);
+    pc_trace_closed("peerClosed"); pc_dispatch_disconnected();
+    CHECK(strstr(trace_capture_text(), "conn=1 closed reason=peerClosed"));
+    trace_capture_stop();
+    message("PASS: B1 PC protocol log, polling counters, result retry, full/partial TX and early 0107\n");
+}
+#endif
+
 void test_main(void)
 {
 #if defined(PC_TEST_ROUND_TEST)
@@ -2202,5 +2286,8 @@ void test_main(void)
     power_simulation_check();
 #endif
     delivery_retry_check();
+#if defined(TEST_B1_PROTOCOL_TRACE)
+    pc_protocol_trace_check();
+#endif
     finish(0U);
 }

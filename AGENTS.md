@@ -102,7 +102,7 @@ powershell -ExecutionPolicy Bypass -File tools/dev.ps1 build
 
 ### 直接烧录（SWD）
 
-2026-10-28起B1/V2为精简Boot＋单App：Boot位于`0x08000000`占128KiB，App位于`0x08020000`占1920KiB；最终ELF/BIN合并两者，不生成A1/A2或`.ota`。两工程各自Ctrl+Shift+B自动编译、检查、备份内部Flash、直接写入BIN并回读、复位运行；空白板和原OTA板使用同一入口。按快捷键即确认RK/温控空闲、PC断开并允许MCU复位。B1复位仍在RAM初始化前关闭RK/DDR。
+2026-10-28起B1/V2为精简Boot＋单App：Boot位于`0x08000000`占128KiB，App位于`0x08020000`占1920KiB；最终ELF/BIN合并两者，不生成A1/A2或`.ota`。B1 的 Ctrl+Shift+B 只编译；本地完整IP在 `../b1/Core/Inc/board_network_config.h` 配置。V2 的 Ctrl+Shift+B 或 B1 单独选择的烧录任务会编译、检查、备份内部Flash、写入、回读并复位。执行烧录任务前确认RK/温控空闲、PC断开并允许MCU复位。B1复位仍在RAM初始化前关闭RK/DDR。
 
 ```powershell
 # 只构建，不访问设备
