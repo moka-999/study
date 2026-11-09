@@ -159,4 +159,16 @@ monitor_boot_result_t monitor_get_boot_mode(boot_mode_t *mode,
  */
 void StartMonitorTask(void *argument);
 
+/* 一个可选的新采样观察者；初始化时注册，不缓存/重放0602快照。
+ * sample非NULL时仅groups指定组是本次新读取，begin/end为读取起止HAL毫秒。
+ * sample=NULL、groups=0表示本轮读取均已交付后的时钟推进；回调在任务上下文、
+ * 中断开启时同步运行，不得申请监测IO锁或访问器件。实现须自行串行化内部状态。 */
+typedef void (*monitor_sample_observer_t)(const memory_monitor_sample_t *sample,
+                                          uint8_t groups, uint32_t begin_ms,
+                                          uint32_t end_ms);
+void monitor_set_sample_observer(monitor_sample_observer_t observer);
+/* 仅实际采样生产者调用；V2模拟构建由其内存模型提供相同事件，不代表实测。 */
+void monitor_publish_sample(const memory_monitor_sample_t *sample, uint8_t groups,
+                             uint32_t begin_ms, uint32_t end_ms);
+
 #endif

@@ -148,6 +148,7 @@ add_executable(b1
     App/protocol/rk/state_machine.c
     App/tasks/pc/tcp_task.c
     App/tasks/rk/rk_task.c
+    App/tasks/rk/rk_idd.c
     App/tasks/rk/rk_link.c
     App/tasks/common/monitor_task.c
     App/tasks/common/task_watchdog.c

@@ -4,6 +4,7 @@
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "frame.h"
+#include "idd_stats.h"
 #include <stdint.h>
 
 /* 算法类别供PC入口核对，禁止把IDD名称经FUNC命令下发；不是线上的TLV字段。 */
@@ -30,18 +31,19 @@ const rk_command_descriptor_t *rk_command_find_by_name(const char *name);
 
 /* 业务层投递的请求副本；发送帧由RK任务统一组装，调用者不操作UART。 */
 typedef struct {
-    uint16_t command_id;       /* FUNC/IDD 1..36只发编号；时序为0x25/0x26/0x28..0x34。 */
+    uint16_t command_id;       /* FUNC 1..20只发编号，IDD 21..36附进入/退出动作；时序为0x25/0x26/0x28..0x34。 */
     uint32_t cookie;           /* 调用方关联令牌，不是任何一侧的线上Seq。 */
     uint32_t timeout_ms;       /* 结果等待毫秒数；0不限时，非0超时也不自动重发测试。 */
     uint32_t parameter_value;  /* 仅0x25/0x26/0x28..0x34使用；无应答设置，算法必须填0。 */
 } rk_request_t;
 typedef enum {
-    RK_RESPONSE_COMPLETE,  /* 完整3/5/7 TLV结果通过接收窗口/算法检查；两颗结论由失败明细确定。 */
+    RK_RESPONSE_COMPLETE,  /* FUNC完整最终包通过校验；IDD本地窗口完成且退出已发完，不代表电流合格。 */
     RK_RESPONSE_TIMEOUT,   /* 最终结果超时；RK可能仍在执行，后续请求暂停发送。 */
     RK_RESPONSE_TX_FAILED, /* 本端整帧未能进入UART发送队列；不自动重发。 */
     RK_RESPONSE_INVALID,   /* 已出队请求不合法，例如命令不支持或时限超范围。 */
     RK_RESPONSE_POWER_OFF, /* B1供电状态离开ON；未完成/未发送请求不能算测试通过。 */
     RK_RESPONSE_RECOVERED, /* 已报TIMEOUT的RK执行状态恢复已知；仅解除等待，不再报测试结果。 */
+    RK_RESPONSE_MEASUREMENT_FAILED, /* IDD窗口读取失败/缺样/溢出；退出已发完，不产生0109 PASS。 */
     RK_RESPONSE_SENT      /* 时序整帧已进入UART队列；不表示RK收到、设置成功或硬件生效。 */
 } rk_response_status_t;
 
@@ -54,6 +56,7 @@ typedef struct {
     uint64_t sequence;           /* 原下行命令Seq，仅内部诊断；不是RK最近上报值或PC Seq。 */
     rk_response_status_t status; /* 通信/执行交付状态；不是DDR算法PASS/FAIL。 */
     rk_final_result_t result;    /* 仅COMPLETE有效；含0..2组失败明细，其他状态不是DDR测试FAIL。 */
+    idd_stats_t measurement;     /* 仅IDD的COMPLETE有效；冻结的5s窗口统计，电流由逐点记录计算。 */
 } rk_response_t;
 /* 启动阶段建立的8槽队列；业务请用下面的接口，不直接清空或覆盖队列。 */
 extern QueueHandle_t rkRequestQueue;

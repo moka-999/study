@@ -16,7 +16,7 @@
 
 
 /* PC命令、算法类别和结果通道在同一表中绑定，避免IDD从FUNC入口误下发。
- * 两类暂共用RK最终结果合同；PARA的进入/退出与有效测量窗口另行接入。
+ * FUNC等待RK最终结果；PARA由RK任务完成进入、5s采集及退出后交付冻结统计。
  */
 typedef struct {
     uint16_t start_command;
@@ -56,6 +56,7 @@ static struct {
     uint8_t timing_cursor, timing_inflight, configuring;
     uint8_t check_frequency_tx, ready_required, report_prepared;
     uint32_t startup_since_ms;
+    uint32_t accepted_ms;       /* IDD从本条0108受理到0109组包，含准备阶段；uint32毫秒允许回绕。 */
 } s_test;
 static uint8_t s_round_active; /* 仅属于当前TCP连接；算法占用与轮次是否收尾分开记录。 */
 static int64_t s_last_frequency = -1; /* 最近受理的完整启动目标；物理就绪仍由电源服务确认。 */
@@ -210,13 +211,17 @@ const cJSON *pc_test_service_timing_parameters(void)
 static const char *queue_test(const rk_request_t *request)
 {
 #if defined(B1_RK_UART)
-    int measuring = monitor_idd_start(INT32_MAX, 1U);
-    if (measuring != IF_OK) return measuring == IF_TIMEOUT ? "busy" : "notReady";
+    const rk_command_descriptor_t *descriptor = rk_command_find_by_id(request->command_id);
+    int functional = descriptor != NULL && descriptor->category == RK_COMMAND_CATEGORY_FUNCTIONAL;
+    if (functional) {
+        int measuring = monitor_idd_start(INT32_MAX, 1U);
+        if (measuring != IF_OK) return measuring == IF_TIMEOUT ? "busy" : "notReady";
+    }
 #endif
     int queued = rk_link_request(request);
     if (queued != 0) {
 #if defined(B1_RK_UART)
-        monitor_idd_cancel();
+        if (functional) monitor_idd_cancel();
 #endif
         return queued == -2 ? "busy" : "notReady";
     }
@@ -271,6 +276,7 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
     /* 先复制再产生任何硬件/队列副作用；输入JSON返回后会释放，不能保存借用指针。 */
     cJSON *timing = start->timing_parameters ? cJSON_Duplicate(start->timing_parameters, 1) : NULL;
     if (start->timing_parameters && !timing) return PC_DISPATCH_ERROR;
+    uint32_t accepted_ms = HAL_GetTick();
     uint32_t cookie = s_test.cookie + 1U;
     if (!cookie) ++cookie;
     rk_request_t request = {algorithm->command_id, cookie, start->timeout_ms, 0U};
@@ -315,6 +321,7 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
     s_test.index = start->algorithm_index;
     s_test.name = algorithm->name;
     s_test.kind = kind;
+    s_test.accepted_ms = accepted_ms;
     save_site_id(fru.site_label);
     s_test.site_id[sizeof(s_test.site_id) - 1U] = '\0';
     s_test.active = 1U;
@@ -527,14 +534,19 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
             }
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
             /* 只在首次领取时冻结统计；组包重试不能改变本次测量窗口。 */
-            v2_power_sim_test_end(!s_test.discarded && result.status == RK_RESPONSE_COMPLETE);
+            if (s_test.kind->category == RK_COMMAND_CATEGORY_FUNCTIONAL) v2_power_sim_test_end(!s_test.discarded && result.status == RK_RESPONSE_COMPLETE);
 #elif defined(B1_RK_UART)
             /* 统计在首次领取时冻结；不是RK或JEDEC定义的同步IDD测量窗口。 */
-            if (!s_test.discarded && result.status == RK_RESPONSE_COMPLETE) monitor_idd_finish();
-            else monitor_idd_cancel();
+            if (s_test.kind->category == RK_COMMAND_CATEGORY_FUNCTIONAL) {
+                if (!s_test.discarded && result.status == RK_RESPONSE_COMPLETE) monitor_idd_finish();
+                else monitor_idd_cancel();
+            }
 #endif
-            if (result.status == RK_RESPONSE_COMPLETE)
+            if (result.status == RK_RESPONSE_COMPLETE) {
+                if (s_test.kind->category == RK_COMMAND_CATEGORY_PARAMETRIC)
+                    result.result.elapsed_ms = (uint32_t)(HAL_GetTick() - s_test.accepted_ms);
                 pc_trace_result(s_test.name, s_test.index, &result.result);
+            }
             s_test.delivery = result;
             s_test.delivery_pending = 1U;
         }
@@ -554,20 +566,25 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
                 dies[failure->die].error_address = failure->error_address;
             }
             /* 一包包含同一B1的两颗结果，共用siteId、耗时和三轨测量均只出现一次。 */
+            int idd = s_test.kind->category == RK_COMMAND_CATEGORY_PARAMETRIC;
+            uint64_t elapsed_ms = idd ? (uint32_t)(HAL_GetTick() - s_test.accepted_ms)
+                                      : result.result.elapsed_ms;
             cJSON *body = pc_algorithm_result_create(s_test.kind->algorithm_type, s_test.name, s_test.index,
-                s_test.site_id, result.result.elapsed_ms, dies);
+                s_test.site_id, elapsed_ms, dies);
+            int measurement_ok = body != NULL;
+            if (body != NULL && idd) measurement_ok = pc_test_add_measurement(body, &result.measurement);
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
-            if (!body || !v2_power_sim_add_measurement(body)) {
-                cJSON_Delete(body);
-                return 0; /* 暂留副本，下轮轮询重试；不因一次分配失败主动断线。 */
-            }
+            else if (body != NULL) measurement_ok = v2_power_sim_add_measurement(body);
 #elif defined(B1_RK_UART)
-            idd_stats_t stats;
-            if (!body || !monitor_idd_get(&stats) || !pc_test_add_measurement(body, &stats)) {
-                cJSON_Delete(body);
-                return 0; /* 读取冻结统计或组包失败均不丢失已领取的结果。 */
+            else if (body != NULL) {
+                idd_stats_t stats;
+                measurement_ok = monitor_idd_get(&stats) && pc_test_add_measurement(body, &stats);
             }
 #endif
+            if (!measurement_ok) {
+                cJSON_Delete(body);
+                return 0; /* 暂留冻结结果重试组包，不重采样或重复执行RK。 */
+            }
             ready = pack(s_test.kind->result_command, sequence, body, response);
             cJSON_Delete(body);
         } else {

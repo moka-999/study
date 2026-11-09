@@ -8,6 +8,7 @@
 #include "uart_router.h"
 #include "state_machine.h"
 #include "rk_link.h"
+#include "rk_idd.h"
 #include "rk_trace.h"
 #include "protocol_trace.h"
 #include "task_watchdog.h"
@@ -34,6 +35,7 @@ typedef struct {
     uint64_t last_tx_sequence; /* 本次等待期间最近成功入UART队列的MCU Seq。 */
     uint64_t progress_sequence; /* RK进度携带的最近已收MCU Seq，仅作参考。 */
     TickType_t sent_tick;
+    uint8_t idd;           /* 本地采集事务，不由RK进度/最终结果结束。 */
     uint8_t waiting;       /* 正等待该Seq/命令的最终结果，含超时后的状态未知期。 */
     uint8_t timed_out;     /* 已判定TIMEOUT，可能仍待入队；不得再交付COMPLETE。 */
     uint8_t delivery;      /* 已完成但结果队列满时，保留副本直到交付。 */
@@ -175,6 +177,8 @@ static void accept_frame(const tlv_frame_t *frame)
         note_rx_reject(RK_RX_REJECT_NO_PENDING, frame, 0U);
         return;
     }
+    /* IDD不等待RK回应；对方的进度/未知算法FAIL不能代替5s采集与退出。 */
+    if (s_pending.idd) return;
     //seq是否合规
     if ((uint64_t)(frame->sequence - s_pending.sequence) >
         (uint64_t)(s_pending.last_tx_sequence - s_pending.sequence)) {
@@ -234,6 +238,30 @@ static void process_request(void)
     deliver_result();
     // 如果上轮请求仍在等待中，检查是否超时
     if (s_pending.waiting) {
+        if (s_pending.idd) {
+            if (result_wait_expired()) {
+                rk_idd_cancel();
+                s_pending.timed_out = 1U;
+                finish_request(RK_RESPONSE_TIMEOUT);
+            }
+            rk_response_t response;
+            if (rk_idd_process(&response)) {
+                if (s_pending.timed_out) {
+                    /* 已报超时，只有确认退出已发完才恢复；不能再交付0109。 */
+                    if (response.status != RK_RESPONSE_TIMEOUT) {
+                        s_pending.waiting = 0U;
+                        s_pending.recovered = 1U;
+                    }
+                } else {
+                    finish_request(response.status);
+                    s_pending.response.result = response.result;
+                    s_pending.response.measurement = response.measurement;
+                    s_pending.timed_out = response.status == RK_RESPONSE_TIMEOUT;
+                    s_pending.waiting = s_pending.timed_out;
+                }
+            }
+            return;
+        }
         if (result_wait_expired()) {
             s_pending.timed_out = 1U;
             finish_request(RK_RESPONSE_TIMEOUT);
@@ -264,6 +292,17 @@ static void process_request(void)
     }
     //分配新的Seq，打包请求帧，并发送到UART
     s_pending.sequence = rk_link_next_sequence();
+    const rk_command_descriptor_t *descriptor = rk_command_find_by_id(request.command_id);
+    if (descriptor != NULL && descriptor->category == RK_COMMAND_CATEGORY_PARAMETRIC) {
+        if (rk_idd_start(request.command_id, s_pending.sequence) != 0) {
+            finish_request(RK_RESPONSE_TX_FAILED);
+            return;
+        }
+        s_pending.idd = s_pending.waiting = 1U;
+        s_pending.sent_tick = xTaskGetTickCount();
+        s_pending.last_tx_sequence = s_pending.sequence;
+        return;
+    }
     uint8_t wire[TLV_TIMING_FRAME_SIZE];
     int length = timing ? tlv_pack_timing(request.command_id, request.parameter_value,
                                         s_pending.sequence, wire, sizeof(wire)) :
@@ -294,6 +333,7 @@ static void process_request(void)
 /* B1掉电不静默清结果；未执行请求逐条返回POWER_OFF，不假装完成测试。 */
 static void process_power_off(void)
 {
+    rk_idd_power_off();
     s_timing_gap = 0U;
     if (s_pending.waiting) {
         s_pending.waiting = 0U;
@@ -352,6 +392,7 @@ void StartRkTask(void *argument)
     tlv_sm_init(&stream);
 
     memset(&s_pending, 0, sizeof(s_pending));
+    rk_idd_init();
     TickType_t last_heartbeat = xTaskGetTickCount();
 
 

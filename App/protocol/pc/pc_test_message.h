@@ -170,6 +170,7 @@ typedef struct {
  *       physicalAddr固定为空。PASS的地址为null且错误类型为空；FAIL地址0仍保留为十六进制字符串。
  *       testTimeMs按uint64十进制JSON整数无损输出，不经过double换算。
  */
+/* parametric成功结果固定两颗testStatus=1、resultDesc=null；尚未接入电流判限。 */
 cJSON *pc_algorithm_result_create(const char *algorithm_type, const char *algorithm_name,
     uint32_t algorithm_index, const char *site_id, uint64_t elapsed_ms,
     const pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT]);

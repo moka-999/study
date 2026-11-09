@@ -96,3 +96,12 @@ void rk_trace_ready(uint64_t sequence, int queried)
     trace_line("RK RX", "SPL ready seq=%s freqQuery=%s", trace_u64(sequence, seq),
                queried < 0 ? "unbound" : queried ? "1" : "0");
 }
+
+void rk_trace_idd_result(const idd_session_result_t *result)
+{
+    if (result == NULL) return;
+    trace_line("IDD", "cmd=%04X windowMs=%lu samples=%lu flags=%02lX maxGapMs=%lu",
+               result->command, (unsigned long)result->collected_ms,
+               (unsigned long)result->stored_samples, (unsigned long)result->flags,
+               (unsigned long)result->max_gap_ms);
+}

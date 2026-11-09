@@ -396,6 +396,7 @@ cJSON *pc_algorithm_result_create(const char *algorithm_type, const char *algori
     if (!algorithm_type || !algorithm_name || !site_id || !dies ||
         (strcmp(algorithm_type, "functional") != 0 && strcmp(algorithm_type, "parametric") != 0))
         return NULL;
+    int idd = strcmp(algorithm_type, "parametric") == 0;
     for (size_t die = 0U; die < PC_FUNCTIONAL_DIE_COUNT; ++die) {
         if (!dies[die].error_type || dies[die].failed > 1U) return NULL;
     }
@@ -430,9 +431,18 @@ cJSON *pc_algorithm_result_create(const char *algorithm_type, const char *algori
         }
         /* 子节点已归root所有；失败删除整棵树，不交付单颗或半截结果。 */
         if (!cJSON_AddNumberToObject(entry, "mirrorIndex", die) ||
-            !cJSON_AddNumberToObject(entry, "testStatus", dies[die].failed ? 0 : 1)) {
+            !cJSON_AddNumberToObject(entry, "testStatus", !idd && dies[die].failed ? 0 : 1)) {
             cJSON_Delete(root);
             return NULL;
+        }
+        /* IDD当前仅表示采集完成，用户约定两颗默认PASS；判限尚未接入。 */
+        if (idd) {
+            if (!cJSON_AddNullToObject(entry, "resultDesc") ||
+                !cJSON_AddStringToObject(entry, "physicalAddr", "")) {
+                cJSON_Delete(root);
+                return NULL;
+            }
+            continue;
         }
         cJSON *desc = cJSON_AddObjectToObject(entry, "resultDesc");
         /* 手动输出u64十六进制，避免double及精简printf损失首错地址精度。 */

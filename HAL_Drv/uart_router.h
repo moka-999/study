@@ -78,4 +78,11 @@ int uart_get_rx_diagnostics(int id, uart_rx_diagnostics_t *out);
  */
 int uart_send(int id, uint8_t *buffer, uint16_t length);
 
+/* 与uart_send相同的整帧入队合同，另返回非0票据。每端口仅一帧可在途跟踪，
+ * 已完成票据保留到下一次跟踪发送；失败不写ticket，不改变已排队字节。 */
+int uart_send_tracked(int id, uint8_t *buffer, uint16_t length, uint32_t *ticket);
+/* 1本帧最后停止位已发出/0在途/-1参数或票据失效；仅1时输出HAL毫秒时间戳。
+ * 不证明RK收到或执行；任务上下文调用，不等待、不清除完成事件。 */
+int uart_tx_status(int id, uint32_t ticket, uint32_t *completed_ms);
+
 #endif /* UART_ROUTER_H */

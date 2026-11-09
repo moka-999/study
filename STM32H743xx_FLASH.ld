@@ -260,6 +260,14 @@ SECTIONS
     . = ALIGN(8);
   } >DTCMRAM
 
+  /* IDD逐点缓冲81920字节；不占DTCM/任务栈/RTOS堆，使用前逐项写入。 */
+  .idd_capture (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.idd_capture)
+    . = ALIGN(4);
+  } >RAM
+
   /* FreeRTOS 128KiB 动态堆放 AXI SRAM，避免耗尽 DTCM 任务栈空间。 */
   .heap (NOLOAD) :
   {
