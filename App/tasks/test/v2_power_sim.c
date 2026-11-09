@@ -34,12 +34,15 @@ static void sample_now(uint32_t now)
             (uint32_t)s_latest.memory.voltage_mv[rail] * s_latest.memory.idd[rail].current_ma / 1000U;
     }
     (void)idd_stats_feed(&s_stats, now, now, &s_latest.memory);
+    monitor_publish_sample(&s_latest.memory,
+                           MEMORY_MONITOR_VALID_VOLTAGE | MEMORY_MONITOR_VALID_IDD, now, now);
 }
 
 void v2_power_sim_poll(void)
 {
     uint32_t now = HAL_GetTick();
     if ((uint32_t)(now - s_latest.timestamp_ms) >= 500U) sample_now(now);
+    monitor_publish_sample(NULL, 0U, now, now);
     idd_stats_poll(&s_stats, now);
 }
 

@@ -14,11 +14,22 @@
 #define UART_TX_RING_SIZE       2048U /* 2的幂，实际可用容量为2047字节。 */
 #define UART_TX_LOCK_TIMEOUT_MS  100U
 
+typedef enum {
+    UART_TX_UNTRACKED = 0,
+    UART_TX_TRACKED_QUEUED,
+    UART_TX_TRACKED_DRAINING,
+    UART_TX_TRACKED_COMPLETE
+} uart_tx_tracking_t;
+
 typedef struct {
     uint8_t data[UART_TX_RING_SIZE];
     volatile uint16_t head; /* 仅ISR推进：下一字节读取位置。 */
     volatile uint16_t tail; /* 任务持锁推进：下一字节写入位置。 */
     SemaphoreHandle_t mutex;
+    volatile uint32_t ticket;
+    volatile uint32_t completed_ms;
+    volatile uint16_t tracked_end;
+    volatile uart_tx_tracking_t tracked; /* 排队、等待最后停止位、完成三个跟踪阶段。 */
 } uart_tx_ring_t;
 
 static uart_tx_ring_t s_uart1_tx;
@@ -62,6 +73,13 @@ static void uart_tx_drain(UART_HandleTypeDef *uart)
         }
         instance->TDR = ring->data[ring->head];
         ring->head = (uint16_t)(ring->head + 1U) & (UART_TX_RING_SIZE - 1U);
+        if (ring->tracked == UART_TX_TRACKED_QUEUED && ring->head == ring->tracked_end) {
+            /* 不让后续载荷越过本帧TC边界；TC表示移位寄存器也已发完。 */
+            instance->CR1 &= ~USART_CR1_TXEIE;
+            ring->tracked = UART_TX_TRACKED_DRAINING;
+            __HAL_UART_ENABLE_IT(uart, UART_IT_TC);
+            break;
+        }
     }
 }
 
@@ -71,7 +89,33 @@ void uart_tx_isr_attach(void)
     huart2.TxISR = uart_tx_drain;
 }
 
-static int uart_queue_send(uart_if_t *port, uint8_t *buffer, uint16_t length)
+/* HAL结束TC处理时会清TxISR；恢复本驱动钩子后继续发送后续已排队载荷。 */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *uart)
+{
+    uart_tx_ring_t *ring = find_tx_ring(uart);
+    if (ring == NULL) return;
+    if (ring->tracked == UART_TX_TRACKED_DRAINING) {
+        ring->completed_ms = HAL_GetTick();
+        ring->tracked = UART_TX_TRACKED_COMPLETE;
+    }
+    uart->TxISR = uart_tx_drain;
+    if (ring->head != ring->tail) __HAL_UART_ENABLE_IT(uart, UART_IT_TXE);
+}
+
+int uart_hw_tx_status(uart_if_t *port, uint32_t ticket, uint32_t *completed_ms)
+{
+    uart_tx_ring_t *ring = port != NULL ? find_tx_ring(port->handle) : NULL;
+    if (ring == NULL || ticket == 0U || completed_ms == NULL) return IF_ERR;
+    uint32_t saved_primask = __get_PRIMASK();
+    __disable_irq();
+    int result = ticket != ring->ticket ? IF_ERR : (ring->tracked == UART_TX_TRACKED_COMPLETE ? 1 : 0);
+    if (result == 1) *completed_ms = ring->completed_ms;
+    __set_PRIMASK(saved_primask);
+    return result;
+}
+
+static int queue_send(uart_if_t *port, uint8_t *buffer, uint16_t length,
+                       uint32_t *ticket)
 {
     if (port == NULL || buffer == NULL || length == 0U ||
         length >= UART_TX_RING_SIZE) {
@@ -89,13 +133,15 @@ static int uart_queue_send(uart_if_t *port, uint8_t *buffer, uint16_t length)
     /* 整帧空间不足时不复制任何字节，由调用者决定退避、重排或丢弃。 */
     uint16_t available = (uint16_t)(ring->head - ring->tail - 1U) &
                          (UART_TX_RING_SIZE - 1U);
-    if (length > available) {
+    if (length > available || (ticket != NULL && (ring->tracked == UART_TX_TRACKED_QUEUED || ring->tracked == UART_TX_TRACKED_DRAINING))) {
         xSemaphoreGive(ring->mutex);
         return IF_ERR;
     }
+    /* 先复制到尚未发布的位置；ISR只能看到旧tail，不能抢先发送本帧。 */
+    uint16_t tail = ring->tail;
     for (uint16_t index = 0U; index < length; ++index) {
-        ring->data[ring->tail] = buffer[index];
-        ring->tail = (uint16_t)(ring->tail + 1U) & (UART_TX_RING_SIZE - 1U);
+        ring->data[tail] = buffer[index];
+        tail = (uint16_t)(tail + 1U) & (UART_TX_RING_SIZE - 1U);
     }
 
     /*
@@ -105,11 +151,30 @@ static int uart_queue_send(uart_if_t *port, uint8_t *buffer, uint16_t length)
      */
     uint32_t saved_primask = __get_PRIMASK();
     __disable_irq();
-    __HAL_UART_ENABLE_IT(uart, UART_IT_TXE);
+    if (ticket != NULL) {
+        if (++ring->ticket == 0U) ++ring->ticket;
+        *ticket = ring->ticket;
+        ring->tracked_end = tail;
+        ring->tracked = UART_TX_TRACKED_QUEUED;
+    }
+    ring->tail = tail;
+    if (ring->tracked != UART_TX_TRACKED_DRAINING) __HAL_UART_ENABLE_IT(uart, UART_IT_TXE);
     __set_PRIMASK(saved_primask);
 
     xSemaphoreGive(ring->mutex);
     return IF_OK;
+}
+
+static int uart_queue_send(uart_if_t *port, uint8_t *buffer, uint16_t length)
+{
+    return queue_send(port, buffer, length, NULL);
+}
+
+int uart_hw_send_tracked(uart_if_t *port, uint8_t *buffer, uint16_t length,
+                          uint32_t *ticket)
+{
+    if (ticket == NULL) return IF_ERR;
+    return queue_send(port, buffer, length, ticket);
 }
 
 /* DMA缓冲的地址/生命周期由路由层保证；这里仅启动一次接收。 */

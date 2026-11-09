@@ -227,6 +227,22 @@ void vTaskDelay(TickType_t ticks)
     }
 }
 
+static uint32_t observed_current, observed_voltage, observed_polls;
+static void observe_sample(const memory_monitor_sample_t *sample, uint8_t groups,
+                            uint32_t begin_ms, uint32_t end_ms)
+{
+    CHECK(end_ms == clock_ms && (uint32_t)(end_ms - begin_ms) <= 2000U);
+    if (sample == NULL) {
+        CHECK(groups == 0U && !locked);
+        CHECK(observed_current == samples && observed_voltage == voltage_samples);
+        ++observed_polls;
+    } else {
+        CHECK(locked);
+        if (groups & MEMORY_MONITOR_VALID_IDD) ++observed_current;
+        if (groups & MEMORY_MONITOR_VALID_VOLTAGE) ++observed_voltage;
+    }
+}
+
 static void test_idd_integration(void)
 {
     idd_stats_t stats;
@@ -270,6 +286,8 @@ static void test_idd_integration(void)
         state = task_case == TASK_OFF ? PWR_CTRL_STATE_OFF : PWR_CTRL_STATE_ON;
         busy = 0;
         samples = loops = 0U;
+        observed_current = observed_voltage = observed_polls = 0U;
+        monitor_set_sample_observer(observe_sample);
         voltage_polls = voltage_samples = status_reads = init_calls = 0U;
         maximum_current_gap_ms = 0U;
         voltage_collecting = 0U;
@@ -277,6 +295,9 @@ static void test_idd_integration(void)
                      task_case == TASK_CACHE_EXPIRE ? 1200U : 120U;
         monitor_idd_cancel();
         if (setjmp(task_exit) == 0) StartMonitorTask(NULL);
+        monitor_set_sample_observer(NULL);
+        CHECK(observed_polls == loops);
+        CHECK(observed_current == samples && observed_voltage == voltage_samples);
         CHECK(!locked);
         busy = 0;
         CHECK(monitor_idd_get(&stats));

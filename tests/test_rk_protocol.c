@@ -4,6 +4,8 @@
 #include "state_machine.h"
 #include "crc.h"
 #include "rk_link.h"
+#include "monitor_task.h"
+#include "idd_session.h"
 #include <setjmp.h>
 #include <string.h>
 #include "rk_task_under_test.h"
@@ -80,11 +82,12 @@ int uart_poll_rx(int id, uint8_t *buffer, uint16_t length)
 }
 int uart_send(int id, uint8_t *buffer, uint16_t length)
 {
-    CHECK(id == 0 && (length == 22U || length == 16U || length == 30U || length == 34U));
+    CHECK(id == 0 && (length == 22U || length == 16U || length == 30U || length == 34U || length == 27U));
     tlv_frame_t frame;
     CHECK(tlv_unpack(buffer, length, &frame) == (length == 16U ? 0 : length == 22U ? 1 : 2));
     CHECK((length == 22U && frame.units[0].type == TLV_TYPE_CMD) ||
           (length == 16U && frame.count == 0U) ||
+          (length == 27U && frame.units[1].type == TLV_TYPE_PARAM_ACTION) ||
           (length == 30U && frame.units[1].type == TLV_TYPE_TIMING_VALUE) ||
           (length == 34U && frame.units[1].type == TLV_TYPE_FREQUENCY_VALUE));
     CHECK(tx_attempts < sizeof(tx_log) / sizeof(tx_log[0]));
@@ -101,6 +104,44 @@ int uart_send(int id, uint8_t *buffer, uint16_t length)
     ++sent;
     return 0;
 }
+/* 使用真正的IDD适配/会话，平台桩分别控制入队和最后停止位完成。 */
+static monitor_sample_observer_t sample_observer;
+static uint32_t tx_ticket, tx_completed_ms;
+static int tx_completed;
+SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *storage) { storage->locked = 0; return storage; }
+int xSemaphoreTake(SemaphoreHandle_t mutex, uint32_t wait)
+{ (void)wait; CHECK(mutex && !mutex->locked); mutex->locked = 1; return pdTRUE; }
+int xSemaphoreGive(SemaphoreHandle_t mutex)
+{ CHECK(mutex && mutex->locked); mutex->locked = 0; return pdTRUE; }
+void monitor_set_sample_observer(monitor_sample_observer_t observer) { sample_observer = observer; }
+int uart_send_tracked(int id, uint8_t *data, uint16_t length, uint32_t *ticket)
+{
+    if (uart_send(id, data, length) != 0) return -1;
+    *ticket = ++tx_ticket;
+    tx_completed = 0;
+    return 0;
+}
+int uart_tx_status(int id, uint32_t ticket, uint32_t *completed_ms)
+{
+    CHECK(id == UART_PORT_RK_PROTOCOL && ticket == tx_ticket);
+    if (tx_completed) *completed_ms = tx_completed_ms;
+    return tx_completed;
+}
+static void complete_tx(uint32_t at) { tx_completed_ms = at; tx_completed = 1; }
+static void sample_at(uint32_t begin, uint32_t end, uint32_t current, uint8_t valid)
+{
+    memory_monitor_sample_t sample = {0};
+    sample.valid_mask = valid;
+    for (unsigned rail = 0; rail < 3U; ++rail) {
+        sample.idd[rail].current_ua = current + rail;
+        sample.voltage_mv[rail] = 1800 - (int32_t)rail * 600;
+    }
+    tick = end;
+    sample_observer(&sample, MEMORY_MONITOR_VALID_IDD | MEMORY_MONITOR_VALID_VOLTAGE, begin, end);
+}
+static void pump_samples(uint32_t now)
+{ tick = now; sample_observer(NULL, 0U, now, now); }
+
 typedef struct { unsigned count, size; uint8_t data[8][sizeof(rk_response_t)]; } fake_queue_t;
 static fake_queue_t requests = {.size = sizeof(rk_request_t)};
 static fake_queue_t responses = {.size = sizeof(rk_response_t)};
@@ -658,6 +699,8 @@ static void test_transaction(void)
 /* 每组故障注入清理桩与事务；RK序号仍由真实分配器持续递增，不在桩里重造。 */
 static void reset_task_test(void)
 {
+    rk_idd_init();
+    rk_idd_power_off();
     s_timing_gap = 0U;
     uint32_t frequency_token;
     (void)rk_link_frequency_get(&frequency_token);
@@ -674,7 +717,7 @@ static void reset_task_test(void)
     rx_wire_length = 0U;
 }
 
-/* IDD当前按编号单次下发，沿用最终结果事务；不自动发送进入/退出或重试。 */
+/* 全16项进入/退出与采样窗口；RK进度/最终包不能提前释放事务。 */
 static void test_idd_transactions(void)
 {
     for (uint16_t command = 21U; command <= 36U; ++command) {
@@ -682,24 +725,112 @@ static void test_idd_transactions(void)
         rk_request_t request = {command, 1000U + command, 0U, 0U};
         CHECK(rk_link_request(&request) == 0);
         process_request();
-        CHECK(sent == 1U && tx_attempts == 1U && s_pending.waiting);
-        CHECK(tx_log[0].type == TLV_TYPE_CMD && tx_log[0].command == command);
+        CHECK(sent == 1U && s_pending.waiting && tx_log[0].value == 1U);
+        CHECK(tx_log[0].command == command);
         tlv_frame_t progress = progress_frame(s_pending.sequence, command, 50U);
         accept_frame(&progress);
-        CHECK(s_pending.waiting && s_pending.progress_valid && s_pending.progress_percent == 50U);
-        tlv_frame_t result = task_result_frame(s_pending.sequence, 1U, 0U);
-        accept_frame(&result); CHECK(s_pending.waiting);
-        result = task_result_frame(s_pending.sequence, command, 0U);
+        tlv_frame_t result = task_result_frame(s_pending.sequence, command, 0U);
         accept_frame(&result); process_request();
         rk_response_t response;
+        CHECK(s_pending.waiting && rk_link_receive(&response) == 0);
+        /* 入队后尚未TC的样本不计；TC=100，采集起点必须105，不能取任务醒来时刻。 */
+        sample_at(90U, 91U, 999999U, MEMORY_MONITOR_VALID_ALL);
+        complete_tx(100U);
+        sample_at(104U, 105U, 999999U, MEMORY_MONITOR_VALID_ALL);
+        sample_at(105U, 105U, 1000U, MEMORY_MONITOR_VALID_ALL);
+        sample_at(105U, 105U, 3000U, MEMORY_MONITOR_VALID_ALL); /* 同毫秒新读数也保存。 */
+        for (uint32_t now = 1105U; now < 5105U; now += 1000U) pump_samples(now);
+        sample_at(5103U, 5104U, 5000U, MEMORY_MONITOR_VALID_ALL);
+        pump_samples(5105U); process_request();
+        CHECK(sent == 2U && tx_log[1].command == command && tx_log[1].value == 0U);
+        CHECK(s_pending.waiting && rk_link_receive(&response) == 0);
+        /* 观察者等待锁前记录的旧结束时刻不能令退出TX超时减法回绕。 */
+        sample_observer(NULL, 0U, 5100U, 5100U);
+        process_request(); CHECK(s_pending.waiting && rk_link_receive(&response) == 0);
+        sample_at(5110U, 5111U, 999999U, MEMORY_MONITOR_VALID_ALL);
+        complete_tx(5112U); tick = 5113U;
+        process_request(); process_request();
         CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
         CHECK(response.cookie == request.cookie && response.result.command_id == command);
         CHECK(response.result.failed == 0U && response.result.failure_count == 0U);
-        CHECK(sent == 1U && !s_pending.waiting);
+        CHECK(response.measurement.state == IDD_STATS_COMPLETE);
+        CHECK(response.measurement.current[0].valid_count == 3U);
+        CHECK(response.measurement.current[0].sum == 9000 && response.measurement.current[0].mean == 3000);
+        CHECK(response.measurement.current[0].minimum == 1000 && response.measurement.current[0].maximum == 5000);
+        CHECK(response.measurement.voltage[0].valid_count == 2U);
         accept_frame(&result); process_request();
-        CHECK(rk_link_receive(&response) == 0 && sent == 1U);
+        CHECK(rk_link_receive(&response) == 0 && sent == 2U && !s_pending.waiting);
     }
     reset_task_test();
+}
+
+/* 故障不能形成默认PASS；无RK ACK时仍须保证退出发送完成和单在途背压。 */
+static void test_idd_failures(void)
+{
+    rk_request_t request = {21U, 500U, 0U, 0U};
+    rk_response_t response;
+    reset_task_test(); tx_failure = 1;
+    CHECK(rk_link_request(&request) == 0); process_request(); process_request();
+    CHECK(!s_pending.waiting && rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_TX_FAILED);
+    /* 进入没有TC，不能开始采样，也不能因RK最终包或下一请求解除占用。 */
+    reset_task_test(); CHECK(rk_link_request(&request) == 0); process_request();
+    tick = 1000U; process_request(); process_request();
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_TIMEOUT && s_pending.waiting);
+    tlv_frame_t stale = task_result_frame(s_pending.sequence, request.command_id, 0U);
+    accept_frame(&stale); CHECK(s_pending.waiting);
+    CHECK(rk_link_request(&request) == 0); process_request(); CHECK(requests.count == 1U && sent == 1U);
+#if defined(B1_RK_UART)
+    power_on = PWR_CTRL_STATE_OFF; process_power_off();
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_RECOVERED);
+#endif
+    /* 依次注入空窗口、无效电流、容量溢出、退出入队失败、退出TC丢失、采样停滞。 */
+    for (unsigned fault = 0U; fault < 6U; ++fault) {
+        reset_task_test(); CHECK(rk_link_request(&request) == 0); process_request();
+        complete_tx(0U); pump_samples(5U);
+        if (fault == 1U) sample_at(5U, 5U, 1000U, MEMORY_MONITOR_VALID_VOLTAGE);
+        if (fault >= 2U) sample_at(5U, 5U, 1000U, MEMORY_MONITOR_VALID_ALL);
+        if (fault == 2U) {
+            for (unsigned n = 0U; n < IDD_SESSION_CAPACITY; ++n)
+                sample_at(6U, 6U, n, MEMORY_MONITOR_VALID_ALL);
+        } else if (fault == 5U) {
+            tick = 1006U; /* 没有生产者轮末事件，必须走异常退出。 */
+        } else {
+            for (uint32_t now = 1005U; now <= 5005U; now += 1000U) pump_samples(now);
+        }
+        tx_failure = fault == 3U;
+        process_request();
+        if (fault == 4U) { tick += 1000U; process_request(); }
+        else if (fault != 3U) { complete_tx(tick + 1U); ++tick; process_request(); }
+        process_request();
+        CHECK(rk_link_receive(&response) == 1);
+        CHECK(response.status == ((fault == 3U || fault == 4U) ? RK_RESPONSE_TIMEOUT : RK_RESPONSE_MEASUREMENT_FAILED));
+        CHECK(s_pending.waiting == (fault == 3U || fault == 4U));
+        CHECK(rk_link_receive(&response) == 0);
+    }
+    /* 显式timeoutMs只报一次TIMEOUT，退出TC后再RECOVERED；绝不补报0109。 */
+    reset_task_test(); request.timeout_ms = 100U;
+    CHECK(rk_link_request(&request) == 0); process_request(); complete_tx(0U);
+    sample_at(5U, 6U, 1000U, MEMORY_MONITOR_VALID_ALL);
+    tick = 100U; process_request(); process_request();
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_TIMEOUT && s_pending.waiting);
+    complete_tx(101U); tick = 101U; process_request(); process_request();
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_RECOVERED && !s_pending.waiting);
+    /* 窗口跨毫秒回绕，结果队列满时保留冻结统计；下一请求不能覆盖。 */
+    reset_task_test(); request.timeout_ms = 0U; tick = UINT32_MAX - 10U;
+    CHECK(rk_link_request(&request) == 0); process_request(); complete_tx(tick);
+    uint32_t start = tick + 5U;
+    sample_at(start, start, 1111U, MEMORY_MONITOR_VALID_ALL);
+    for (unsigned n = 1U; n <= 5U; ++n) pump_samples(start + n * 1000U);
+    process_request(); complete_tx(tick + 1U); ++tick;
+    responses.count = 8U; CHECK(rk_link_request(&request) == 0);
+    process_request(); process_request();
+    CHECK(s_pending.delivery && requests.count == 1U);
+    CHECK(s_pending.response.measurement.current[0].sum == 1111);
+    responses.count = 0U; process_request();
+    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
+    CHECK(response.measurement.current[0].valid_count == 1U && response.measurement.current[0].sum == 1111);
+    reset_task_test();
+    message("PASS: IDD sampling/TX faults, explicit timeout, power recovery, wrap and queue backpressure\n");
 }
 
 /* 拒绝记录只增加可观测性；合法帧、窗口及最终结果交付必须维持原合同。 */
@@ -1708,10 +1839,10 @@ void test_main(void)
     test_timeout_recovery_backpressure();
     test_atomic_result(); test_latest_received_sequence(); test_result_stream();
     test_heartbeat(); test_ready_heartbeat(); test_task_fairness();
-    test_idd_action_codec(); test_idd_transactions(); test_register_address_codec();
+    test_idd_action_codec(); test_idd_transactions(); test_idd_failures(); test_register_address_codec();
 #if defined(TEST_B1_PROTOCOL_TRACE)
     test_protocol_trace();
 #endif
-    message("PASS: FUNC/IDD categories, IDD number-only transactions, standalone action and register address codecs\n");
+    message("PASS: FUNC/IDD categories, IDD enter/capture/exit transactions, standalone action and register address codecs\n");
     message("PASS: RK protocol and transaction, empty heartbeat, progress, atomic dual-die result, actual C offline only\n"); finish(0);
 }

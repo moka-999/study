@@ -16,6 +16,9 @@
 /* 已丢失字节连续性；消费者必须先重置半帧状态，再继续poll，不能按字节数使用。 */
 #define UART_RX_GAP (-1)
 
+/* V2逻辑槽0固定USART1 RK协议，不与B1物理UART编号混用。 */
+enum { UART_PORT_RK_PROTOCOL = 0 };
+
 typedef struct {
     uint32_t queue_overflows;  /* ISR投队列失败次数。 */
     uint32_t dropped_blocks;   /* 已知丢弃块数，含断流后清队列；不是物理丢失字节数。 */
@@ -70,5 +73,12 @@ int uart_get_rx_diagnostics(int id, uart_rx_diagnostics_t *out);
  *       发完或RK收到；调用方须决定失败重试/丢弃策略，禁止ISR调用。
  */
 int uart_send(int id, uint8_t *buffer, uint16_t length);
+
+/* 与uart_send相同的整帧入队合同，另返回非0票据。每端口仅一帧可在途跟踪，
+ * 已完成票据保留到下一次跟踪发送；失败不写ticket，不改变已排队字节。 */
+int uart_send_tracked(int id, uint8_t *buffer, uint16_t length, uint32_t *ticket);
+/* 1本帧最后停止位已发出/0在途/-1参数或票据失效；仅1时输出HAL毫秒时间戳。
+ * 不证明RK收到或执行；任务上下文调用，不等待、不清除完成事件。 */
+int uart_tx_status(int id, uint32_t ticket, uint32_t *completed_ms);
 
 #endif /* UART_ROUTER_H */

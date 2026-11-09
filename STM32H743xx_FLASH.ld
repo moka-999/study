@@ -241,6 +241,14 @@ SECTIONS
   PROVIDE( __bss_start = __tbss_start );
   PROVIDE( __bss_size = __bss_end - __bss_start );
 
+  /* IDD逐点缓冲81920字节；不占DTCM/任务栈/RTOS堆，使用前逐项写入。 */
+  .idd_capture (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.idd_capture)
+    . = ALIGN(4);
+  } >RAM
+
   /* FreeRTOS 堆 —— 放在 SRAM1 (0x24000000)，释放 DTCM */
   .heap (NOLOAD) :
   {

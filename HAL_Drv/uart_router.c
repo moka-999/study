@@ -196,3 +196,16 @@ int uart_send(int id, uint8_t *buffer, uint16_t length)
         return IF_ERR;
     return s_slots[id].interface->send(s_slots[id].interface, buffer, length);
 }
+
+/* 跟踪最后停止位，不把入队成功当作发送完成；每端口只允许一张在途票据。 */
+int uart_send_tracked(int id, uint8_t *buffer, uint16_t length, uint32_t *ticket)
+{
+    if (!slot_is_registered(id)) return IF_ERR;
+    return uart_hw_send_tracked(s_slots[id].interface, buffer, length, ticket);
+}
+
+int uart_tx_status(int id, uint32_t ticket, uint32_t *completed_ms)
+{
+    if (!slot_is_registered(id)) return IF_ERR;
+    return uart_hw_tx_status(s_slots[id].interface, ticket, completed_ms);
+}

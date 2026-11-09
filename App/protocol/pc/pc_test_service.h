@@ -10,10 +10,11 @@
  * 请求受理，不保证算法已下发。缺少板级配置/RK适配器仍拒绝，不伪造确认。
  * start中的字符串/JSON只借用至返回；在途上下文保存静态算法目录及必要字段副本。
  * request_command仅允许0103/FUNC或0108/PARA，名称须属于对应RK算法类别。
- * PARA先只下发编号并等待最终结果；当前统计是执行全程，不是标准IDD有效窗口。
+ * PARA发送101A进入，实际发完后等5ms并采集5s，再发送退出；不等待RK应答。
+ * 0109两颗默认PASS/resultDesc=null，电流使用逐点统计；这是开发约定，不是标准判限。
  * Freq在启动查询0x35中回复，目标变化通过既有冷启动流程处理；外部模式不接受非负Freq。
  * 普通时序在准备完成后逐项发送，不等待RK回应；发送失败停止，不自动重发。
- * accepted/completed不表示参数已生效；统计在时序发完、算法入队前开始。
+ * accepted/completed不表示参数已生效；FUNC统计在算法入队前开始；IDD统计以进入帧实际发完为基准。
  */
 pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response);

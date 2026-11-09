@@ -122,6 +122,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/pc/tcp_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_link.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/rk/rk_idd.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/led_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/monitor_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/tasks/common/task_watchdog.c

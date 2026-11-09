@@ -692,7 +692,9 @@ static void test_para_message_contract(void)
     const cJSON *results = cJSON_GetObjectItemCaseSensitive(root, "testResults");
     CHECK(cJSON_GetArraySize(results) == 2);
     CHECK(cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(results, 0), "testStatus")->valueint == 1);
-    CHECK(cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(results, 1), "testStatus")->valueint == 0);
+    CHECK(cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(results, 1), "testStatus")->valueint == 1);
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(results, 0), "resultDesc")));
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(results, 1), "resultDesc")));
     cJSON_Delete(root);
     CHECK(pc_algorithm_result_create(NULL, "idd_0", 8U, "3", 100U, dies) == NULL);
     CHECK(pc_algorithm_result_create("slt", "idd_0", 8U, "3", 100U, dies) == NULL);

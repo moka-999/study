@@ -81,7 +81,10 @@ def main() -> None:
     assert "__set_PRIMASK(saved_primask);" in hardware
     assert "__enable_irq()" not in hardware
     assert "was_empty" not in hardware
-    assert hardware.index("ring->data[ring->tail] = buffer[index];") < hardware.index("__HAL_UART_ENABLE_IT")
+    publish = hardware[hardware.index("static int queue_send("):]
+    assert publish.index("ring->data[tail] = buffer[index];") < publish.index("ring->tail = tail;")
+    assert publish.index("ring->tracked_end = tail;") < publish.index("ring->tail = tail;")
+    assert "UART_TX_TRACKED_DRAINING" in publish
     passed += 1
 
     assert "id >= 0 && id < UART_SLOT_COUNT" in router

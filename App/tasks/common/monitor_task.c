@@ -16,6 +16,24 @@
 #include "main.h"
 #include <string.h>
 
+static monitor_sample_observer_t s_sample_observer;
+
+void monitor_set_sample_observer(monitor_sample_observer_t observer)
+{
+    taskENTER_CRITICAL();
+    s_sample_observer = observer;
+    taskEXIT_CRITICAL();
+}
+
+void monitor_publish_sample(const memory_monitor_sample_t *sample, uint8_t groups,
+                             uint32_t begin_ms, uint32_t end_ms)
+{
+    taskENTER_CRITICAL();
+    monitor_sample_observer_t observer = s_sample_observer;
+    taskEXIT_CRITICAL();
+    if (observer != NULL) observer(sample, groups, begin_ms, end_ms);
+}
+
 static memory_monitor_t s_monitor;
 static monitor_snapshot_t s_latest;
 static uint8_t s_has_snapshot;
@@ -276,9 +294,13 @@ int monitor_get_latest(monitor_snapshot_t *snapshot)
 static void feed_sample_group(const memory_monitor_sample_t *sample,
                               uint8_t group, uint32_t begin_ms)
 {
+    uint32_t end_ms = HAL_GetTick();
     taskENTER_CRITICAL();
-    (void)idd_stats_feed_groups(&s_idd_stats, begin_ms, HAL_GetTick(), sample, group);
+    (void)idd_stats_feed_groups(&s_idd_stats, begin_ms, end_ms, sample, group);
     taskEXIT_CRITICAL();
+#if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
+    monitor_publish_sample(sample, group, begin_ms, end_ms);
+#endif
 }
 
 /* 0602仍使用单一sampleAgeMs，取两组有效测量中较老的采集起点，避免假刷新。 */
@@ -377,6 +399,10 @@ void StartMonitorTask(void *argument)
             snapshot.memory.valid_mask = 0U;
         }
 
+#if !defined(ENABLE_V2_POWER_SIMULATION) || !ENABLE_V2_POWER_SIMULATION
+        /* 先交付本轮全部新读数，再推进窗口，避免期限到达时遗漏正在完成的读取。 */
+        monitor_publish_sample(NULL, 0U, HAL_GetTick(), HAL_GetTick());
+#endif
         update_snapshot_age(&snapshot, voltage_ms, current_ms, HAL_GetTick());
         publish_snapshot(&snapshot);
         task_watchdog_progress(TASK_WATCHDOG_MONITOR);

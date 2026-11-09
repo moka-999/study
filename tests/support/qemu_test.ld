@@ -10,6 +10,7 @@ SECTIONS {
     .ARM.exidx : { __exidx_start = .; *(.ARM.exidx*) __exidx_end = .; } >ROM
     .data : { . = ALIGN(4); _sdata = .; *(.data*) . = ALIGN(4); _edata = .; } >RAM AT>ROM
     _sidata = LOADADDR(.data);
+    .idd_capture (NOLOAD) : { *(.idd_capture) } >RAM
     .bss (NOLOAD) : {
         . = ALIGN(8); _sbss = .;
         *(.bss*) *(COMMON)

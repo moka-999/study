@@ -25,6 +25,16 @@ def main():
 #include <stddef.h>
 typedef uint32_t TickType_t;
 typedef void *QueueHandle_t;
+typedef struct { int locked; } StaticSemaphore_t;
+typedef StaticSemaphore_t *SemaphoreHandle_t;
+typedef struct { uint32_t unused; } GPIO_TypeDef;
+#define portMAX_DELAY UINT32_MAX
+SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *);
+int xSemaphoreTake(SemaphoreHandle_t, uint32_t);
+int xSemaphoreGive(SemaphoreHandle_t);
+#define UART_PORT_RK_PROTOCOL 0
+int uart_send_tracked(int, uint8_t *, uint16_t, uint32_t *);
+int uart_tx_status(int, uint32_t, uint32_t *);
 #define pdTRUE 1
 #define pdFALSE 0
 #define configTICK_RATE_HZ 1000U
@@ -46,8 +56,13 @@ void task_watchdog_progress(int);
 void led_toggle(int);
 pwr_ctrl_state_t pwr_ctrl_get_state(void);
 '''.replace('/* PWR_STATE_ENUM */', state_enum), encoding='utf-8')
-    for name in ('FreeRTOS', 'task', 'queue', 'uart_router', 'task_watchdog', 'led', 'pwr_ctrl'):
+    for name in ('FreeRTOS', 'task', 'queue', 'uart_router', 'task_watchdog', 'led', 'pwr_ctrl', 'semphr'):
         (build / (name + '.h')).write_text('#include "port.h"\n', encoding='utf-8')
+    (build / 'main.h').write_text('#include "port.h"\n#define HAL_GetTick xTaskGetTickCount\n', encoding='utf-8')
+    (build / 'monitor_task.h').write_text('''#include "memory_monitor.h"
+typedef void (*monitor_sample_observer_t)(const memory_monitor_sample_t *, uint8_t, uint32_t, uint32_t);
+void monitor_set_sample_observer(monitor_sample_observer_t);
+''', encoding='utf-8')
     # 包含目标板的任务文件以执行内部事务状态，不另写一份Python业务模型。
     (build / 'rk_task_under_test.h').write_text(
         '#include "' + (root / 'App/tasks/rk/rk_task.c').as_posix() + '"\n', encoding='utf-8')
@@ -55,10 +70,11 @@ pwr_ctrl_state_t pwr_ctrl_get_state(void);
                '-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-ffunction-sections', '-fdata-sections']
     if root.name == 'b1' or args.b1_power_gate:
         command += ['-DB1_RK_UART=4']
-    command += ['-I' + str(p) for p in (build, root / 'App/protocol/rk', root / 'App/protocol/common', root / 'App/tasks/rk')]
+    command += ['-I' + str(p) for p in (build, root / 'App/protocol/rk', root / 'App/protocol/common', root / 'App/tasks/rk', root / 'HAL_Drv', root / 'BSP/AD7124', root / 'BSP/PAC1934')]
     command += [str(Path(__file__).with_name('test_rk_protocol.c'))]
     command += [str(root / p) for p in ('App/protocol/rk/frame.c', 'App/protocol/rk/state_machine.c',
-                                       'App/protocol/common/crc.c', 'App/tasks/rk/rk_link.c')]
+                                       'App/protocol/common/crc.c', 'App/tasks/rk/rk_link.c', 'App/tasks/rk/rk_idd.c',
+                                       'App/protocol/rk/idd_session.c', 'HAL_Drv/idd_stats.c')]
     support = Path(__file__).resolve().parent / 'support'
     if root.name == 'b1':
         (build / 'main.h').write_text('#include "port.h"\n#define HAL_GetTick xTaskGetTickCount\n', encoding='utf-8')
@@ -67,7 +83,7 @@ pwr_ctrl_state_t pwr_ctrl_get_state(void);
                     str(root / 'App/diagnostics/protocol_trace.c'), str(root / 'App/diagnostics/rk_trace.c'),
                     '-Wl,--defsym=end=_ebss']
     command += [str(support / 'qemu_start.s'), '-nostartfiles', '--specs=nosys.specs',
-                '-T' + str(support / 'qemu_test.ld'), '-Wl,--gc-sections', '-o', str(build / 'test.elf')]
+                '-T' + str(support / 'qemu_test.ld'), '-Wl,--gc-sections,--defsym=end=_ebss', '-o', str(build / 'test.elf')]
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / 'build.log').write_text(result.stdout + result.stderr, encoding='utf-8')
     if result.returncode:

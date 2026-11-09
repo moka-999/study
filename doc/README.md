@@ -10,7 +10,7 @@
 | 确认职责、编号、IP和运行边界 | [需求基线](requirements_baseline.md)；术语见[CONTEXT](../CONTEXT.md) |
 | 修改PC协议或业务 | [PC协议Markdown](pc_tcp_protocol_spec.md)、[PC协议Word](pc_tcp协议.docx)、[内部JSON合同](pc_json_contract.md) |
 | 修改RK协议 | [现行RK协议](protocol_spec.md)、[时序与启动频率接入](rk_timing_frequency_20261105.md)、[11月5日服务器核查与修改边界](rk_protocol_review_20261105.md)、[双颗粒结果解析](rk_dual_die_result_20261010.md)、[进度双TLV](rk_progress_dual_tlv_20261009.md) |
-| 联调PARA与IDD编号 | [内部流程与5s逐点采集准备](idd_session_prepare_20261105.md)、[接入范围及待办](para_integration_20261026.md)、[16项JSON及网络助手HEX](examples/para_start_packets_20261026.md) |
+| 联调PARA与IDD编号 | [IDD正式接入与5s逐点采集](idd_session_prepare_20261105.md)、[接入范围及待办](para_integration_20261026.md)、[16项JSON及网络助手HEX](examples/para_start_packets_20261026.md) |
 | 修改B1–B2 SPI或动态IP | [SPI协议Markdown](b1_b2_spi_protocol.md)、[SPI协议Word](b1_b2_spi协议.docx)、[接入与调用链](b2_spi_integration_20261020.md) |
 | 用第二块V2模拟B2 | [裸机主机的接线、串口命令与构建](../tools/b2_spi_master/README.md) |
 | 单块V2双SPI回环验证 | [同级独立工程、Flash下载、4线接法、板载灯及协议日志](../../b2_spi_loopback/README.md) |
