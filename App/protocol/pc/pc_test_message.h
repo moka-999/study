@@ -113,25 +113,13 @@ pc_test_json_result_t pc_test_start_parse(const cJSON *root,
  */
 pc_test_json_result_t pc_slt_start_parse(const cJSON *root, pc_test_start_view_t *view);
 
-/** 完整校验0107的errorchip数组后返回镜像失败位图；失败保持*failed_mask不变。
+/** 完整校验0107的failChips数组后返回镜像失败位图；失败保持*failed_mask不变。
  * mirror_count由当前板级灯映射提供，范围1..32；physicalAddr须为字符串。
  * 同一镜像可列多颗芯片，重复项幂等；空数组输出0，未知镜像整包拒绝。
  * 不另建链表/复制芯片清单，遍历上限由4096字节完整PDU限制。
  */
 pc_test_json_result_t pc_round_end_parse(const cJSON *root, uint8_t mirror_count,
                                          uint32_t *failed_mask);
-
-/* 010B只借用身份字段；结论由PC提供，不转发给RK或再次上传0105。 */
-typedef struct {
-    const char *site_id;
-    const char *algorithm_name;
-} pc_slt_result_view_t;
-
-/** 校验010B完整结构：slt、null index、两个0/1镜像结果、null保留字段。
- * 返回OK后才可按site/name和活动SLT归属匹配；失败不修改view或任何业务状态。
- * 耗时仅验证非负整数/null，不存储或经double重新转发PC给出的耗时。
- */
-pc_test_json_result_t pc_slt_result_parse(const cJSON *root, pc_slt_result_view_t *view);
 
 /**
  * @brief 创建算法结果JSON对象，并复制各字符串到对象树。
@@ -184,6 +172,7 @@ cJSON *pc_functional_result_create(const char *algorithm_name,
 
 /* 仅借用统计快照，不依赖采样任务或器件；组包不会推进窗口或增加样本。
  * statistics用于0602，measurementData位于0105/0109顶层，表示共轨而非单颗DDR电流。
+ * 电流以mA数值上报，均值四舍五入、最多3位小数；不改采样统计精度。
  * 全部无样本时measurementData为null；部分无样本的单项为null。
  * 返回1成功、0参数/分配失败，失败时调用方删除整个body。
  */

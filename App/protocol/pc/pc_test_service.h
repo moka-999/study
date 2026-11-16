@@ -19,6 +19,11 @@
 pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response);
 
+/* 0104：NULL表示开始停止；否则返回静态错误名。仅TCP上下文调用，无需先0106。
+ * 不等待RK/EDK回应，沿用既有下电；真实OFF及队列/串口清理后才由poll报completed。
+ * 废弃当前未交付结果，保留整轮；失败保留占用，可再次0104重试，不跨连接补响应。 */
+const char *pc_test_service_stop(void);
+
 /** 0106只建立当前连接的整轮；已有整轮/测试/维护操作时拒绝。
  * 使用B2已知模式显示；尚未知的镜像灭灯，不推断为常温；不操作实际加热。
  */
@@ -37,18 +42,13 @@ int pc_test_round_update_modes(uint8_t mask, const uint8_t modes[3]);
 pc_dispatch_result_t pc_test_round_end(uint32_t failed_mask,
     uint32_t sequence, pc_dispatch_response_t *response);
 
-/** 010A的start须经专用解析器验证。不向RK发送算法或检查EDK/测试进度。
- * 默认时序保持原有电源/Boot准备；非负Freq须完成本轮查询回复，非空普通时序须等
- * 本轮SPL普通心跳后发送；completed只表示本地准备/发送完成，仍占用至010B。
+/** 010A的start须经专用解析器验证，沿用FUNC/PARA的整轮及电源/Boot/时序准备。
+ * Freq仅在RK查询时回复，不问也继续；普通时序等本轮SPL心跳后逐项发送。
+ * completed只表示本地准备/发送完成，随后自动003E/EDK/PXE；不表示测试通过。
+ * RELEASE最终应答发完后自动OFF并恢复串口，才解除执行占用；不等待PC结果解析。
+ * 正式流程独立于串口net/start调试入口，仅支持保持PC连接的共存配置。
  */
 pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
-    uint32_t sequence, pc_dispatch_response_t *response);
-
-/** 010B已完整校验后按当前连接/site/name匹配一次；成功仅回收SLT占用。
- * 即使0107已收尾仍可接收本连接的迟到010B，但不得重开整轮或覆盖最终灯。
- * 没有执行ID，不跨TCP连接认领旧SLT，也不以相同名称宣称防重放。
- */
-pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *result,
     uint32_t sequence, pc_dispatch_response_t *response);
 
 /* 非阻塞领取异步响应；1=有完整PDU，0=无响应或RK结果等待组包重试。
@@ -58,7 +58,7 @@ pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *result,
  */
 int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response);
 
-/* 断线结束连接所属整轮并废弃结果，不取消RK、不清除在途/超时未知/SLT占用。 */
+/* 断线结束整轮且不向新连接交付旧结果；SLT仍等RELEASE后自动完成物理收尾。 */
 void pc_test_service_disconnected(void);
 /* 1=准备电源、执行中、结果待组包或超时后状态未知；0=无本服务在途请求。 */
 int pc_test_service_busy(void);

@@ -115,6 +115,7 @@ add_executable(b1
     Core/Src/board_identity.c
     Core/Src/result_led.c
     Core/Src/log_console.c
+    App/tasks/console/net_console.c
     Core/Src/board_diagnostics.c
     Core/Src/freertos.c
     Core/Src/ethernet_board.c
@@ -143,6 +144,11 @@ add_executable(b1
     App/protocol/pc/pc_test_service.c
     App/protocol/pc/pc_power_service.c
     App/protocol/common/crc.c
+    App/protocol/serial_net/serial_net.c
+    App/protocol/serial_net/ip_guard.c
+    App/protocol/serial_net/net_mux.c
+    App/tasks/net_handoff/handoff_state.c
+    App/tasks/net_handoff/handoff_mcu.c
     App/protocol/rk/frame.c
     App/protocol/rk/idd_session.c
     App/protocol/rk/state_machine.c
@@ -192,6 +198,9 @@ target_include_directories(b1 PRIVATE
     App/tasks/common
     App/protocol/b2
     App/protocol/common
+    App/protocol/serial_net
+    App/tasks/net_handoff
+    App/tasks/console
     App/tasks/b2
     Middlewares/Third_Party/cJSON
     LWIP/App

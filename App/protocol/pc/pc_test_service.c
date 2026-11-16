@@ -1,12 +1,15 @@
 #include "pc_test_service.h"
+#include "handoff_mcu.h"
 #include "pc_trace.h"
 #include "pc_tester_info.h"
 #include "pc_power_service.h"
 #include "rk_link.h"
+#include "rk_task_control.h"
 #include "result_led.h"
 #include "b2_service.h"
 #if defined(B1_RK_UART)
 #include "monitor_task.h"
+#include "board_network_config.h"
 #endif
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
 #include "v2_power_sim.h"
@@ -46,8 +49,12 @@ static struct {
     uint8_t active;             /* 包含已经超时但RK仍可能执行的状态。 */
     uint8_t owner_connected;    /* 只有发起测试的原TCP连接可接收结果。 */
     uint8_t preparing;          /* 电源/Boot/READY尚未完成，此时绝不向RK下发算法。 */
-    uint8_t slt;                /* 1=PC负责执行/结果的SLT，不消费RK算法结果队列。 */
-    uint8_t discarded;          /* 0107/断线后不再交付结果；不代表实际测试已停止。 */
+    uint8_t slt;                /* 1=EDK执行并以RELEASE收尾的SLT，不消费RK算法结果队列。 */
+    uint8_t discarded;          /* 0104/0107/断线后不再交付结果；停止是否完成另行确认。 */
+    uint8_t slt_cancelled;       /* 尚未进入EDK便撤销预约，收尾无需等待EDK RELEASE。 */
+    uint8_t slt_off_started, slt_off_done;
+    const char *slt_error;      /* 静态错误字符串；收尾失败保留busy，不自动重新断电。 */
+    uint8_t slt_error_reported;
     rk_request_t pending;       /* 只保存值，不借用已释放的JSON字符串。 */
     uint8_t delivery_pending;   /* 1=已领取结果，等待当前连接成功组包；不重复执行RK。 */
     rk_response_t delivery;    /* 固定一份结果副本；内存不足时不再消费后续恢复事件。 */
@@ -59,8 +66,21 @@ static struct {
     uint32_t accepted_ms;       /* IDD从本条0108受理到0109组包，含准备阶段；uint32毫秒允许回绕。 */
 } s_test;
 static uint8_t s_round_active; /* 仅属于当前TCP连接；算法占用与轮次是否收尾分开记录。 */
+/* 0104不依附被取消算法的响应归属；断线后仍推进，不能交给新连接。 */
+static struct {
+    uint8_t active, owner_connected, power_done, reported;
+    uint32_t cleanup_since_ms;
+    const char *error;
+} s_stop;
+#define PC_STOP_CLEANUP_TIMEOUT_MS 3000U
 static int64_t s_last_frequency = -1; /* 最近受理的完整启动目标；物理就绪仍由电源服务确认。 */
 #define PC_CONFIG_STARTUP_TIMEOUT_MS 60000U
+
+/* 空普通时序的SLT可以先completed、稍后才收到DDR查询；PC收尾/断线不改已启动目标。 */
+static int slt_keeps_boot_frequency(void)
+{
+    return s_test.active && s_test.slt && !s_test.preparing && !s_test.configuring;
+}
 
 /* 映射集中一处，物理颜色仍由板级驱动决定；未来扩展镜像时显式扩充此表。 */
 static const result_led_target_t s_mirror_leds[] = {
@@ -92,8 +112,7 @@ static int operation_response(uint16_t command, const uint32_t *index, uint32_t 
     response->request_command = command;
     cJSON *body = cJSON_CreateObject();
     int result = PC_DISPATCH_ERROR;
-    int has_index = command == PC_COMMAND_START_TEST || command == PC_COMMAND_PARA_START || command == PC_COMMAND_SLT_START ||
-                    command == PC_COMMAND_SLT_RESULT;
+    int has_index = command == PC_COMMAND_START_TEST || command == PC_COMMAND_PARA_START || command == PC_COMMAND_SLT_START;
     if (body && cJSON_AddNumberToObject(body, "requestCommandId", command) &&
         (!has_index || (index ? cJSON_AddNumberToObject(body, "algorithmIndex", *index)
                              : cJSON_AddNullToObject(body, "algorithmIndex"))) &&
@@ -155,7 +174,7 @@ static void save_site_id(const char *fru_site)
 pc_dispatch_result_t pc_test_round_begin(uint32_t sequence, pc_dispatch_response_t *response)
 {
     const char *error = NULL;
-    if (s_round_active || pc_test_service_busy() || pc_power_service_busy())
+    if (s_round_active || pc_test_service_busy() || pc_power_service_busy() || handoff_mcu_busy())
         error = "busy";
     int result = operation_response(PC_COMMAND_ROUND_BEGIN, NULL, sequence,
         error ? "failed" : "completed", error, response);
@@ -180,7 +199,7 @@ pc_dispatch_result_t pc_test_round_end(uint32_t failed_mask,
     s_round_active = 0U;
     if (s_test.active && !s_test.discarded && !s_test.slt) pc_trace_discard(s_test.cookie, "0107");
     s_test.discarded = 1U;
-    rk_link_frequency_end(s_test.cookie);
+    if (!slt_keeps_boot_frequency()) rk_link_frequency_end(s_test.cookie);
     if (s_test.active && !s_test.slt) {
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
         v2_power_sim_test_end(0);
@@ -246,6 +265,8 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
 {
     const pc_rk_test_kind_t *kind = find_test_kind(request_command);
     if (!kind || !start || !response) return PC_DISPATCH_ERROR;
+    if (handoff_mcu_busy())
+        return status_response(request_command, sequence, start->algorithm_index, "busy", response);
     if (s_test.active || pc_power_service_busy())
         return status_response(request_command, sequence, start->algorithm_index, "busy", response);
     if (!s_round_active)
@@ -351,9 +372,14 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response)
 {
     if (!start || !response) return PC_DISPATCH_ERROR;
+    if (handoff_mcu_busy()) return slt_status_response(sequence, "failed", "busy", response);
     if (s_test.active || pc_power_service_busy())
         return slt_status_response(sequence, "failed", "busy", response);
     if (!s_round_active) return slt_status_response(sequence, "failed", "invalidState", response);
+#if !B1_SERIAL_NET_KEEP_TCP
+    /* 正式PC流程必须保持原连接；独占IP模式仅供串口调试。 */
+    return slt_status_response(sequence, "failed", "notSupported", response);
+#endif
     fru_info_t fru;
     if (pc_tester_info_load(&fru) != 0)
         return slt_status_response(sequence, "failed", "flashError", response);
@@ -374,8 +400,13 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
         cJSON_Delete(timing);
         return slt_status_response(sequence, "failed", "invalidArgument", response);
     }
+    if (!handoff_slt_begin(cookie)) {
+        cJSON_Delete(timing);
+        return slt_status_response(sequence, "failed", "busy", response);
+    }
     const char *error = pc_power_service_start(PC_POWER_PREPARE_SLT, &target, start->reboot);
     if (error) {
+        (void)handoff_slt_cancel(cookie);
         cJSON_Delete(timing);
         return slt_status_response(sequence, "failed", error, response);
     }
@@ -385,6 +416,9 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     s_test.site_id[sizeof(s_test.site_id) - 1U] = '\0';
     s_test.active = s_test.owner_connected = s_test.preparing = s_test.slt = 1U;
     s_test.discarded = 0U;
+    s_test.slt_cancelled = 0U;
+    s_test.slt_off_started = s_test.slt_off_done = s_test.slt_error_reported = 0U;
+    s_test.slt_error = NULL;
     s_test.cookie = cookie;
     s_test.timing = start->timing;
     s_test.timing_cursor = s_test.timing_inflight = 0U;
@@ -400,22 +434,46 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     return result;
 }
 
-pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *result,
-    uint32_t sequence, pc_dispatch_response_t *response)
+/* 只由原测试服务消费内部OFF结果；串口命令和PC电源命令不参与此流程。
+ * RELEASED表示EDK最终OK已实际发完，避免PC先收到XML便切断后续HTML上传。
+ */
+static int poll_slt_completion(uint32_t sequence, pc_dispatch_response_t *response)
 {
-    if (!result || !response) return PC_DISPATCH_ERROR;
-    const char *error = NULL;
-    if (!s_test.active || !s_test.slt || s_test.preparing || s_test.configuring || !s_test.owner_connected ||
-        strcmp(result->algorithm_name, s_test.name) != 0 || strcmp(result->site_id, s_test.site_id) != 0)
-        error = "invalidState";
-    int ready = operation_response(PC_COMMAND_SLT_RESULT, NULL, sequence,
-        error ? "failed" : "completed", error, response);
-    if (!error && ready == PC_DISPATCH_RESPONSE_READY) {
-        rk_link_frequency_end(s_test.cookie);
-        s_test.active = s_test.owner_connected = 0U;
-        /* PC已提供实际结束通知；不改0107的汇总灯，也不把报告转发回PC。 */
+    handoff_slt_status_t status = handoff_slt_status(s_test.cookie);
+    if (!s_test.slt_error && !s_test.slt_cancelled && status == HANDOFF_SLT_FAILED) {
+        s_test.slt_error = "executionFailed";
     }
-    return ready;
+    if (!s_test.slt_error && !s_test.slt_cancelled && !s_test.slt_off_started &&
+        status == HANDOFF_SLT_OFF_READY) {
+        s_test.slt_error = "powerOff";
+    }
+    if (!s_test.slt_error && !s_test.slt_off_started &&
+        (status == HANDOFF_SLT_RELEASED || s_test.slt_cancelled)) {
+        s_test.slt_error = pc_power_service_start(PC_POWER_OFF, NULL, 0U);
+        s_test.slt_off_started = s_test.slt_error == NULL;
+    }
+    if (!s_test.slt_error && s_test.slt_off_started && !s_test.slt_off_done) {
+        const char *error = NULL;
+        if (pc_power_service_take(PC_POWER_OFF, &error)) {
+            s_test.slt_error = error;
+            s_test.slt_off_done = error == NULL;
+        }
+    }
+    if (s_test.slt_error) {
+        if (!s_test.owner_connected || s_test.slt_error_reported) return 0;
+        int result = slt_status_response(sequence, "failed", s_test.slt_error, response);
+        if (result == PC_DISPATCH_RESPONSE_READY) s_test.slt_error_reported = 1U;
+        return result;
+    }
+    /* 已取消且从未进入EDK时无需会话状态；两种路径均要求真实OFF及协议恢复。 */
+    if (!s_test.slt_off_done || pwr_ctrl_get_state() != PWR_CTRL_STATE_OFF ||
+        handoff_mcu_busy() || (!s_test.slt_cancelled && status != HANDOFF_SLT_OFF_READY)) {
+        return 0;
+    }
+    rk_link_frequency_end(s_test.cookie);
+    s_test.active = s_test.owner_connected = 0U;
+    /* RELEASE只释放执行占用；不新增PC完成通知，最终灯态仍由0107决定。 */
+    return PC_DISPATCH_NO_RESPONSE;
 }
 
 /* 启动/发送错误是业务失败，不伪造芯片FAIL。部分已发送设置不回滚、不自动重发。 */
@@ -423,8 +481,12 @@ static int preparation_failed(const char *error, uint32_t sequence, pc_dispatch_
 {
     if (s_test.check_frequency_tx) pc_power_service_invalidate();
     rk_link_frequency_end(s_test.cookie);
-    /* SLT已完成上电后仍可能自行运行；配置失败不能冒充PC的010B结束通知。 */
+    /* 尚未进入EDK才可撤销自动预约；已经运行则保留占用等待RELEASE。 */
     s_test.active = s_test.slt && !s_test.preparing;
+    if (s_test.slt) {
+        s_test.slt_cancelled = handoff_slt_cancel(s_test.cookie) != 0;
+        s_test.active = !s_test.slt_cancelled;
+    }
     s_test.preparing = s_test.configuring = s_test.timing_inflight = 0U;
     if (!s_test.owner_connected || s_test.discarded || !response) return 0;
     return s_test.slt ? slt_status_response(sequence, "failed", error, response) :
@@ -458,6 +520,7 @@ static int poll_preparation(uint32_t sequence, pc_dispatch_response_t *response)
         rk_link_frequency_end(s_test.cookie);
         s_test.configuring = 0U;
         if (!s_test.slt) s_test.active = 0U;
+        else s_test.slt_cancelled = handoff_slt_cancel(s_test.cookie) != 0;
         return 0;
     }
 #if defined(B1_RK_UART)
@@ -465,6 +528,10 @@ static int poll_preparation(uint32_t sequence, pc_dispatch_response_t *response)
     if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON)
         return preparation_failed("powerOff", sequence, response);
 #endif
+    if (s_test.slt && s_test.timing.present &&
+        handoff_slt_status(s_test.cookie) == HANDOFF_SLT_EARLY_EDK) {
+        return preparation_failed("notReady", sequence, response);
+    }
     /* 0表示RK尚未查询，可继续；只有实际回复发送失败才终止本次准备。 */
     if (s_test.check_frequency_tx && rk_link_frequency_status(s_test.cookie) < 0)
         return preparation_failed("txFailed", sequence, response);
@@ -503,6 +570,9 @@ static int poll_preparation(uint32_t sequence, pc_dispatch_response_t *response)
     }
     if (!s_test.slt && (error = queue_test(&s_test.pending)) != NULL)
         return preparation_failed(error, sequence, response);
+    if (s_test.slt && !handoff_slt_prepared(s_test.cookie)) {
+        return preparation_failed("notReady", sequence, response);
+    }
     s_test.configuring = 0U;
     return result;
 }
@@ -517,11 +587,64 @@ static void release_delivery(void)
     s_test.delivery_pending = 0U;
 }
 
+const char *pc_test_service_stop(void)
+{
+    if (s_stop.active && !s_stop.error) return "busy";
+    const char *error = pc_power_service_stop();
+    if (error) return error;
+    if (s_test.active && !s_test.discarded) pc_trace_discard(s_test.cookie, "stop");
+    s_test.discarded = 1U;
+    s_test.owner_connected = s_test.preparing = s_test.configuring = 0U;
+    s_test.timing_inflight = s_test.delivery_pending = 0U;
+    s_test.active = 1U; /* 直到RK任务确认清理完毕，下一算法仍须返回busy。 */
+    rk_link_frequency_end(s_test.cookie);
+    monitor_idd_cancel();
+    handoff_mcu_stop();
+    rk_task_stop_begin();
+    s_stop.active = s_stop.owner_connected = 1U;
+    s_stop.power_done = s_stop.reported = 0U;
+    s_stop.error = NULL;
+    return NULL;
+}
+
+static int poll_stop(uint32_t sequence, pc_dispatch_response_t *response)
+{
+    if (!s_stop.power_done && !s_stop.error &&
+        pc_power_service_take(PC_POWER_OFF, &s_stop.error)) {
+        s_stop.power_done = s_stop.error == NULL;
+        s_stop.cleanup_since_ms = HAL_GetTick();
+    }
+    int ready = s_stop.power_done && pwr_ctrl_get_state() == PWR_CTRL_STATE_OFF &&
+                !handoff_mcu_busy() && rk_task_stop_ready();
+    if (!ready && s_stop.power_done && !s_stop.error &&
+        (uint32_t)(HAL_GetTick() - s_stop.cleanup_since_ms) >= PC_STOP_CLEANUP_TIMEOUT_MS)
+        s_stop.error = "timeout";
+    if (!s_stop.error && !ready) return 0;
+    if (s_stop.reported) return 0;
+    int result = PC_DISPATCH_NO_RESPONSE;
+    if (s_stop.owner_connected) {
+        if (!response) return 0;
+        result = operation_response(PC_COMMAND_STOP_TEST, NULL, sequence,
+            s_stop.error ? "failed" : "completed", s_stop.error, response);
+        if (result != PC_DISPATCH_RESPONSE_READY) return 0;
+    }
+    s_stop.reported = 1U;
+    if (!s_stop.error) {
+        rk_task_stop_end();
+        s_stop.active = s_stop.owner_connected = 0U;
+        s_test.active = s_test.slt = 0U;
+        s_last_frequency = -1;
+    }
+    return result;
+}
+
 int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
 {
+    /* 即使有连接且response=NULL也须推进停止；最终应答仍只由next_response领取。 */
+    if (s_stop.active) return poll_stop(sequence, response);
     if (s_test.owner_connected && response == NULL) return 0;
     if (s_test.preparing || s_test.configuring) return poll_preparation(sequence, response);
-    if (s_test.active && s_test.slt) return 0;
+    if (s_test.active && s_test.slt) return poll_slt_completion(sequence, response);
     rk_response_t result;
     for (;;) {
         if (!s_test.delivery_pending) {
@@ -608,8 +731,9 @@ int pc_test_service_poll(uint32_t sequence, pc_dispatch_response_t *response)
 
 void pc_test_service_disconnected(void)
 {
+    s_stop.owner_connected = 0U;
     if (s_test.active && !s_test.discarded && !s_test.slt) pc_trace_discard(s_test.cookie, "disconnect");
-    rk_link_frequency_end(s_test.cookie);
+    if (!slt_keeps_boot_frequency()) rk_link_frequency_end(s_test.cookie);
     s_round_active = 0U;
     s_test.discarded = 1U;
     s_test.owner_connected = 0U;

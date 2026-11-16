@@ -29,6 +29,7 @@
 /* USER CODE BEGIN Include for User BSP */
 #include "eth_custom_phy_interface.h"
 #include "board_identity.h"
+#include "handoff_mcu.h"
 /* USER CODE END Include for User BSP */
 #include <string.h>
 #include "cmsis_os.h"
@@ -273,6 +274,12 @@ static void low_level_init(struct netif *netif)
   heth.Init.RxBuffLen = 1536;
 
   hal_eth_init_status = HAL_ETH_Init(&heth);
+  /* 网桥必须保留RK源MAC；HAL默认替换为MCU MAC会破坏同IP授权及DHCP绑定。 */
+  ETH_MACConfigTypeDef handoff_mac;
+  if (hal_eth_init_status == HAL_OK && HAL_ETH_GetMACConfig(&heth, &handoff_mac) == HAL_OK) {
+    handoff_mac.SourceAddrControl = ETH_SOURCEADDRESS_DISABLE;
+    if (HAL_ETH_SetMACConfig(&heth, &handoff_mac) != HAL_OK) Error_Handler();
+  } else Error_Handler();
 
   /* End ETH HAL Init */
 
@@ -293,6 +300,7 @@ static void low_level_init(struct netif *netif)
 
   /* maximum transfer unit */
   netif->mtu = ETH_MAX_PAYLOAD;
+  handoff_mcu_attach(netif);
 
   /* Accept broadcast address and ARP traffic */
   /* don't set NETIF_FLAG_ETHARP if this device is not an ethernet one */
@@ -480,7 +488,7 @@ void ethernetif_input(void* argument)
         p = low_level_input( netif );
         if (p != NULL)
         {
-          if (netif->input( p, netif) != ERR_OK )
+          if (handoff_mcu_input(p) || netif->input(p, netif) != ERR_OK)
           {
             pbuf_free(p);
           }
@@ -727,3 +735,13 @@ void HAL_ETH_TxFreeCallback(uint32_t * buff)
 /* USER CODE BEGIN 8 */
 
 /* USER CODE END 8 */
+
+/* 仅tcpip线程调用；先回收完成引用，再逐描述符确认DMA已不持有TX。 */
+int handoff_eth_tx_idle(void)
+{
+  HAL_ETH_ReleaseTxPacket(&heth);
+  if (heth.TxDescList.BuffersInUse != 0U) return 0;
+  for (unsigned i = 0U; i < ETH_TX_DESC_CNT; ++i)
+    if (DMATxDscrTab[i].DESC3 & ETH_DMATXNDESCRF_OWN) return 0;
+  return 1;
+}

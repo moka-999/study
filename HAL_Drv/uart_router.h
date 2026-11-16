@@ -8,10 +8,12 @@
 #include "hal_if.h"
 
 /*
- * 接收块容量1056字节，覆盖当前RK最大帧1040字节；状态机仍必须支持分片。
+ * 接收块容量1600字节，覆盖RK最大帧1040字节和SerialNet最大COBS线帧1540字节。
+ * SerialNet停止等待，一帧结束后才回复；容量须大于最大线帧，避免帧中NORMAL DMA满块停收。
+ * 状态机仍支持分片；此容量不承诺无间隔任意长字节流可靠传输。
  * DMA RX缓冲位于.uart_dma段，不能放DTCM。容量不代表一次回调必为完整帧。
  */
-#define UART_RX_BUF_SIZE 1056
+#define UART_RX_BUF_SIZE 1600U
 
 /* 已丢失字节连续性；消费者必须先重置半帧状态，再继续poll，不能按字节数使用。 */
 #define UART_RX_GAP (-1)
@@ -64,6 +66,11 @@ void uart_start_all(void);
  */
 int uart_poll_rx(int id, uint8_t *buffer, uint16_t capacity);
 
+/* 唯一接收任务等待下一块数据，最长timeout_ms毫秒；已排队或有断流标记时立即返回。
+ * 只等待、不出队或处理恢复，醒来后仍须uart_poll_rx；不能在ISR或临界区调用。
+ * 空闲超时用于推进电源/改速/恢复，不表示收到数据；timeout_ms=0只检查不等待。 */
+void uart_wait_rx(int id, uint32_t timeout_ms);
+
 /** 任务上下文复制本次开机累计诊断：1成功，0参数/槽无效且输出不变；计数饱和。 */
 int uart_get_rx_diagnostics(int id, uart_rx_diagnostics_t *out);
 
@@ -84,5 +91,10 @@ int uart_send_tracked(int id, uint8_t *buffer, uint16_t length, uint32_t *ticket
 /* 1本帧最后停止位已发出/0在途/-1参数或票据失效；仅1时输出HAL毫秒时间戳。
  * 不证明RK收到或执行；任务上下文调用，不等待、不清除完成事件。 */
 int uart_tx_status(int id, uint32_t ticket, uint32_t *completed_ms);
+
+/* 只读发送空闲证明：TX环空且最后停止位已发出。 */
+int uart_tx_idle(int id);
+/* 唯一RK消费任务在已协商的静默窗口调用；清旧RX，返回IF_OK/IF_ERR。 */
+int uart_set_baud(int id, uint32_t baud);
 
 #endif /* UART_ROUTER_H */

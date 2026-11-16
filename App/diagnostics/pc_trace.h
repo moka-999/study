@@ -10,8 +10,11 @@ struct pc_power_diagnostic;
 struct rk_final_result;
 
 /* 仅TCP任务通知；连接号按accept递增，两个方向的Seq分别使用各自线上值。 */
-void pc_trace_connected(void);
+/* peer_ip为网络顺序的四字节IPv4地址，peer_port为主机顺序端口。 */
+void pc_trace_connected(const uint8_t peer_ip[4], uint16_t peer_port);
 void pc_trace_closed(const char *reason);
+/* recv失败时立即复制lwIP错误码，避免后续调用改写errno。 */
+void pc_trace_rx_error(int socket_error);
 void pc_trace_rx(const pc_protocol_frame_t *frame);
 void pc_trace_tx(const pc_dispatch_response_t *response, uint32_t seq, size_t queued, int socket_error);
 /* 配置参数须已通过校验，name取命令表的规范名称。结果只在首次领取时打印。 */

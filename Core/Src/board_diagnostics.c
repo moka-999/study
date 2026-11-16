@@ -1,6 +1,7 @@
 #include "board_diagnostics.h"
 #include "board_adc_config.h"
 #include "log_console.h"
+#include "net_console.h"
 #include "protocol_trace.h"
 #include "main.h"
 #include "board_identity.h"
@@ -216,6 +217,8 @@ static void build_report(uint32_t now)
                   (unsigned long)rk.rejected_total, (unsigned int)rk.last_reason,
                   (unsigned long)rk.last_tick);
     trace_report(report_append);
+    report_append("[net console] connected=%u droppedBytes=%lu\r\n",
+                  net_console_session() != 0U, (unsigned long)net_console_dropped_bytes());
     report_append("[status] end; snapshot only, OFF means sensors may be uninitialized\r\n");
 }
 

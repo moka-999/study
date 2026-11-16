@@ -468,8 +468,11 @@ def main() -> int:
                 "handle_set_ddr_config", "handle_query_power_monitor",
                 "handle_power_on", "handle_power_off", "handle_reset_rk",
                 "handle_set_boot_mode", "handle_query_boot_mode",
-                "handle_round_begin", "handle_round_end", "handle_slt_start", "handle_slt_result")),
+                "handle_round_begin", "handle_round_end", "handle_slt_start")),
             "PC DDR配置、采样查询或结果灯业务未完整接入命令表")
+    require("handle_slt_result" not in pc_dispatch and
+            not re.search(r"\{\s*PC_COMMAND_SLT_RESULT\s*,", pc_dispatch),
+            "历史010B只保留编号，不能继续参与SLT执行收尾")
     require(not re.search(r"0x070[123]U", pc_command) and
             "handle_set_result_indicator" not in pc_dispatch and
             "handle_query_indicator_status" not in pc_dispatch,

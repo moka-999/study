@@ -182,6 +182,14 @@ int uart_poll_rx(int id, uint8_t *buffer, uint16_t capacity)
     return length;
 }
 
+void uart_wait_rx(int id, uint32_t timeout_ms)
+{
+    if (!slot_is_registered(id) || s_slots[id].gap_pending) return;
+    /* 复用RX队列的ISR唤醒；peek保留原块，避免另建通知通道或抢走消费者的数据。 */
+    uart_rx_message_t pending;
+    (void)xQueuePeek(s_slots[id].rx_queue, &pending, pdMS_TO_TICKS(timeout_ms));
+}
+
 int uart_get_rx_diagnostics(int id, uart_rx_diagnostics_t *out)
 {
     if (!slot_is_registered(id) || out == NULL) return 0;
@@ -210,4 +218,28 @@ int uart_tx_status(int id, uint32_t ticket, uint32_t *completed_ms)
 {
     if (!slot_is_registered(id)) return IF_ERR;
     return uart_hw_tx_status(s_slots[id].interface, ticket, completed_ms);
+}
+
+int uart_tx_idle(int id)
+{
+    return slot_is_registered(id) && uart_hw_tx_idle(s_slots[id].interface);
+}
+
+int uart_set_baud(int id, uint32_t baud)
+{
+    if (id != UART_PORT_RK_PROTOCOL || !slot_is_registered(id) || !uart_tx_idle(id))
+        return IF_ERR;
+    uart_slot_t *slot = &s_slots[id];
+    taskENTER_CRITICAL();
+    slot->recovery_pending = 1U; /* 阻止RX回调在改速期间重启DMA。 */
+    taskEXIT_CRITICAL();
+    int result = uart_hw_set_baud(slot->interface, baud);
+    taskENTER_CRITICAL();
+    xQueueReset(slot->rx_queue);
+    slot->gap_pending = 0U;
+    slot->recovery_pending = 0U;
+    start_receive(id);
+    if (slot->recovery_pending) result = IF_ERR;
+    taskEXIT_CRITICAL();
+    return result;
 }

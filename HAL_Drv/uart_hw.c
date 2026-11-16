@@ -231,3 +231,38 @@ uart_if_t uart1_if = {
     .send = uart_queue_send,
     .start_rx = uart_start_receive,
 };
+
+/* 交接前证明全部UART发送已完成，不能用最后一帧入队时间代替TC。 */
+int uart_hw_tx_idle(uart_if_t *port)
+{
+    UART_HandleTypeDef *uart = port ? port->handle : NULL;
+    uart_tx_ring_t *ring = uart ? find_tx_ring(uart) : NULL;
+    if (!ring || !ring->mutex) return 0;
+    uint32_t saved = __get_PRIMASK();
+    __disable_irq();
+    int idle = ring->head == ring->tail && __HAL_UART_GET_FLAG(uart, UART_FLAG_TC) != RESET;
+    __set_PRIMASK(saved);
+    return idle;
+}
+
+/* 不阻塞等TX，也不在临界区调用HAL；保留协议端口的自定义TX中断钩子。 */
+int uart_hw_set_baud(uart_if_t *port, uint32_t baud)
+{
+    UART_HandleTypeDef *uart = port ? port->handle : NULL;
+    uart_tx_ring_t *ring = uart ? find_tx_ring(uart) : NULL;
+    if (!baud || !ring || !ring->mutex || xSemaphoreTake(ring->mutex, 0U) != pdTRUE)
+        return IF_ERR;
+    int result = IF_ERR;
+    uint32_t previous = uart->Init.BaudRate;
+    if (uart_hw_tx_idle(port) && uart_rx_abort(port) == IF_OK) {
+        uart->Init.BaudRate = baud;
+        if (HAL_UART_Init(uart) == HAL_OK) result = IF_OK;
+        else {
+            uart->Init.BaudRate = previous;
+            (void)HAL_UART_Init(uart);
+        }
+        uart->TxISR = uart_tx_drain;
+    }
+    xSemaphoreGive(ring->mutex);
+    return result;
+}

@@ -70,6 +70,9 @@ int pc_power_service_configure(const pc_power_config_t *config,
  */
 const char *pc_power_service_start(pc_power_action_t action,
                                   const pc_power_target_t *target, uint8_t reboot);
+/* 0104专用：替换尚未完成的启动/重启为OFF，不等待RK；原操作的应答由调用方撤销。
+ * NULL表示受理，完成仍由poll/take(PC_POWER_OFF)确认；不修改板级轨间时序。 */
+const char *pc_power_service_stop(void);
 /** 周期推进一次，不睡眠；真实DAC/I2C仍使用已有有界同步驱动。无连接也须调用。 */
 void pc_power_service_poll(void);
 /** 仅动作匹配且DONE时返回1并消费结果；*error=NULL成功，否则业务失败。 */

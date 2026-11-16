@@ -17,11 +17,13 @@
 #include "board_watchdog_config.h"
 #include "flash_bsp.h"
 #include "log_console.h"
+#include "net_console.h"
 #include "board_diagnostics.h"
 #include "board_identity.h"
 #include "b2_service.h"
 #include "b2_task.h"
 #include <stdio.h>
+#include "handoff_mcu.h"
 
 /* 链接脚本为固定LwIP堆预留32KiB，其中需包含分配器元数据和对齐空间。 */
 _Static_assert(MEM_SIZE <= 30U * 1024U, "Update B1 .lwip_heap reservation before growing MEM_SIZE");
@@ -47,10 +49,13 @@ static void StartDefaultTask(void *argument)
     /* 队列已在调度前注册；在调度后开启DMA，FromISR才有可用的内核上下文。 */
     uart_start_all();
     log_console_start();
+    static const char handoff_banner[] = "[handoff] H1C same-IP/4M; full B1; OFF: net rk, then start rk\r\n";
+    (void)log_console_write(handoff_banner, sizeof(handoff_banner) - 1U);
     static const char network_start[] = "[boot] lwIP init start\r\n";
     static const char network_done[] = "[boot] lwIP init returned; link requires status check\r\n";
     (void)log_console_write(network_start, sizeof(network_start) - 1U);
     MX_LWIP_Init();
+    net_console_start();
     (void)log_console_write(network_done, sizeof(network_done) - 1U);
 
     /* 只表示MCU已完成启动初始化，不表示RK/DDR上电、网络连通或测试PASS。 */
@@ -62,6 +67,7 @@ static void StartDefaultTask(void *argument)
         result_led_process(HAL_GetTick());
         monitor_power_process(HAL_GetTick());
         log_console_process();
+        net_console_process();
         board_diagnostics_process();
         task_watchdog_progress(TASK_WATCHDOG_DEFAULT);
         osDelay(1U);
@@ -89,7 +95,7 @@ void MX_FREERTOS_Init(void)
 #if BOARD_IWDG_ENABLE
     task_watchdog_prepare(TASK_WATCHDOG_ALL);
 #endif
-    if (!b2_service_prepare()) Error_Handler();
+    if (!b2_service_prepare() || !handoff_mcu_prepare()) Error_Handler();
 
     rkRequestQueue = xQueueCreate(8, sizeof(rk_request_t));
     rkResponseQueue = xQueueCreate(8, sizeof(rk_response_t));

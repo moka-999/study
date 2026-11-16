@@ -275,12 +275,12 @@ pc_test_json_result_t pc_slt_start_parse(const cJSON *root, pc_test_start_view_t
 pc_test_json_result_t pc_round_end_parse(const cJSON *root, uint8_t mirror_count,
                                          uint32_t *failed_mask)
 {
-    static const char *const fields[] = {"errorchip"};
+    static const char *const fields[] = {"failChips"};
     static const char *const chip_fields[] = {"physicalAddr", "mirrorIndex"};
     if (!failed_mask || mirror_count == 0U || mirror_count > 32U)
         return PC_TEST_JSON_ERROR_ARGUMENT;
     if (!has_exact_fields(root, fields, 1U)) return PC_TEST_JSON_ERROR_FIELDS;
-    const cJSON *chips = cJSON_GetObjectItemCaseSensitive(root, "errorchip");
+    const cJSON *chips = cJSON_GetObjectItemCaseSensitive(root, "failChips");
     if (!cJSON_IsArray(chips)) return PC_TEST_JSON_ERROR_FIELD_TYPE;
     uint32_t mask = 0U;
     const cJSON *chip;
@@ -294,47 +294,6 @@ pc_test_json_result_t pc_round_end_parse(const cJSON *root, uint8_t mirror_count
         mask |= UINT32_C(1) << mirror;
     }
     *failed_mask = mask;
-    return PC_TEST_JSON_OK;
-}
-
-pc_test_json_result_t pc_slt_result_parse(const cJSON *root, pc_slt_result_view_t *view)
-{
-    static const char *const fields[] = {"siteId", "algorithmType", "algorithmName",
-        "algorithmIndex", "testTimeMs", "testResults", "measurementData"};
-    static const char *const chip_fields[] = {"mirrorIndex", "testStatus", "resultDesc", "physicalAddr"};
-    if (!view) return PC_TEST_JSON_ERROR_ARGUMENT;
-    if (!has_exact_fields(root, fields, sizeof(fields) / sizeof(fields[0])))
-        return PC_TEST_JSON_ERROR_FIELDS;
-    const cJSON *site = cJSON_GetObjectItemCaseSensitive(root, "siteId");
-    const cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "algorithmName");
-    const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "algorithmType");
-    const cJSON *time = cJSON_GetObjectItemCaseSensitive(root, "testTimeMs");
-    const cJSON *chips = cJSON_GetObjectItemCaseSensitive(root, "testResults");
-    if (!cJSON_IsString(site) || !cJSON_IsString(name) || !cJSON_IsString(type) ||
-        strcmp(type->valuestring, "slt") != 0 ||
-        !cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(root, "algorithmIndex")) ||
-        !cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(root, "measurementData")) ||
-        !cJSON_IsArray(chips) || cJSON_GetArraySize(chips) != PC_FUNCTIONAL_DIE_COUNT)
-        return PC_TEST_JSON_ERROR_FIELDS;
-    if (!cJSON_IsNull(time) && (!cJSON_IsNumber(time) || !isfinite(time->valuedouble) ||
-        time->valuedouble < 0.0 || time->valuedouble >= 18446744073709551616.0 ||
-        floor(time->valuedouble) != time->valuedouble))
-        return PC_TEST_JSON_ERROR_INTEGER_RANGE;
-    uint32_t seen = 0U;
-    const cJSON *chip;
-    cJSON_ArrayForEach(chip, chips) {
-        uint32_t mirror, status;
-        const cJSON *physical = cJSON_GetObjectItemCaseSensitive(chip, "physicalAddr");
-        if (!has_exact_fields(chip, chip_fields, 4U) ||
-            read_required_u32(chip, "mirrorIndex", &mirror) != PC_TEST_JSON_OK ||
-            mirror >= PC_FUNCTIONAL_DIE_COUNT || (seen & (1U << mirror)) ||
-            read_required_u32(chip, "testStatus", &status) != PC_TEST_JSON_OK || status > 1U ||
-            !cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(chip, "resultDesc")) ||
-            !cJSON_IsString(physical) || physical->valuestring[0] != '\0')
-            return PC_TEST_JSON_ERROR_FIELDS;
-        seen |= 1U << mirror;
-    }
-    *view = (pc_slt_result_view_t){site->valuestring, name->valuestring};
     return PC_TEST_JSON_OK;
 }
 
@@ -475,14 +434,18 @@ cJSON *pc_functional_result_create(const char *algorithm_name, uint32_t algorith
                                       site_id, elapsed_ms, dies);
 }
 
-/* 电流统计保留µA，JSON沿用mA单位；均值先除样本数，避免整数µA均值再次截断。 */
+enum { PC_CURRENT_UA_PER_MA = 1000U };
+
+/* 电流原始统计保留µA；上报均值先四舍五入到1µA，再转mA，最多3位小数。
+ * 电流样本非负；只处理组包副本，不修改累加器及有效样本数。 */
 static cJSON *metric_value(const idd_metric_stats_t *metric, unsigned kind, int is_current)
 {
     if (metric->valid_count == 0U) return cJSON_CreateNull();
     double value = (double)(kind == 0U ? metric->mean : kind == 1U ? metric->maximum : metric->minimum);
     if (is_current) {
-        if (kind == 0U) value = (double)metric->sum / (double)metric->valid_count;
-        value /= 1000.0;
+        if (kind == 0U)
+            value = (double)((metric->sum + metric->valid_count / 2U) / metric->valid_count);
+        value /= PC_CURRENT_UA_PER_MA;
     }
     return cJSON_CreateNumber(value);
 }

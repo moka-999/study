@@ -157,6 +157,21 @@ const char *pc_power_service_start(pc_power_action_t action,
     return NULL;
 }
 
+const char *pc_power_service_stop(void)
+{
+    if (!s_configured) return "notConfigured";
+    s_ready_valid = 0U;
+    s_diag.action = PC_POWER_OFF;
+    s_diag.error = NULL;
+    s_diag.failed_phase = PC_POWER_IDLE;
+    pwr_ctrl_state_t state = pwr_ctrl_get_state();
+    if (state == PWR_CTRL_STATE_OFF) complete(NULL);
+    /* 已经反序下电时只等待，不能重复请求而缩短既有轨间延时。 */
+    else if (state == PWR_CTRL_STATE_WAIT_SECOND_RAIL_OFF) enter(PC_POWER_WAIT_OFF);
+    else enter(PC_POWER_REQUEST_OFF);
+    return NULL;
+}
+
 static void request_off(void)
 {
     /* 已确认采用直接切电：不发送关机TLV、不等待RK应答；仍走事务锁和轨间时序。 */

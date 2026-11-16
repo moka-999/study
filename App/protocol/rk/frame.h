@@ -74,9 +74,9 @@ typedef struct {
 
 #define RK_RESULT_DIE_COUNT 2U /* 双颗粒结果中的DDR编号仅为0和1，不是B1/B2编号。 */
 
-/* 最终解码器仅保留非零地址的失败明细；按die匹配颗粒，不按数组位置猜编号。 */
+/* 最终解码器保留FAIL帧全部已列明细；按die匹配颗粒，不按数组位置猜编号。 */
 typedef struct {
-    uint64_t error_address; /* 非零9001的完整64位首错地址；零地址PASS不进入失败数组。 */
+    uint64_t error_address; /* 9001的完整64位首错地址；FAIL的地址0同样有效。 */
     uint8_t die;            /* 紧随该地址的0x3001：0=第一颗、1=第二颗。 */
 } rk_failure_detail_t;
 
@@ -147,7 +147,8 @@ int tlv_unpack(const uint8_t *wire, uint16_t wire_len, tlv_frame_t *out);
 int rk_report_decode(const tlv_frame_t *frame, rk_report_t *report);
 /* 解码一个完整最终包：5001+1017+9002，以及0/1/2组相邻9001+3001。
  * 必需标量各一次；die为0/1且不能重复，包括零地址PASS明细，宽度沿用TLV规则表。
- * 9001=0表示该颗PASS，非零才计入failures；1017须与非零失败明细是否存在一致。
+ * 1017=1时须有明细，已列颗粒全部计入failures，地址含0均原样保留。
+ * 1017=0时明细可省略或全为零地址，归一化为无失败；非零地址仍拒绝。
  * 标量可换序，但地址后必须立即跟所属die；不接受残缺、扩展或矛盾的最终包。
  * 成功0；参数/格式错误-1并清空result。frame/result不重叠，无硬件或JSON副作用。
  * 调用前须由tlv_unpack或状态机检查CRC；此函数不判断Seq、在途算法或业务完成。

@@ -5,6 +5,7 @@
 #include "pc_power_service.h"
 #include "b2_board.h"
 #include "network_config.h"
+#include "handoff_mcu.h"
 #include <string.h>
 
 /* 以下配置仅由TCP任务读写。B2任务通过队列传值，不跨任务读取PC静态状态。 */
@@ -37,7 +38,7 @@ void b2_service_exchange(const b2_request_t *request, b2_service_reply_t *reply)
 
 static int network_change_busy(int connected)
 {
-    if (connected || pc_test_service_busy() || pc_power_service_busy()) return 1;
+    if (connected || pc_test_service_busy() || pc_power_service_busy() || handoff_mcu_busy()) return 1;
     return 0;
 }
 

@@ -22,16 +22,17 @@
 /*
  * 一轮测试以0106开始、0107结束；轮内串行执行FUNC、PARA或SLT。
  * FUNC的mirrorIndex取RK 0x3001，表示镜像0/1；当前每镜像一颗，physicalAddr为空。
- * SLT由PC读取服务器报告后回送010B，不复用FUNC的UART算法或0105结果通道。
+ * SLT由EDK RELEASE触发执行收尾；PC解析服务器报告并在0107汇总三类结果。
  */
 #define PC_COMMAND_START_TEST          0x0103U
+#define PC_COMMAND_STOP_TEST           0x0104U /* {}；中止当前执行并关RK，保留0106整轮。 */
 #define PC_COMMAND_TEST_RESULT_REPORT  0x0105U
 #define PC_COMMAND_ROUND_BEGIN         0x0106U /* PC→MCU，{}；只建立整轮上下文。 */
 #define PC_COMMAND_ROUND_END           0x0107U /* PC→MCU，失败芯片数组；汇总灯并废弃未交付结果。 */
 #define PC_COMMAND_PARA_START          0x0108U /* parametric/idd_*，开始包结构与FUNC一致。 */
 #define PC_COMMAND_PARA_RESULT         0x0109U /* MCU→PC，返回RK结果及全程统计；反向请求拒绝。 */
 #define PC_COMMAND_SLT_START           0x010AU /* slt/memtest86，按参数准备电源与Boot。 */
-#define PC_COMMAND_SLT_RESULT          0x010BU /* PC回送本次SLT结果，不等待RK串口结果。 */
+#define PC_COMMAND_SLT_RESULT          0x010BU /* 历史SLT结果编号保留，当前返回notSupported。 */
 
 /* RK及内存电源业务：非阻塞编排；初版直接关电，不等待RK关机应答。 */
 #define PC_COMMAND_POWER_ON            0x0501U

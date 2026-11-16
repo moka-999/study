@@ -10,6 +10,8 @@
 #include <stdio.h>
 
 static uint32_t s_connection;
+static char s_peer_ip[sizeof("255.255.255.255")];
+static uint16_t s_peer_port;
 
 /* 只折叠方向正确的心跳和采样。0006以原请求号归入相应错误计数。 */
 static trace_group_t periodic_request(uint16_t command)
@@ -21,15 +23,26 @@ static trace_group_t periodic_request(uint16_t command)
     }
 }
 
-void pc_trace_connected(void)
+void pc_trace_connected(const uint8_t peer_ip[4], uint16_t peer_port)
 {
     ++s_connection;
-    trace_line("PC", "conn=%lu connected", (unsigned long)s_connection);
+    snprintf(s_peer_ip, sizeof(s_peer_ip), "%u.%u.%u.%u",
+             peer_ip[0], peer_ip[1], peer_ip[2], peer_ip[3]);
+    s_peer_port = peer_port;
+    trace_line("PC", "conn=%lu connected peer=%s:%u listener=closed",
+               (unsigned long)s_connection, s_peer_ip, s_peer_port);
 }
 
 void pc_trace_closed(const char *reason)
 {
-    trace_line("PC", "conn=%lu closed reason=%s", (unsigned long)s_connection, reason);
+    trace_line("PC", "conn=%lu closed reason=%s peer=%s:%u",
+               (unsigned long)s_connection, reason, s_peer_ip, s_peer_port);
+}
+
+void pc_trace_rx_error(int socket_error)
+{
+    trace_line("PC", "conn=%lu recvFailed errno=%d peer=%s:%u",
+               (unsigned long)s_connection, socket_error, s_peer_ip, s_peer_port);
 }
 
 void pc_trace_rx(const pc_protocol_frame_t *frame)

@@ -21,4 +21,9 @@ int uart_hw_send_tracked(uart_if_t *port, uint8_t *buffer, uint16_t length,
 /* 1已发完/0仍在途/-1无效票据；只有1时写completed_ms。任务上下文。 */
 int uart_hw_tx_status(uart_if_t *port, uint32_t ticket, uint32_t *completed_ms);
 
+/* 1表示TX环与硬件移位寄存器均空；不改变TC标记。 */
+int uart_hw_tx_idle(uart_if_t *port);
+/* 任务侧且TX空闲时改速率；停止RX，调用者负责重新启动。返回IF_OK/IF_ERR。 */
+int uart_hw_set_baud(uart_if_t *port, uint32_t baud);
+
 #endif /* UART_HW_H */

@@ -52,7 +52,7 @@
 | 0x0101 | CMD_QUERY_TESTER_INFO | PC→MCU：查询测试仪信息 |
 | 0x0102 | CMD_TESTER_INFO_RESP | MCU→PC：测试仪信息响应 |
 | 0x0103 | CMD_START_FUNC_TEST | PC→MCU：开始一个FUNC算法项 |
-| 0x0104 | CMD_STOP_TEST | 保留，未定义为RK取消或整轮结束 |
+| 0x0104 | CMD_STOP_TEST | PC→MCU：停止当前执行并关闭RK，保留整轮 |
 | 0x0105 | CMD_FUNC_TEST_RESULT_REPORT | MCU→PC：FUNC算法结果 |
 | 0x0106 | CMD_START_TEST_ROUND | PC→MCU：整轮开始，包体为{} |
 | 0x0107 | CMD_FINISH_TEST_ROUND | PC→MCU：提交失败芯片清单，结束本轮并更新镜像结果灯 |
@@ -264,7 +264,15 @@ TimingParameters子字段均为可选字符串，可只填部分项或空字符�
 
 ### 4.8 停止测试（0x0104）
 
-保留编号，不作为本轮整轮结束命令，也不承诺RK取消能力。整轮收尾使用0107；未支持时返回0006 failed/notSupported。
+PC→MCU，包体必须为`{}`。停止当前FUNC、PARA或SLT，废弃尚未交付的结果，沿既有电源流程关闭RK；不等待RK取消应答或EDK RELEASE。真实OFF、串口恢复和内部队列清理完成后，回复：
+
+```json
+{"requestCommandId":260,"status":"completed"}
+```
+
+不额外回复accepted；completed只表示停止及清理完成，不表示测试PASS或SLT报告已上传。停止期间下一测试返回busy，心跳/查询继续；失败回0006 failed并保留占用，可再次0104重试。收到completed后，同一0106内可下发任意下一项，因RK已OFF，应使用完整power/bootMode启动配置。整轮结束和结果灯仍由0107决定。
+
+无需先0106即可停止；已OFF也执行清理。停止将取代未完成的启动/电源操作，不再补其旧completed。断线仍完成停止，但不向新连接补发响应；旧轮随断线结束。SLT强制停止可能中断XML/HTML上传。
 
 ### 4.9 FUNC结果上报（0x0105）
 
@@ -329,6 +337,8 @@ MCU→PC。每个FUNC算法上报一包，当前为两个镜像各一颗DDR的�
 | Vdd1 / Vdd2 / Vddq | 三轨电压，mV |
 | Idd1 / Idd2 / Iddq | 三轨电流，mA；两颗合计，不代表单颗 |
 | Ave / Peak / Min | 各项后缀：平均、采样最大、采样最小，共18项；不保证捕获瞬态尖峰 |
+
+电流平均值按四舍五入保留最多3位小数（0.001mA）；仍为JSON数字，不补尾随零。无有效样本的字段为null。0109及0602统计采用相同精度。
 | 无有效数据 | 对应值为null；完全无数据时measurementData=null，不用0代替 |
 | 统计区间 | 本次算法投递前清零、结束冻结；不计启动准备，查询不清零 |
 
@@ -356,7 +366,7 @@ PC→MCU。提交本轮失败芯片清单并结束本轮；只列失败芯片，
 
 ```json
 {
-  "errorchip": [
+  "failChips": [
     {
       "physicalAddr": "",
       "mirrorIndex": 0
@@ -371,12 +381,12 @@ PC→MCU。提交本轮失败芯片清单并结束本轮；只列失败芯片，
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| errorchip | array | 必填，每项对应一颗失败芯片；全部通过时填空数组[] |
+| failChips | array | 必填，每项对应一颗失败芯片；全部通过时填空数组[] |
 | ↳ physicalAddr | string | 镜像内物理芯片标识；当前每镜像一颗时可填空，多颗时填写具体标识 |
 | ↳ mirrorIndex | integer | 所属镜像索引，沿用整数；同一镜像多颗失败时可重复该索引，由physicalAddr区分 |
 
 - 应答：0006 completed，requestCommandId=263。
-- 每个镜像对应一盏结果灯；清单中出现的镜像置FAIL，其余镜像置PASS。`{"errorchip":[]}`表示全部镜像置PASS。
+- 每个镜像对应一盏结果灯；清单中出现的镜像置FAIL，其余镜像置PASS。`{"failChips":[]}`表示全部镜像置PASS。
 - 当前映射：0→第一组LPDDR灯、1→第二组LPDDR灯、2→eMCP灯；其他编号整包回invalidArgument。
 - PC须提交完整汇总；MCU完整校验清单后统一更新结果灯，报文错误不部分更新。
 - 未完成项的后续结果作废，不覆盖汇总灯；不取消正在执行的RK测试，不自动断电或停止B2加热。

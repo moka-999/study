@@ -1,4 +1,5 @@
 #include "pc_dispatch.h"
+#include "handoff_mcu.h"
 
 #include "pc_command.h"
 #include "pc_test_message.h"
@@ -38,6 +39,9 @@
 static uint16_t s_power_command;
 static pc_power_action_t s_power_action;
 static uint8_t s_power_owner_connected;
+#if defined(B1_RK_UART)
+static log_console_power_request_t s_console_power;
+#endif
 
 /*
  * 每个命令处理函数只负责本命令的字段校验和本地响应。
@@ -332,6 +336,26 @@ static pc_dispatch_result_t handle_start_test(
                                             error_code, valid_index, response);
 }
 
+/* 停止单项执行但不结束整轮；只在真实OFF及RK清理完成后异步回复0006。 */
+static pc_dispatch_result_t handle_stop_test(const pc_protocol_frame_t *request,
+    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
+{
+    if (root->child != NULL)
+        return build_command_failure(request, sequence, "invalidArgument", response);
+    const char *error = pc_test_service_stop();
+    if (error) return build_command_failure(request, sequence, error, response);
+    /* 0104取代原启动/电源操作，避免旧消费者误领此次OFF结果。 */
+    s_power_command = 0U;
+    s_power_owner_connected = 0U;
+#if defined(B1_RK_UART)
+    if (s_console_power != LOG_CONSOLE_POWER_NONE) {
+        log_console_complete_power_request("cancelled");
+        s_console_power = LOG_CONSOLE_POWER_NONE;
+    }
+#endif
+    return PC_DISPATCH_NO_RESPONSE;
+}
+
 /* 整轮命令只在完整校验之后提交业务，避免半张失败清单部分改变灯态。 */
 static pc_dispatch_result_t handle_round_begin(const pc_protocol_frame_t *request,
     uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
@@ -357,15 +381,6 @@ static pc_dispatch_result_t handle_slt_start(const pc_protocol_frame_t *request,
     if (pc_slt_start_parse(root, &start) != PC_TEST_JSON_OK)
         return build_command_failure(request, sequence, "invalidArgument", response);
     return pc_test_slt_start(&start, sequence, response);
-}
-
-static pc_dispatch_result_t handle_slt_result(const pc_protocol_frame_t *request,
-    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
-{
-    pc_slt_result_view_t result;
-    if (pc_slt_result_parse(root, &result) != PC_TEST_JSON_OK)
-        return build_command_failure(request, sequence, "invalidArgument", response);
-    return pc_test_slt_result(&result, sequence, response);
 }
 
 /*
@@ -789,13 +804,13 @@ static const pc_command_entry_t s_command_table[] = {
     {PC_COMMAND_QUERY_TESTER_INFO, handle_query_tester_info}, /* PC -> MCU，读取FRU。 */
     {PC_COMMAND_TESTER_INFO_RESP,  reject_response_command}, /* MCU -> PC，拒收。 */
     {PC_COMMAND_START_TEST,        handle_start_test},        /* 轮内FUNC，最终上报0105。 */
+    {PC_COMMAND_STOP_TEST,         handle_stop_test},         /* 中止执行并关RK，保留整轮。 */
     {PC_COMMAND_TEST_RESULT_REPORT, reject_response_command}, /* MCU→PC，拒收。 */
     {PC_COMMAND_ROUND_BEGIN,       handle_round_begin},       /* 建立当前连接的整轮。 */
     {PC_COMMAND_ROUND_END,         handle_round_end},         /* 汇总灯、废弃未交付结果。 */
     {PC_COMMAND_PARA_START,        handle_start_test},        /* 轮内PARA，最终上报0109。 */
     {PC_COMMAND_PARA_RESULT,       reject_response_command},  /* MCU→PC，拒收。 */
     {PC_COMMAND_SLT_START,         handle_slt_start},         /* 电源/Boot准备，不等待RK。 */
-    {PC_COMMAND_SLT_RESULT,        handle_slt_result},        /* PC报告SLT实际结束。 */
     {PC_COMMAND_POWER_ON,          handle_power_on},          /* 非阻塞上电请求。 */
     {PC_COMMAND_POWER_OFF,         handle_power_off},         /* 直接关电，仍须通过在途互斥。 */
     {PC_COMMAND_QUERY_POWER_STATUS, handle_query_power_status}, /* PC -> MCU，只读。 */
@@ -866,6 +881,18 @@ pc_dispatch_result_t pc_dispatch_handle(
         }
     }
 
+    /* 手动交接期间保留查询；ARMED可0501/Boot/电压启动，0505仍拒绝以免等SPL心跳。 */
+    if (handoff_mcu_busy()) {
+        int conflict = request->command_id == PC_COMMAND_RESET_RK;
+        for (size_t i = 0U; i < sizeof(test_conflicts) / sizeof(test_conflicts[0]); ++i)
+            if (request->command_id == test_conflicts[i] &&
+                !handoff_mcu_power_allowed(request->command_id == PC_COMMAND_POWER_OFF)) conflict = 1;
+        if (conflict) {
+            cJSON_Delete(root);
+            return build_command_failure(request, mcu_tx_sequence, "busy", response);
+        }
+    }
+
     /* 小表顺序查找，命中只执行一次；未命中返回notSupported，不隐式转发RK。 */
     for (size_t i = 0U; i < sizeof(s_command_table) / sizeof(s_command_table[0]); i++) {
         if (s_command_table[i].command_id == request->command_id) {
@@ -892,18 +919,21 @@ pc_dispatch_result_t pc_dispatch_handle(
  */
 static void poll_console_power(void)
 {
-    static log_console_power_request_t active;
     const char *error;
-    if (active != LOG_CONSOLE_POWER_NONE) {
-        pc_power_action_t action = active == LOG_CONSOLE_POWER_START_RK ? PC_POWER_PREPARE_SLT : PC_POWER_OFF;
+    if (s_console_power != LOG_CONSOLE_POWER_NONE) {
+        pc_power_action_t action = s_console_power == LOG_CONSOLE_POWER_START_RK ? PC_POWER_PREPARE_SLT : PC_POWER_OFF;
         if (pc_power_service_take(action, &error)) {
             log_console_complete_power_request(error);
-            active = LOG_CONSOLE_POWER_NONE;
+            s_console_power = LOG_CONSOLE_POWER_NONE;
         }
         return;
     }
     log_console_power_request_t request = log_console_take_power_request();
     if (request == LOG_CONSOLE_POWER_NONE) return;
+    if (!handoff_mcu_power_allowed(request == LOG_CONSOLE_POWER_END_RK)) {
+        log_console_complete_power_request("busy");
+        return;
+    }
     if (pc_test_service_busy() || pc_power_service_busy() || s_power_command) {
         log_console_complete_power_request("busy");
         return;
@@ -916,7 +946,7 @@ static void poll_console_power(void)
     pc_power_action_t action = request == LOG_CONSOLE_POWER_START_RK ? PC_POWER_PREPARE_SLT : PC_POWER_OFF;
     error = pc_power_service_start(action, request == LOG_CONSOLE_POWER_START_RK ? &target : NULL, 1U);
     if (error) log_console_complete_power_request(error);
-    else active = request;
+    else s_console_power = request;
 }
 #endif
 

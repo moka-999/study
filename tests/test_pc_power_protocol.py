@@ -152,8 +152,11 @@ def main() -> None:
         "handle_query_power_monitor", "monitor_get_latest",
         '"sampleAgeMs"', '"samplePowerState"', '"validMask"',
         '"voltageMv"', '"currentMa"', '"powerMw"',
-        "handle_round_begin", "handle_round_end", "handle_slt_start", "handle_slt_result",
+        "handle_round_begin", "handle_round_end", "handle_slt_start",
     )), "电源、采样、整轮或SLT未接入命令表")
+    require("handle_slt_result" not in dispatch and
+            not re.search(r"\{\s*PC_COMMAND_SLT_RESULT\s*,", dispatch),
+            "历史010B只保留编号，不能继续参与SLT执行收尾")
     require(not re.search(r"0x070[123]U", command) and
             "handle_set_result_indicator" not in dispatch and
             "handle_query_indicator_status" not in dispatch,
@@ -283,7 +286,7 @@ def main() -> None:
     require("voltageMv" not in partial_monitor,
             "无效测量组必须省略，不能用零数组冒充有效值")
 
-    require("pc_round_end_parse" in start_parser and '"errorchip"' in start_parser and
+    require("pc_round_end_parse" in start_parser and '"failChips"' in start_parser and
             "pc_test_round_end" in start_service and "result_led_set_all" in led_source,
             "0107须完整解析失败数组后一次提交三灯，不能逐项产生部分副作用")
 

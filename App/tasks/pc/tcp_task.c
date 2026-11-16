@@ -25,11 +25,12 @@
 #include "pc_state_machine.h"
 #include "task_watchdog.h"
 #include "b2_service.h"
+#include "handoff_mcu.h"
+#include "board_network_config.h"
 #include <string.h>
 /* 与lwIP socket共用错误码变量，不能读取newlib的另一份errno。 */
 #include "lwip/errno.h"
 
-#define TCP_PORT    8888
 #define RX_BUF_SIZE 1024
 #define PC_MCU_TX_SEQUENCE_FIRST 1U
 
@@ -63,6 +64,41 @@ extern struct netif gnetif;
 __attribute__((section(".crash_log"), used)) volatile uint32_t tcp_diag[8];
 #define TCP_DIAG(n, v) do { tcp_diag[n] = (uint32_t)(v); } while(0)
 
+/* listen的创建/关闭始终由唯一TCP任务负责。 */
+static int handoff_open_listener(void)
+{
+    int listenfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenfd < 0) {
+        TCP_DIAG(2, 0xBEEF00E2);       /* socket 失败 */
+        return -1;
+    }
+
+    /* 允许固件重启后快速重新bind 8888，减少旧TCP连接TIME_WAIT的影响。 */
+    int one = 1;
+    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_len         = sizeof(addr);
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(B1_PC_TCP_PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(listenfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        TCP_DIAG(2, 0xBEEF00E3);       /* bind 失败 */
+        close(listenfd);
+        return -1;
+    }
+    if (listen(listenfd, 1) != 0) {
+        TCP_DIAG(2, 0xBEEF00E4);       /* listen 失败 */
+        close(listenfd);
+        return -1;
+    }
+    TCP_DIAG(2, 0xBEEF0003);
+
+    return listenfd;
+}
+
 void StartTcpServerTask(void *argument)
 {
     (void)argument;
@@ -83,44 +119,29 @@ void StartTcpServerTask(void *argument)
     }
     TCP_DIAG(1, 0xBEEF0002);
 
-    /* 阶段2：建立整个任务生命周期内唯一的监听socket。 */
-    int listenfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenfd < 0) {
-        TCP_DIAG(2, 0xBEEF00E2);       /* socket 失败 */
-        vTaskDelete(NULL);
-        return;
-    }
-
-    /* 允许固件重启后快速重新bind 8888，减少旧TCP连接TIME_WAIT的影响。 */
-    int one = 1;
-    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_len         = sizeof(addr);
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(TCP_PORT);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(listenfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        TCP_DIAG(2, 0xBEEF00E3);       /* bind 失败 */
-        close(listenfd);
-        vTaskDelete(NULL);
-        return;
-    }
-    if (listen(listenfd, 1) != 0) {
-        TCP_DIAG(2, 0xBEEF00E4);       /* listen 失败 */
-        close(listenfd);
-        vTaskDelete(NULL);
-        return;
-    }
-    TCP_DIAG(2, 0xBEEF0003);
+    int listenfd = -1;
 
     /*
-     * 阶段3：单客户端accept循环。listen积压为1，每次只服务当前connfd；
-     * 连接退出后才回到accept，因此不会并发修改同一个协议状态或业务上下文。
+     * 阶段3：只在无客户端时监听；accept后关闭监听并释放尚未接手的连接。
+     * 已接手的connfd独立存活，退出后才重新监听，避免额外连接占满RX池。
      */
     for (;;) {
+        pc_dispatch_poll();
+        handoff_mcu_tcp_poll(0, listenfd >= 0);
+        if (!handoff_mcu_listen_allowed() && listenfd >= 0) {
+            close(listenfd);
+            listenfd = -1;
+        }
+        if (handoff_mcu_listen_allowed() && listenfd < 0) {
+            listenfd = handoff_open_listener();
+            if (listenfd >= 0) handoff_mcu_tcp_poll(0, 1);
+        }
+        if (listenfd < 0) {
+            b2_service_poll(0);
+            task_watchdog_progress(TASK_WATCHDOG_TCP);
+            vTaskDelay(pdMS_TO_TICKS(20U));
+            continue;
+        }
         TCP_DIAG(3, 0xBEEF0004);       /* 等待连接 */
         /* 无连接时也有界等待，避免健康检查把阻塞accept误判为任务卡死。 */
         fd_set readers;
@@ -134,13 +155,22 @@ void StartTcpServerTask(void *argument)
             b2_service_poll(0);
             continue;
         }
-        int connfd = accept(listenfd, NULL, NULL);
+        struct sockaddr_in peer;
+        socklen_t peer_length = sizeof(peer);
+        int connfd = accept(listenfd, (struct sockaddr *)&peer, &peer_length);
         if (connfd < 0) {
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
+        /* lwIP关闭监听时清理accept队列及其数据，不关闭已取出的connfd。 */
+        if (close(listenfd) != 0) {
+            close(connfd);
+            vTaskDelay(pdMS_TO_TICKS(20U));
+            continue;
+        }
+        listenfd = -1;
         TCP_DIAG(3, 0xBEEF0005);       /* 已连接 */
-        pc_trace_connected();
+        pc_trace_connected((const uint8_t *)&peer.sin_addr.s_addr, ntohs(peer.sin_port));
         const char *close_reason = "protocolError";
 
         /*
@@ -173,6 +203,7 @@ void StartTcpServerTask(void *argument)
             task_watchdog_progress(TASK_WATCHDOG_TCP);
             pc_dispatch_poll();
             b2_service_poll(1);
+            handoff_mcu_tcp_poll(1, 0);
             /* 领取真实RK异步结果，业务层已完成JSON组包；本任务只传输及推进Seq。 */
             pc_dispatch_response_t async_response;
             int ready = pc_dispatch_next_response(mcu_tx_sequence, &async_response);
@@ -220,6 +251,7 @@ void StartTcpServerTask(void *argument)
                             close_for_protocol_error = 1;
                             break;
                         }
+
                         pc_trace_rx(&frame);
                         dispatch_result = pc_dispatch_handle(&frame,
                                                              mcu_tx_sequence,
@@ -257,6 +289,7 @@ void StartTcpServerTask(void *argument)
                 break;
             } else if (errno != EWOULDBLOCK && errno != EAGAIN) {
                 /* 负数且不是SO_RCVTIMEO产生的暂时无数据，属于真实socket错误。 */
+                pc_trace_rx_error(errno);
                 TCP_DIAG(4, 0xBEEF00E6);
                 close_reason = "recvFailed";
                 break;
