@@ -275,12 +275,12 @@ pc_test_json_result_t pc_slt_start_parse(const cJSON *root, pc_test_start_view_t
 pc_test_json_result_t pc_round_end_parse(const cJSON *root, uint8_t mirror_count,
                                          uint32_t *failed_mask)
 {
-    static const char *const fields[] = {"errorchip"};
+    static const char *const fields[] = {"failChips"};
     static const char *const chip_fields[] = {"physicalAddr", "mirrorIndex"};
     if (!failed_mask || mirror_count == 0U || mirror_count > 32U)
         return PC_TEST_JSON_ERROR_ARGUMENT;
     if (!has_exact_fields(root, fields, 1U)) return PC_TEST_JSON_ERROR_FIELDS;
-    const cJSON *chips = cJSON_GetObjectItemCaseSensitive(root, "errorchip");
+    const cJSON *chips = cJSON_GetObjectItemCaseSensitive(root, "failChips");
     if (!cJSON_IsArray(chips)) return PC_TEST_JSON_ERROR_FIELD_TYPE;
     uint32_t mask = 0U;
     const cJSON *chip;
@@ -475,14 +475,18 @@ cJSON *pc_functional_result_create(const char *algorithm_name, uint32_t algorith
                                       site_id, elapsed_ms, dies);
 }
 
-/* 电流统计保留µA，JSON沿用mA单位；均值先除样本数，避免整数µA均值再次截断。 */
+enum { PC_CURRENT_UA_PER_MA = 1000U };
+
+/* 电流原始统计保留µA；上报均值先四舍五入到1µA，再转mA，最多3位小数。
+ * 电流样本非负；只处理组包副本，不修改累加器及有效样本数。 */
 static cJSON *metric_value(const idd_metric_stats_t *metric, unsigned kind, int is_current)
 {
     if (metric->valid_count == 0U) return cJSON_CreateNull();
     double value = (double)(kind == 0U ? metric->mean : kind == 1U ? metric->maximum : metric->minimum);
     if (is_current) {
-        if (kind == 0U) value = (double)metric->sum / (double)metric->valid_count;
-        value /= 1000.0;
+        if (kind == 0U)
+            value = (double)((metric->sum + metric->valid_count / 2U) / metric->valid_count);
+        value /= PC_CURRENT_UA_PER_MA;
     }
     return cJSON_CreateNumber(value);
 }

@@ -20,6 +20,7 @@ typedef struct { volatile uint32_t ISR, CR1, TDR; } USART_TypeDef;
 typedef struct { struct { uint32_t Mode; } Init; } DMA_HandleTypeDef;
 typedef struct UART_HandleTypeDef {
     USART_TypeDef *Instance;
+    struct { uint32_t BaudRate; } Init;
     DMA_HandleTypeDef *hdmarx;
     void (*TxISR)(struct UART_HandleTypeDef *);
 } UART_HandleTypeDef;
@@ -33,6 +34,10 @@ typedef int *SemaphoreHandle_t;
 #define UART_IT_TXE USART_CR1_TXEIE
 #define UART_IT_TC 4U
 #define HAL_OK 0
+#define HAL_ERROR 1
+#define RESET 0
+#define UART_FLAG_TC 8U
+#define __HAL_UART_GET_FLAG(uart, flags) ((uart)->Instance->ISR & (flags))
 #define DMA_NORMAL 0
 #define DMA_IT_HT 1U
 #define __HAL_UART_ENABLE_IT(uart, flags) ((uart)->Instance->CR1 |= (flags))
@@ -45,6 +50,7 @@ SemaphoreHandle_t xSemaphoreCreateMutex(void);
 int xSemaphoreTake(SemaphoreHandle_t, TickType_t);
 int xSemaphoreGive(SemaphoreHandle_t);
 int HAL_UART_AbortReceive(UART_HandleTypeDef *);
+int HAL_UART_Init(UART_HandleTypeDef *);
 int HAL_UARTEx_ReceiveToIdle_DMA(UART_HandleTypeDef *, uint8_t *, uint16_t);
 ''', encoding='utf-8')
     for header in ('main', 'usart', 'FreeRTOS', 'semphr', 'board_interfaces'):
@@ -59,6 +65,8 @@ int HAL_UARTEx_ReceiveToIdle_DMA(UART_HandleTypeDef *, uint8_t *, uint16_t);
                '-T' + str(support / 'qemu_test.ld'), '-Wl,--gc-sections', '-o', str(build / 'test.elf')]
     if (root / "b1.ioc").exists():
         command += ["-DTEST_B1=1"]
+    if (root / 'App/tasks/net_handoff/handoff_mcu.h').is_file():
+        command += ['-DTEST_B1_HANDOFF=1']
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / 'build.log').write_text(result.stdout + result.stderr, encoding='utf-8')
     if result.returncode:

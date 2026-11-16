@@ -32,6 +32,9 @@ def main():
                    str(tests / "support/qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
                    "-T" + str(tests / "support/qemu_test.ld"), "-Wl,--gc-sections,--defsym=end=_ebss",
                    "-o", str(elf)]
+        if (root / 'App/tasks/console/net_console.h').is_file():
+            command += ['-I' + str(root / 'App/tasks/console'),
+                        str(tests / 'support/net_console_fake.c')]
         result = subprocess.run(command, capture_output=True, text=True, timeout=60)
         (build / f"build-{default}.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         if result.returncode:

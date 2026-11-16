@@ -10,11 +10,16 @@ def main():
     parser.add_argument('--app-root', type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument('--b1-power-gate', action='store_true',
                         help='使用当前源码离线核验B1掉电门禁，不修改独立B1工程')
+    parser.add_argument('--stop', action='store_true', help='单独运行B1停止事务，避免扩大QEMU镜像ROM需求')
     parser.add_argument('--compiler', default='C:/Users/Administrator/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gcc.exe')
     parser.add_argument('--qemu', default='D:/qemu/qemu-system-arm.exe')
     args = parser.parse_args()
     root = args.app_root.resolve()
+    if args.stop and root.name != 'b1':
+        parser.error('停止事务只适用于B1')
     build = root / ('build/rk-protocol-test-b1-gate' if args.b1_power_gate else 'build/rk-protocol-test')
+    if args.stop:
+        build = build.with_name(build.name + '-stop')
     build.mkdir(parents=True, exist_ok=True)
     # 枚举从目标板正式头读取，避免测试桩把V2电源阶段错误套到B1。
     state_enum = re.search(r'typedef enum\s*\{\s*PWR_CTRL_STATE_OFF\b.*?\}\s*pwr_ctrl_state_t;',
@@ -50,7 +55,9 @@ uint32_t xTaskGetTickCount(void);
 void vTaskDelay(uint32_t);
 int xQueueSend(QueueHandle_t, const void *, uint32_t);
 int xQueueReceive(QueueHandle_t, void *, uint32_t);
+unsigned uxQueueMessagesWaiting(QueueHandle_t);
 int uart_send(int, uint8_t *, uint16_t);
+int uart_tx_idle(int);
 int uart_poll_rx(int, uint8_t *, uint16_t);
 void task_watchdog_progress(int);
 void led_toggle(int);
@@ -70,12 +77,16 @@ void monitor_set_sample_observer(monitor_sample_observer_t);
                '-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-ffunction-sections', '-fdata-sections']
     if root.name == 'b1' or args.b1_power_gate:
         command += ['-DB1_RK_UART=4']
+    if args.stop:
+        command += ['-DTEST_RK_STOP=1']
     command += ['-I' + str(p) for p in (build, root / 'App/protocol/rk', root / 'App/protocol/common', root / 'App/tasks/rk', root / 'HAL_Drv', root / 'BSP/AD7124', root / 'BSP/PAC1934')]
     command += [str(Path(__file__).with_name('test_rk_protocol.c'))]
     command += [str(root / p) for p in ('App/protocol/rk/frame.c', 'App/protocol/rk/state_machine.c',
                                        'App/protocol/common/crc.c', 'App/tasks/rk/rk_link.c', 'App/tasks/rk/rk_idd.c',
                                        'App/protocol/rk/idd_session.c', 'HAL_Drv/idd_stats.c')]
     support = Path(__file__).resolve().parent / 'support'
+    if (root / 'App/tasks/net_handoff/handoff_mcu.h').is_file():
+        command += ['-I' + str(root / 'App/tasks/net_handoff'), str(support / 'handoff_idle.c')]
     if root.name == 'b1':
         (build / 'main.h').write_text('#include "port.h"\n#define HAL_GetTick xTaskGetTickCount\n', encoding='utf-8')
         command += ['-DTEST_B1_PROTOCOL_TRACE=1', '-I' + str(support), '-I' + str(root / 'App/diagnostics'),

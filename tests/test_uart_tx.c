@@ -10,6 +10,7 @@ UART_HandleTypeDef huart2 = {.Instance = &registers[1]};
 UART_HandleTypeDef huart4 = {.Instance = &registers[2]};
 static uint32_t tick, primask;
 static int locks[3], lock_count, lock_failure;
+static int init_calls, init_failures, abort_failure;
 static void message(const char *text)
 {
     register uint32_t r0 __asm__("r0") = 4U;
@@ -34,7 +35,15 @@ SemaphoreHandle_t xSemaphoreCreateMutex(void) { CHECK(lock_count < 3); return &l
 int xSemaphoreTake(SemaphoreHandle_t lock, TickType_t wait)
 { (void)wait; CHECK(!*lock); if (lock_failure) return 0; *lock = 1; return pdTRUE; }
 int xSemaphoreGive(SemaphoreHandle_t lock) { CHECK(*lock); *lock = 0; return pdTRUE; }
-int HAL_UART_AbortReceive(UART_HandleTypeDef *uart) { (void)uart; return HAL_OK; }
+int HAL_UART_AbortReceive(UART_HandleTypeDef *uart)
+{ (void)uart; CHECK(!primask); return abort_failure ? HAL_ERROR : HAL_OK; }
+int HAL_UART_Init(UART_HandleTypeDef *uart)
+{
+    CHECK(!primask);
+    ++init_calls; uart->TxISR = NULL;
+    if (init_failures) { --init_failures; return HAL_ERROR; }
+    return HAL_OK;
+}
 int HAL_UARTEx_ReceiveToIdle_DMA(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size)
 { (void)uart; (void)data; (void)size; return HAL_OK; }
 static void txe(UART_HandleTypeDef *uart)
@@ -103,6 +112,23 @@ void test_main(void)
     tick = 12U; tc(&huart4);
     CHECK(uart_hw_tx_status(&uart4_if, ticket, &completed) == 1 && completed == 12U);
     CHECK(uart_hw_tx_status(&uart1_if, other, &completed) == 1 && completed == 3U);
+#endif
+#if defined(TEST_B1_HANDOFF)
+    /* 改速只能在TX环和TC同时空闲时执行；HAL失败恢复原值，重挂本端TX钩子。 */
+    huart4.Init.BaudRate = 115200U;
+    registers[2].ISR = 0U;
+    CHECK(uart_hw_set_baud(&uart4_if, 2000000U) == IF_ERR && init_calls == 0);
+    registers[2].ISR = UART_FLAG_TC;
+    CHECK(uart_hw_set_baud(&uart4_if, 2000000U) == IF_OK && huart4.Init.BaudRate == 2000000U);
+    CHECK(huart4.TxISR != NULL && init_calls == 1);
+    init_failures = 1;
+    CHECK(uart_hw_set_baud(&uart4_if, 115200U) == IF_ERR && huart4.Init.BaudRate == 2000000U);
+    CHECK(huart4.TxISR != NULL && init_calls == 3);
+    abort_failure = 1;
+    CHECK(uart_hw_set_baud(&uart4_if, 115200U) == IF_ERR && init_calls == 3);
+    abort_failure = 0;
+    CHECK(uart_hw_set_baud(&uart4_if, 115200U) == IF_OK && huart4.Init.BaudRate == 115200U);
+    message("PASS: UART actual baud switch, TX drain, RX abort failure and HAL rollback\n");
 #endif
     message("PASS: UART tracked TC, queued boundary, ring wrap, failures and IRQ mask preservation\n");
     finish(0U);

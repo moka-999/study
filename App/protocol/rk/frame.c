@@ -286,12 +286,10 @@ int rk_final_result_decode(const tlv_frame_t *frame, rk_final_result_t *result)
             if (!awaiting_die || value >= RK_RESULT_DIE_COUNT ||
                 decoded.failure_count >= RK_RESULT_DIE_COUNT ||
                 (seen_dies & (1U << value)) != 0U) return -1;
-            /* 零地址显式表示该颗PASS；仍登记die，防止PASS明细绕过重复检查。 */
-            if (pending_address != 0U) {
-                rk_failure_detail_t *failure = &decoded.failures[decoded.failure_count++];
-                failure->error_address = pending_address;
-                failure->die = (uint8_t)value;
-            }
+            /* 1017可能在明细后面；先保留全部地址，整帧解析后再按FAIL位判定。 */
+            rk_failure_detail_t *failure = &decoded.failures[decoded.failure_count++];
+            failure->error_address = pending_address;
+            failure->die = (uint8_t)value;
             seen_dies |= (uint8_t)(1U << value);
             awaiting_die = 0U;
         } else {
@@ -305,11 +303,21 @@ int rk_final_result_decode(const tlv_frame_t *frame, rk_final_result_t *result)
     const uint8_t required = (1U << RK_RESULT_FIELD_COMMAND) |
                              (1U << RK_RESULT_FIELD_FAIL) |
                              (1U << RK_RESULT_FIELD_TIME);
-    if (awaiting_die || seen != required ||
-        ((values[RK_RESULT_FIELD_FAIL] != 0U) != (decoded.failure_count != 0U))) return -1;
+    if (awaiting_die || seen != required) return -1;
     decoded.command_id = (uint16_t)values[RK_RESULT_FIELD_COMMAND];
     decoded.failed = (uint8_t)values[RK_RESULT_FIELD_FAIL];
     decoded.elapsed_ms = values[RK_RESULT_FIELD_TIME];
+    if (decoded.failed) {
+        /* FAIL帧列出的颗粒全部失败，地址0也原样保留；无颗粒则无法归属。 */
+        if (decoded.failure_count == 0U) return -1;
+    } else {
+        /* PASS允许省略明细或携带零地址，仍拒绝非零首错地址的矛盾包。 */
+        for (uint8_t i = 0U; i < decoded.failure_count; ++i) {
+            if (decoded.failures[i].error_address != 0U) return -1;
+        }
+        decoded.failure_count = 0U;
+        memset(decoded.failures, 0, sizeof(decoded.failures));
+    }
     /* 整帧通过后一次提交，两组明细中的坏项不能留下部分有效结果。 */
     *result = decoded;
     return 0;

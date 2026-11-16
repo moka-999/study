@@ -24,10 +24,13 @@ def main():
         encoding="utf-8")
     (build / "main.h").write_text('#include "stm32h7xx_hal.h"\n', encoding="utf-8")
     # 本回归专注解析和旧电源门禁，不代替真实RK服务的独立回归。
-    (build / "service_stub.c").write_text('''#include "pc_test_service.h"
+    service_stub = '''#include "pc_test_service.h"
 #include <stdio.h>
 #include <string.h>
 int pc_test_service_busy(void) { return 0; }
+const char *pc_test_service_stop(void) { return "notSupported"; }
+/* 本解析回归不会启动控制台电源；实际控制台及0104取消另有业务回归。 */
+void log_console_complete_power_request(const char *error) { (void)error; __builtin_trap(); }
 pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_test_start_view_t *start,
     uint32_t sequence, pc_dispatch_response_t *response)
 {
@@ -51,9 +54,13 @@ pc_dispatch_result_t pc_test_round_end(uint32_t mask, uint32_t seq, pc_dispatch_
 { (void)mask; (void)seq; (void)out; return PC_DISPATCH_ERROR; }
 pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *view, uint32_t seq, pc_dispatch_response_t *out)
 { (void)view; (void)seq; (void)out; return PC_DISPATCH_ERROR; }
-pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *view, uint32_t seq, pc_dispatch_response_t *out)
+'''
+    # V2仍保留手动SLT结果入口；B1已移除此接口，只按实际导出的头文件生成替身。
+    if 'pc_test_slt_result(' in (root / 'App/protocol/pc/pc_test_service.h').read_text(encoding='utf-8'):
+        service_stub += '''pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *view, uint32_t seq, pc_dispatch_response_t *out)
 { (void)view; (void)seq; (void)out; return PC_DISPATCH_ERROR; }
-''', encoding="utf-8")
+'''
+    (build / 'service_stub.c').write_text(service_stub, encoding='utf-8')
     sources = [Path(__file__).with_name("test_pc_start.c"), build / "service_stub.c",
                *[root / p for p in ("App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_protocol.c",
                                    "App/protocol/pc/pc_state_machine.c", "App/protocol/pc/pc_test_message.c", "App/protocol/pc/pc_power_service.c", "HAL_Drv/ddr_power.c", "BSP/PAC1934/pac1934.c",
@@ -62,6 +69,9 @@ pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *view, uint32
     includes = [build, *[root / p for p in ("App/protocol/pc", "App/tasks/common", "HAL_Drv",
                  "BSP/TPS62868", "BSP/PAC1934", "BSP/AD7124", "BSP/MCP4725", "BSP/Flash",
                  "Middlewares/Third_Party/cJSON", "Core/Inc")]]
+    if (root / 'App/tasks/net_handoff/handoff_mcu.h').is_file():
+        includes.append(root / 'App/tasks/net_handoff')
+        sources.append(Path(__file__).resolve().parent / 'support/handoff_idle.c')
     command = [str(args.compiler), "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-g", "-O1", "-DCJSON_NESTING_LIMIT=16", f"-DPC_TEST_EXPECTED_RSENSE={expected_rsense}",
                "-Wall", "-Wextra", "-Werror",

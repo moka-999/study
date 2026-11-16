@@ -113,7 +113,7 @@ pc_test_json_result_t pc_test_start_parse(const cJSON *root,
  */
 pc_test_json_result_t pc_slt_start_parse(const cJSON *root, pc_test_start_view_t *view);
 
-/** 完整校验0107的errorchip数组后返回镜像失败位图；失败保持*failed_mask不变。
+/** 完整校验0107的failChips数组后返回镜像失败位图；失败保持*failed_mask不变。
  * mirror_count由当前板级灯映射提供，范围1..32；physicalAddr须为字符串。
  * 同一镜像可列多颗芯片，重复项幂等；空数组输出0，未知镜像整包拒绝。
  * 不另建链表/复制芯片清单，遍历上限由4096字节完整PDU限制。
@@ -184,6 +184,7 @@ cJSON *pc_functional_result_create(const char *algorithm_name,
 
 /* 仅借用统计快照，不依赖采样任务或器件；组包不会推进窗口或增加样本。
  * statistics用于0602，measurementData位于0105/0109顶层，表示共轨而非单颗DDR电流。
+ * 电流以mA数值上报，均值四舍五入、最多3位小数；不改采样统计精度。
  * 全部无样本时measurementData为null；部分无样本的单项为null。
  * 返回1成功、0参数/分配失败，失败时调用方删除整个body。
  */

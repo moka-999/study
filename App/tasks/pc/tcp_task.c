@@ -63,10 +63,45 @@ extern struct netif gnetif;
 __attribute__((section(".crash_log"), used)) volatile uint32_t tcp_diag[8];
 #define TCP_DIAG(n, v) do { tcp_diag[n] = (uint32_t)(v); } while(0)
 
+/* 仅无客户端时创建监听；当前连接退出后重新调用。 */
+static int pc_open_listener(void)
+{
+    int listenfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenfd < 0) {
+        TCP_DIAG(2, 0xBEEF00E2);       /* socket 失败 */
+        return -1;
+    }
+
+    /* 允许固件重启后快速重新bind 8888，减少旧TCP连接TIME_WAIT的影响。 */
+    int one = 1;
+    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_len         = sizeof(addr);
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(TCP_PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(listenfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        TCP_DIAG(2, 0xBEEF00E3);       /* bind 失败 */
+        close(listenfd);
+        return -1;
+    }
+    if (listen(listenfd, 1) != 0) {
+        TCP_DIAG(2, 0xBEEF00E4);       /* listen 失败 */
+        close(listenfd);
+        return -1;
+    }
+    TCP_DIAG(2, 0xBEEF0003);
+
+    return listenfd;
+}
+
 /**
  * @brief FreeRTOS单客户端TCP服务入口，拥有连接及MCU发送Seq。
  * @param[in] argument 未使用，可为NULL。
- * @note 等待lwIP/IP后监听8888，逐字节解析并同步分发；建服失败删除任务。
+ * @note 等待lwIP/IP后监听8888，逐字节解析并同步分发；监听创建失败有界等待后重试。
  *       帧头垃圾有界丢弃，完整坏JSON回错后继续；恢复超限、半帧超时或
  *       传输/组包失败关闭当前连接，再等待下一客户端。
  *       JSON/硬件业务由pc_dispatch负责，本任务不透传RK原始帧。
@@ -91,44 +126,23 @@ void StartTcpServerTask(void *argument)
     }
     TCP_DIAG(1, 0xBEEF0002);
 
-    /* 阶段2：建立整个任务生命周期内唯一的监听socket。 */
-    int listenfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenfd < 0) {
-        TCP_DIAG(2, 0xBEEF00E2);       /* socket 失败 */
-        vTaskDelete(NULL);
-        return;
-    }
-
-    /* 允许固件重启后快速重新bind 8888，减少旧TCP连接TIME_WAIT的影响。 */
-    int one = 1;
-    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_len         = sizeof(addr);
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(TCP_PORT);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(listenfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        TCP_DIAG(2, 0xBEEF00E3);       /* bind 失败 */
-        close(listenfd);
-        vTaskDelete(NULL);
-        return;
-    }
-    if (listen(listenfd, 1) != 0) {
-        TCP_DIAG(2, 0xBEEF00E4);       /* listen 失败 */
-        close(listenfd);
-        vTaskDelete(NULL);
-        return;
-    }
-    TCP_DIAG(2, 0xBEEF0003);
+    int listenfd = -1;
 
     /*
-     * 阶段3：单客户端accept循环。listen积压为1，每次只服务当前connfd；
-     * 连接退出后才回到accept，因此不会并发修改同一个协议状态或业务上下文。
+     * 阶段3：accept后关闭监听并清理额外连接；当前客户端退出后恢复监听。
+     * 业务始终只处理一个connfd，额外连接不能长期占用RX缓冲。
      */
     for (;;) {
+        if (listenfd < 0) {
+            listenfd = pc_open_listener();
+            if (listenfd < 0) {
+                pc_dispatch_poll();
+                b2_service_poll(0);
+                task_watchdog_progress(TASK_WATCHDOG_TCP);
+                vTaskDelay(pdMS_TO_TICKS(500U));
+                continue;
+            }
+        }
         TCP_DIAG(3, 0xBEEF0004);       /* 等待连接 */
         /* 无PC连接也是正常状态；有界select让任务自己证明仍在工作。 */
         fd_set readers;
@@ -147,6 +161,13 @@ void StartTcpServerTask(void *argument)
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
+        /* lwIP清理尚未accept的连接及数据，已取出的connfd继续服务。 */
+        if (close(listenfd) != 0) {
+            close(connfd);
+            vTaskDelay(pdMS_TO_TICKS(20U));
+            continue;
+        }
+        listenfd = -1;
         TCP_DIAG(3, 0xBEEF0005);       /* 已连接 */
         led_on(LED_CONNECT);
 

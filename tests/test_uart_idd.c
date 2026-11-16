@@ -6,6 +6,9 @@
 #include "test_port.h"
 #include <limits.h>
 #include <string.h>
+#if defined(TEST_B1_SERIAL_NET)
+#include "serial_net.h"
+#endif
 #if defined(TEST_B1_LOG_CONSOLE)
 #include "log_console.h"
 #include "result_led.h"
@@ -44,6 +47,7 @@ typedef struct {
 static fake_queue_t queues[3];
 static unsigned queue_count;
 static int allocation_failure;
+static void (*queue_wait_event)(void);
 QueueHandle_t xQueueCreate(UBaseType_t length, UBaseType_t size)
 {
     CHECK((length == 8U || length == 2U) && size <= sizeof(queues[0].blocks[0]) && queue_count < 3U);
@@ -68,6 +72,21 @@ BaseType_t xQueueReceive(QueueHandle_t handle, void *data, TickType_t wait)
     if (!q->count) return pdFALSE;
     memcpy(data, q->blocks[q->head], q->size);
     q->head = (q->head + 1U) % q->capacity; --q->count;
+    return pdTRUE;
+}
+BaseType_t xQueuePeek(QueueHandle_t handle, void *data, TickType_t wait)
+{
+    fake_queue_t *q = handle;
+    CHECK(!isr && !critical);
+    if (!q->count && wait) {
+        if (queue_wait_event) {
+            void (*event)(void) = queue_wait_event;
+            queue_wait_event = NULL;
+            event();
+        } else tick += wait;
+    }
+    if (!q->count) return pdFALSE;
+    memcpy(data, q->blocks[q->head], q->size);
     return pdTRUE;
 }
 BaseType_t xQueueReset(QueueHandle_t handle)
@@ -199,6 +218,36 @@ static void test_frames(void)
     CHECK(tlv_pack_cmd(1U, NULL, 0U, 1U, buffer, sizeof(buffer)) == 22);
 }
 
+#if defined(TEST_B1_LOG_CONSOLE)
+static void receive_while_waiting(void)
+{
+    static const uint8_t bytes[] = {0x12U, 0x34U, 0x56U};
+    receive(bytes, sizeof(bytes), HAL_UART_RXEVENT_IDLE);
+}
+
+static void test_uart_wait(void)
+{
+    uint8_t buffer[UART_RX_BUF_SIZE];
+    uint32_t before = tick;
+    uart_wait_rx(-1, 1U);
+    uart_wait_rx(UART_PORT_RK_PROTOCOL, 0U);
+    CHECK(tick == before);
+    uart_wait_rx(UART_PORT_RK_PROTOCOL, 1U);
+    CHECK(tick == before + 1U);
+    /* 等待时注入ISR入队；唤醒及反复peek均不得消费块或附加一轮固定等待。 */
+    before = tick;
+    queue_wait_event = receive_while_waiting;
+    uart_wait_rx(UART_PORT_RK_PROTOCOL, 1U);
+    CHECK(queue_wait_event == NULL && tick == before);
+    uart_wait_rx(UART_PORT_RK_PROTOCOL, 1U);
+    CHECK(tick == before);
+    CHECK(uart_poll_rx(UART_PORT_RK_PROTOCOL, buffer, sizeof(buffer)) == 3);
+    CHECK(buffer[0] == 0x12U && buffer[1] == 0x34U && buffer[2] == 0x56U);
+    CHECK(uart_poll_rx(UART_PORT_RK_PROTOCOL, buffer, sizeof(buffer)) == 0);
+    message("PASS: UART wait preserves RX data, idle timeout and ISR wake path\n");
+}
+#endif
+
 static void test_uart(void)
 {
     uint8_t heartbeat[16], buffer[UART_RX_BUF_SIZE];
@@ -224,10 +273,18 @@ static void test_uart(void)
     CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 16 && !memcmp(buffer, golden, 16U));
     CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 0);
 
+#if defined(TEST_B1_LOG_CONSOLE)
+    test_uart_wait();
+#endif
     tlv_sm_t sm; tlv_sm_init(&sm);
     receive(heartbeat, 10U, HAL_UART_RXEVENT_IDLE);
     CHECK(parse(&sm, buffer, uart_poll_rx(0, buffer, sizeof(buffer))) == 0);
     for (unsigned i = 0U; i < 9U; ++i) receive(heartbeat, 16U, HAL_UART_RXEVENT_TC);
+#if defined(TEST_B1_LOG_CONSOLE)
+    uint32_t before_gap = tick;
+    uart_wait_rx(0, 1U);
+    CHECK(tick == before_gap); /* 断流标记直接交给poll，wait不能清除或延迟它。 */
+#endif
     CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == UART_RX_GAP);
     tlv_sm_reset(&sm); /* 对应RK任务的断流消费规则。 */
     CHECK(uart_get_rx_diagnostics(0, &diag) && diag.queue_overflows == 1U && diag.dropped_blocks == 9U);
@@ -273,6 +330,39 @@ static void test_uart(void)
     CHECK(uart_send(0, heartbeat, 20U) == IF_OK && uart_send(-1, heartbeat, 20U) == IF_ERR);
     CHECK(!critical && !isr);
 }
+
+#if defined(TEST_B1_SERIAL_NET)
+static void test_serial_upload(void)
+{
+    static const uint16_t payloads[] = {512U, 1024U, 1468U};
+    static sn_frame_t request, decoded;
+    static sn_parser_t parser;
+    static uint8_t wire[SN_WIRE_MAX], block[UART_RX_BUF_SIZE];
+    /* 以太网/IP/UDP/TFTP头共46字节；上传由RK一次发完整COBS帧，再等待MCU应答。 */
+    const uint16_t network_headers = 14U + 20U + 8U + 4U;
+    request.op = SN_SEND; request.session = 1U;
+    for (unsigned i = 0U; i < sizeof(payloads) / sizeof(payloads[0]); ++i) {
+        request.sequence = i + 1U;
+        request.length = network_headers + payloads[i];
+        memset(request.data, 0x5A, request.length);
+        uint16_t length = sn_pack(&request, wire, sizeof(wire));
+        /* 必须在帧尾IDLE前装下整帧，不能靠NORMAL DMA中途停收重启承接尾部。 */
+        CHECK(length > request.length && length < UART_RX_BUF_SIZE);
+        unsigned before = starts[0];
+        receive(wire, length, HAL_UART_RXEVENT_IDLE);
+        CHECK(starts[0] == before + 1U);
+        CHECK(uart_poll_rx(0, block, sizeof(block)) == length);
+        sn_parser_reset(&parser);
+        for (unsigned j = 0U; j < length; ++j)
+            CHECK(sn_feed(&parser, block[j], &decoded) == (j + 1U == length ? 1 : 0));
+        CHECK(decoded.op == SN_SEND && decoded.sequence == request.sequence);
+        CHECK(decoded.length == request.length && !memcmp(decoded.data, request.data, request.length));
+        CHECK(uart_poll_rx(0, block, sizeof(block)) == 0);
+    }
+    CHECK(UART_RX_BUF_SIZE > SN_WIRE_MAX);
+    message("PASS: MCU UART RX accepts 512/1024/1468 TFTP upload blocks before DMA restart\n");
+}
+#endif
 
 static void test_stats(void)
 {
@@ -779,11 +869,102 @@ static void test_log_console(void)
 }
 #endif
 
+#if defined(TEST_NET_CONSOLE)
+extern uint32_t fake_net_session;
+extern int fake_net_blocked;
+extern char fake_net_output[];
+extern size_t fake_net_output_length, fake_net_input_length;
+extern uint8_t fake_net_input[];
+
+static void network_input(const char *text)
+{
+    CHECK(fake_net_input_length == 0U && strlen(text) <= 512U);
+    fake_net_input_length = strlen(text);
+    memcpy(fake_net_input, text, fake_net_input_length);
+    log_console_process();
+}
+static void clear_network_output(void)
+{
+    fake_net_output_length = 0U;
+    fake_net_output[0] = '\0';
+}
+
+static void test_network_console(void)
+{
+    console_input("log mcu\n");
+    fake_net_session = 1U;
+    log_console_process();
+    CHECK(strstr(fake_net_output, "connected; source=mcu"));
+    clear_network_output(); clear_console_output();
+    log_console_write_record("both\r\n", 6U);
+    CHECK(!strcmp(fake_net_output, "both\r\n") && !strcmp(console_output, "both\r\n"));
+
+    /* 两端半行不互拼；status只返回发起端，切换另一端不会取消报告。 */
+    network_input("sta"); console_input("log rk\n"); network_input("tus\n");
+    CHECK(log_console_take_status_request());
+    clear_network_output(); clear_console_output();
+    CHECK(log_console_write_status("snapshot", 8U) == 1);
+    CHECK(!strcmp(fake_net_output, "snapshot") && !console_output_length);
+    CHECK(log_console_mcu_selected());
+    clear_network_output(); log_console_write_record("mcu\r\n", 5U);
+    CHECK(!strcmp(fake_net_output, "mcu\r\n") && !console_output_length);
+    rk_log_input("rk text"); CHECK(!strcmp(console_output, "rk text"));
+
+    /* 两端可同时观察RK，但只有先进入者的按键会写入USART2。 */
+    network_input("log rk\n"); CHECK(strstr(fake_net_output, "read-only"));
+    clear_rk_console_output(); network_input("version\n"); check_rk_console_output(NULL, 0U);
+    console_input("version\n"); check_rk_console_output("version\n", 8U);
+    clear_rk_console_output(); console_input("log mcu\n");
+    network_input("log mcu\nlog rk\n");
+    network_input("\x1b[A\r\n"); check_rk_console_output("\x1b[A\r\n", 5U);
+    console_input("log rk\n"); CHECK(strstr(console_output, "read-only"));
+    clear_rk_console_output(); console_input("version\n"); check_rk_console_output(NULL, 0U);
+
+    /* 断线丢弃输入半行并释放RK控制权，不向新连接送旧状态/电源回复。 */
+    network_input("log mcu\nstatus\n"); CHECK(log_console_take_status_request());
+    fake_net_session = 0U; log_console_process();
+    CHECK(log_console_write_status("old", 3U) == -1);
+    fake_net_session = 2U; log_console_process();
+    network_input("start "); fake_net_session = 3U; log_console_process(); network_input("rk\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    network_input("start rk\n"); CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_START_RK);
+    fake_net_session = 4U; log_console_process(); clear_network_output();
+    log_console_complete_power_request(NULL); log_console_process();
+    CHECK(!strstr(fake_net_output, "power ON"));
+    network_input("end rk\n"); CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_END_RK);
+    log_console_complete_power_request(NULL); log_console_process();
+    CHECK(strstr(fake_net_output, "power OFF"));
+
+    /* 网络拥塞不阻塞串口日志和命令；两路共用电源单槽，不能并发动作。 */
+    fake_net_blocked = 1; network_input("status\n");
+    console_input("log mcu\n"); clear_console_output();
+    log_console_write_record("serial alive\r\n", 14U);
+    CHECK(!strcmp(console_output, "serial alive\r\n"));
+    console_input("start rk\n"); CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_START_RK);
+    fake_net_blocked = 0; log_console_process();
+    network_input("end rk\n"); CHECK(strstr(fake_net_output, "busy"));
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    log_console_complete_power_request(NULL); log_console_process();
+    network_input("log rk\n"); fake_net_session = 0U; log_console_process();
+    console_input("log rk\n"); clear_rk_console_output();
+    console_input("version\n"); check_rk_console_output("version\n", 8U);
+    console_input("log mcu\n");
+    CHECK(!critical && !isr);
+    message("PASS: network/serial source isolation, RK input ownership, status routing and reconnect\n");
+}
+#endif
+
 void test_main(void)
 {
     test_frames(); test_uart(); test_stats(); test_stats_groups();
+#if defined(TEST_B1_SERIAL_NET)
+    test_serial_upload();
+#endif
 #if defined(TEST_B1_LOG_CONSOLE)
     test_log_console();
+#endif
+#if defined(TEST_NET_CONSOLE)
+    test_network_console();
 #endif
     message("PASS: UART recovery, RK bounds and IDD windows\n");
     finish(0U);

@@ -92,7 +92,7 @@ static void test_result_capacity_and_allocation(void)
     message("PASS: dual-die worst-case PDU and every JSON allocation failure without leaks\n");
 }
 
-/* 两个µA样本的平均值允许不足1µA；0602和0105始终使用mA数值，空轨仍为null。 */
+/* 原始累加器保留µA；上报均值四舍五入到0.001mA，0602和0105一致，空轨仍为null。 */
 static void test_measurement_units(void)
 {
     idd_stats_t stats = {0};
@@ -115,11 +115,11 @@ static void test_measurement_units(void)
     CHECK(cJSON_GetObjectItemCaseSensitive(data, "Idd1Ave")->valuedouble == 0.5);
     CHECK(fabs(cJSON_GetObjectItemCaseSensitive(data, "Idd1Min")->valuedouble - 0.1) < 1e-12);
     CHECK(fabs(cJSON_GetObjectItemCaseSensitive(data, "Idd1Peak")->valuedouble - 0.9) < 1e-12);
-    CHECK(fabs(cJSON_GetObjectItemCaseSensitive(data, "Idd2Ave")->valuedouble - 0.5005) < 1e-12);
+    CHECK(fabs(cJSON_GetObjectItemCaseSensitive(data, "Idd2Ave")->valuedouble - 0.501) < 1e-12);
     CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(data, "IddqAve")));
     const cJSON *statistics = cJSON_GetObjectItemCaseSensitive(body, "statistics");
     CHECK(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(statistics, "currentAvgMa"), 0)->valuedouble == 0.5);
-    CHECK(fabs(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(statistics, "currentAvgMa"), 1)->valuedouble - 0.5005) < 1e-12);
+    CHECK(fabs(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(statistics, "currentAvgMa"), 1)->valuedouble - 0.501) < 1e-12);
     CHECK(cJSON_IsNull(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(statistics, "currentPeakMa"), 2)));
     /* 校验实际发送文本，避免对象中的小数正确、链接库却无法输出JSON数字。 */
     char wire[2048];
@@ -128,7 +128,7 @@ static void test_measurement_units(void)
     if (decoded == NULL) { message(wire); message("\n"); }
     CHECK(decoded != NULL);
     const cJSON *decoded_data = cJSON_GetObjectItemCaseSensitive(decoded, "measurementData");
-    CHECK(fabs(cJSON_GetObjectItemCaseSensitive(decoded_data, "Idd2Ave")->valuedouble - 0.5005) < 1e-12);
+    CHECK(fabs(cJSON_GetObjectItemCaseSensitive(decoded_data, "Idd2Ave")->valuedouble - 0.501) < 1e-12);
     CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(decoded_data, "IddqAve")));
     cJSON_Delete(decoded);
     cJSON_Delete(body);

@@ -15,14 +15,21 @@ def main():
     parser.add_argument("--mats-fail-test", action="store_true", help="仅V2电源模拟：验证每次MATS最终回包强制FAIL")
     parser.add_argument("--power-sequence", action="store_true", help="执行正式电源编排与0103的故障注入，不访问设备")
     parser.add_argument("--round", action="store_true", help="验证整轮、SLT收尾和070x删除；只运行离线实际C")
+    parser.add_argument("--stop", action="store_true", help="B1的0104中止及掉电清理回归")
+    parser.add_argument("--slt-fault", choices=("off", "transport", "transport-after", "power-off"),
+                        help="B1整轮专项：独立进程验证SLT故障只报告一次并保持占用")
     args = parser.parse_args()
     root = args.app_root.resolve()
+    if args.stop and (root.name != "b1" or not args.power_sequence or not args.round):
+        parser.error("停止回归要求B1、--power-sequence和--round")
     if args.power_simulation and (args.b1_guard or root.name == "b1"):
         parser.error("B1禁止电源模拟")
     if args.mats_fail_test and not args.power_simulation:
         parser.error("MATS失败联调必须显式开启V2电源模拟")
     if args.power_sequence and args.power_simulation:
         parser.error("真实电源编排回归不启用V2模拟实现")
+    if args.slt_fault and (root.name != "b1" or not args.power_sequence or not args.round):
+        parser.error("SLT故障专项要求B1工程、--power-sequence和--round")
     suffix = "-power-sim" if args.power_simulation else "-b1-guard" if args.b1_guard else ""
     if args.mats_fail_test:
         suffix += "-mats-fail"
@@ -30,6 +37,10 @@ def main():
         suffix += "-power-sequence"
     if args.round:
         suffix += "-round"
+    if args.stop:
+        suffix += "-stop"
+    if args.slt_fault:
+        suffix += "-slt-fault-" + args.slt_fault
     build = root / "build" / ("pc-rk-service" + suffix)
     build.mkdir(parents=True, exist_ok=True)
     # 只模拟RTOS队列和HAL类型，不替换命令表、JSON解析、服务生命周期或响应组包。
@@ -58,7 +69,7 @@ uint32_t HAL_GetTick(void);
         # V2源码检查B1条件分支时只补日志端口；真实B1构建仍使用自身正式接口头。
         (build / "log_console.h").write_text(
             '#include <stddef.h>\nsize_t log_console_write(const char *, size_t);\n', encoding="utf-8")
-    sources = [Path(__file__).with_name("test_pc_rk_service.c"), *[root / path for path in (
+    sources = [Path(__file__).with_name("test_pc_stop.c" if args.stop else "test_pc_rk_service.c"), *[root / path for path in (
         "App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_test_service.c",
         "App/protocol/pc/pc_power_service.c",
         "App/protocol/pc/pc_protocol.c", "App/protocol/pc/pc_test_message.c",
@@ -74,13 +85,16 @@ uint32_t HAL_GetTick(void);
         "BSP/TPS62868", "BSP/PAC1934", "BSP/AD7124", "BSP/MCP4725", "BSP/Flash",
         "Middlewares/Third_Party/cJSON", "Core/Inc")]]
     support = Path(__file__).resolve().parent / "support"
+    if (root / 'App/tasks/net_handoff/handoff_mcu.h').is_file():
+        includes.append(root / 'App/tasks/net_handoff')
+        sources.append(support / 'handoff_idle.c')
     command = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-std=c11", "-O1", "-g", "-DCJSON_NESTING_LIMIT=16",
                "-Wall", "-Wextra", "-Werror", "-ffunction-sections", "-fdata-sections"]
     if args.b1_guard or root.name == "b1":
         command += ["-DB1_RK_UART=4"]
     if root.name == "b1":
-        command += ["-DTEST_B1_CONSOLE_POWER=1", "-DTEST_B1_PROTOCOL_TRACE=1"]
+        command += ["-DTEST_B1_CONSOLE_POWER=1", "-DTEST_B1_PROTOCOL_TRACE=1", "-DTEST_B1_AUTO_SLT=1"]
         includes += [root / "App/diagnostics", support]
         sources += [support / "trace_capture.c", *[root / "App/diagnostics" / name for name in
                     ("protocol_trace.c", "pc_trace.c", "rk_trace.c")]]
@@ -92,6 +106,9 @@ uint32_t HAL_GetTick(void);
         command += ["-DPC_POWER_SEQUENCE_TEST=1"]
     if args.round:
         command += ["-DPC_TEST_ROUND_TEST=1"]
+    if args.slt_fault:
+        mode = ("off", "transport", "transport-after", "power-off").index(args.slt_fault) + 1
+        command += [f"-DPC_SLT_FAULT_TEST={mode}"]
     command += ["-I" + str(path) for path in includes]
     command += [*map(str, sources), str(support / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
                 "-T" + str(support / "qemu_test.ld"), "-Wl,--gc-sections", "-o", str(build / "test.elf")]

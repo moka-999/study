@@ -61,7 +61,7 @@ def main():
                     assert accepted and response["algorithmIndex"] == 1
                     failures = [{"physicalAddr": chip["physicalAddr"], "mirrorIndex": chip["mirrorIndex"]}
                                 for chip in response["testResults"] if chip["testStatus"] == 0]
-                    summary = json.dumps({"errorchip": failures}, separators=(",", ":")).encode()
+                    summary = json.dumps({"failChips": failures}, separators=(",", ":")).encode()
                     connection.sendall(make_frame(0x0107, summary, 3))
                     fields, summary_response = recv_frame(connection)
                     record({"event": "round_end", "header": fields, "json": summary_response})

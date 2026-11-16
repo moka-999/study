@@ -1,6 +1,6 @@
 # PC–MCU TCP通信协议框架
 
-本文规定PC与MCU之间的报文、命令、JSON字段和应答规则。示例中的编号、测量值和版本仅供格式参考。
+本文规定PC与MCU之间的报文、命令、JSON字段和应答规则。示例中的编号、测量值和版本仅供格式参考。2026-11-13起，B1的SLT以EDK RELEASE自动收尾，不再使用010B；V2仍保留原010A/010B流程。
 
 ## 1. 通信方式
 
@@ -38,7 +38,7 @@
 
 ## 3. 命令编号
 
-0103/0105用于FUNC开始/结果；0106/0107用于整轮开始/结束及镜像结果灯汇总；0108/0109用于PARA开始/结果；010A/010B用于整次SLT开始/结果回送。双方按下表使用命令编号。
+0103/0105用于FUNC开始/结果；0106/0107用于整轮开始/结束及镜像结果灯汇总；0108/0109用于PARA开始/结果；010A用于SLT开始。B1不再使用010B，SLT结果由PC解析并纳入0107；V2仍用010B回送SLT结果。双方按下表使用命令编号。
 
 | 编号 | 枚举名称 | 用途 |
 |---|---|---|
@@ -52,14 +52,14 @@
 | 0x0101 | CMD_QUERY_TESTER_INFO | PC→MCU：查询测试仪信息 |
 | 0x0102 | CMD_TESTER_INFO_RESP | MCU→PC：测试仪信息响应 |
 | 0x0103 | CMD_START_FUNC_TEST | PC→MCU：开始一个FUNC算法项 |
-| 0x0104 | CMD_STOP_TEST | 保留，未定义为RK取消或整轮结束 |
+| 0x0104 | CMD_STOP_TEST | B1：停止当前执行并关闭RK，保留整轮；V2暂不支持 |
 | 0x0105 | CMD_FUNC_TEST_RESULT_REPORT | MCU→PC：FUNC算法结果 |
 | 0x0106 | CMD_START_TEST_ROUND | PC→MCU：整轮开始，包体为{} |
 | 0x0107 | CMD_FINISH_TEST_ROUND | PC→MCU：提交失败芯片清单，结束本轮并更新镜像结果灯 |
 | 0x0108 | CMD_START_PARA_TEST | PC→MCU：开始一个PARA算法项 |
 | 0x0109 | CMD_PARA_TEST_RESULT_REPORT | MCU→PC：PARA算法结果 |
 | 0x010A | CMD_START_SLT_TEST | PC→MCU：开始整次SLT测试 |
-| 0x010B | CMD_SLT_TEST_RESULT_SUBMIT | PC→MCU：回送SLT汇总结果 |
+| 0x010B | CMD_SLT_TEST_RESULT_SUBMIT | B1：编号保留、不支持；V2：PC→MCU回送SLT汇总结果 |
 | 0x0501 | CMD_POWER_ON | PC→MCU：启动RK及内存电源 |
 | 0x0502 | CMD_POWER_OFF | PC→MCU：关闭RK及内存电源 |
 | 0x0503 | CMD_QUERY_POWER_STATUS | PC→MCU：查询电源状态 |
@@ -90,7 +90,7 @@
 | 0x0107 整轮结束 | 0x0006 completed，仅表示收尾及灯状态更新完成 | 0x0006 failed |
 | 0x0108 PARA开始 | 0x0006 accepted；完整启动准备另回completed；最终结果0x0109 | 0x0006 failed |
 | 0x010A SLT开始 | 0x0006 accepted；电源/Boot准备完成另回completed，MCU不上传SLT最终结果 | 0x0006 failed |
-| 0x010B SLT结果回送 | 0x0006 completed，确认接收PC汇总结果 | 0x0006 failed |
+| 0x010B SLT结果回送 | 仅V2：0x0006 completed，确认接收PC汇总结果 | B1：合法JSON对象回0x0006 failed/notSupported；V2：0x0006 failed |
 | 0x0501 上电 | 0x0006 accepted→completed；已ON直接completed | 0x0006 failed |
 | 0x0502 下电 | 0x0006 accepted/completed | 0x0006 failed |
 | 0x0503 查询电源 | 0x0504 电源状态 | 0x0006 failed |
@@ -130,7 +130,7 @@ PC发送0x0002，MCU返回0x0001；双方包体均为 `{}`，各自使用本端�
 | requestCommandId | integer | 对应PC请求命令号，十进制 |
 | status | string | accepted=已受理；completed=操作完成；failed=失败 |
 | errorCode | string | 仅失败应答携带，见下表 |
-| algorithmIndex | integer/null | FUNC/PARA带回合法请求index；SLT填null；其他命令省略 |
+| algorithmIndex | integer/null | FUNC/PARA带回合法请求index；010A及V2的010B填null；其他命令省略 |
 
 同步控制成功示例：
 
@@ -274,7 +274,7 @@ TimingParameters子字段均为可选字符串，可只填部分项或空字符�
 
 ### 4.8 停止测试（0x0104）
 
-保留编号，不作为本轮整轮结束命令，也不承诺RK取消能力。整轮收尾使用0107；未支持时返回0006 failed/notSupported。
+正式B1接收`{}`，停止当前FUNC/PARA/SLT并沿既有流程关闭RK，不等待RK取消应答或EDK RELEASE。真实OFF、串口及队列清理完成后回复`0006 {"requestCommandId":260,"status":"completed"}`，不额外发accepted。清理中下一项回busy；失败保持占用，可再次0104重试。同连接0106整轮保留，下一项须按RK已OFF提供完整启动配置；0107仍负责整轮结果与灯态。断线继续清理但不补旧响应，不代表测试PASS或SLT报告上传成功。见[B1停止合同](../../b1/docs/test_stop_20261116.md)。V2和手动TLV分支本次未接入，仍回notSupported。
 
 ### 4.9 FUNC结果上报（0x0105）
 
@@ -329,7 +329,7 @@ MCU→PC。每个FUNC算法上报一包，当前为两个镜像各一颗DDR的�
 | ↳ `mirrorIndex` | int | 镜像索引，当前为0或1；不是镜像内芯片编号 |
 | ↳ `testStatus` | int | 本颗结论：0=FAIL，1=PASS |
 | ↳ `resultDesc` | object | 本颗结果说明，子字段由algorithmType决定 |
-| ↳↳ `firstErrorAddress` | string/null | FUNC失败首错地址：0x加16位十六进制；RK零地址明细表示PASS，输出null，非零失败地址完整保留 |
+| ↳↳ `firstErrorAddress` | string/null | FUNC失败首错地址：0x加16位十六进制；FAIL地址0保留完整零地址，PASS为null |
 | ↳↳ `errorType` | string | FUNC错误类型，如SAF；PASS或RK未提供类型时为空字符串 |
 | ↳ `physicalAddr` | string | 镜像内物理芯片标识；当前每镜像一颗时填空，不是首错内存地址 |
 | `measurementData` | object/null | 顶层共享统计，不重复放到两颗结果里；字段为数字或null，不含state |
@@ -339,10 +339,12 @@ MCU→PC。每个FUNC算法上报一包，当前为两个镜像各一颗DDR的�
 | Vdd1 / Vdd2 / Vddq | 三轨电压，mV |
 | Idd1 / Idd2 / Iddq | 三轨电流，mA；两颗合计，不代表单颗 |
 | Ave / Peak / Min | 各项后缀：平均、采样最大、采样最小，共18项；不保证捕获瞬态尖峰 |
+
+电流平均值按四舍五入保留最多3位小数（0.001mA）；仍为JSON数字，不补尾随零。无有效样本的字段为null。0109及0602统计采用相同精度。
 | 无有效数据 | 对应值为null；完全无数据时measurementData=null，不用0代替 |
 | 统计区间 | 本次算法投递前清零、结束冻结；不计启动准备，查询不清零 |
 
-采样异常不等于芯片FAIL；0107提前结束后的结果不再上报。SLT格式见4.15，PARA格式见4.13。
+采样异常不等于芯片FAIL；0107提前结束后的结果不再上报。B1 SLT不经MCU上传最终结果，由PC纳入0107；V2的SLT回送格式见4.15，PARA格式见4.13。
 
 ### 4.10 整轮开始（0x0106）
 
@@ -355,7 +357,7 @@ PC→MCU。开始一轮测试，不携带加热属性或灯状态。
 - 应答：0006 completed，requestCommandId=262；已有整轮或测试占用时回busy。
 - 是否加热和测试期间灯态由B1通过B2通信获取，实际加热仍由PC控制B2。
 - 默认常温仅为显示初值，不代表已确认B2未加热、已冷却或可触碰。
-- 顺序：0106 → 串行FUNC/SLT/PARA → 0107。FUNC等待0105；PARA等待0109；SLT由PC回送010B并等待确认。
+- 顺序：0106 → 串行FUNC/SLT/PARA → 0107，算法顺序任意且允许重复。FUNC等待0105，PARA等待0109；B1的SLT在EDK RELEASE及本地收尾完成后自动解除占用，不等待010B，下一项早到回busy，PC等待后重试。PC可并行解析上一份SLT报告；V2仍须回送010B并等待确认。
 - 未先完成0106时，FUNC/PARA/SLT开始返回0006 failed/invalidState。
 - FUNC/PARA的algorithmIndex在本轮内区分算法项；SLT的algorithmIndex固定null。
 - 本命令不启动算法或切换电源；灯态不是已达温、已冷却或可触碰的判据。
@@ -366,7 +368,7 @@ PC→MCU。提交本轮失败芯片清单并结束本轮；只列失败芯片，
 
 ```json
 {
-  "errorchip": [
+  "failChips": [
     {
       "physicalAddr": "",
       "mirrorIndex": 0
@@ -381,16 +383,16 @@ PC→MCU。提交本轮失败芯片清单并结束本轮；只列失败芯片，
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| errorchip | array | 必填，每项对应一颗失败芯片；全部通过时填空数组[] |
+| failChips | array | 必填，每项对应一颗失败芯片；全部通过时填空数组[] |
 | ↳ physicalAddr | string | 镜像内物理芯片标识；当前每镜像一颗时可填空，多颗时填写具体标识 |
 | ↳ mirrorIndex | integer | 所属镜像索引，沿用整数；同一镜像多颗失败时可重复该索引，由physicalAddr区分 |
 
-- 应答：0006 completed，requestCommandId=263。
-- 每个镜像对应一盏结果灯；清单中出现的镜像置FAIL，其余镜像置PASS。`{"errorchip":[]}`表示全部镜像置PASS。
+- 应答：0006 completed，requestCommandId=263。字段名区分大小写，使用failChips；旧errorchip不再接收。
+- 每个镜像对应一盏结果灯；清单中出现的镜像置FAIL，其余镜像置PASS。`{"failChips":[]}`表示全部镜像置PASS。
 - 当前映射：0→第一组LPDDR灯、1→第二组LPDDR灯、2→eMCP灯；其他编号整包回invalidArgument。
-- PC须提交完整汇总；MCU完整校验清单后统一更新结果灯，报文错误不部分更新。
+- PC须在本轮全部测试及报告解析完成后，提交FUNC/PARA/SLT三类结果的完整失败清单；MCU只按该清单统一更新结果灯，报文错误不部分更新。
 - 未完成项的后续结果作废，不覆盖汇总灯；不取消正在执行的RK测试，不自动断电或停止B2加热。
-- RK仍运行时，新开始、改电源及升级写仍可回busy；SLT实际结束后仍须回送010B。
+- RK仍运行或SLT收尾未完成时，新测试及电源改动仍可回busy。B1不使用010B；提前0107不影响后续RELEASE自动收尾，也不允许跨整轮认领旧测试。V2的SLT实际结束后仍须回送010B。
 
 ### 4.12 PARA开始测试（0x0108）
 
@@ -506,7 +508,7 @@ PC→MCU。启动整次SLT，MCU准备电源和EDK启动介质；具体算法及
 | 字段 | 类型 | 含义 |
 |---|---|---|
 | algorithmType | string | 固定slt |
-| algorithmName | string | 固定memtest86，大小写严格匹配；结果回送时一致 |
+| algorithmName | string | 固定memtest86，大小写严格匹配；V2的010B结果回送名称须一致 |
 | algorithmIndex | null | 保留字段，固定JSON null，不逐算法编号 |
 | power | object | 沿用4.7的memoryType及三轨字符串mV，非null |
 | reboot | boolean | 沿用4.7重启规则，false不能绕过配置变化所需重启 |
@@ -515,12 +517,16 @@ PC→MCU。启动整次SLT，MCU准备电源和EDK启动介质；具体算法及
 
 - 七个根字段全部必填；TimingParameters默认填{}，缺失或null回invalidArgument。不带timeoutMs；电压范围、步进和安全责任沿用4.7。
 - 应答：0006 accepted → completed，requestCommandId=266、algorithmIndex=null；completed仅表示电源/Boot准备及本轮参数发送完成，不证明参数生效或SLT测试完成。
-- 仅填Freq或使用默认空时序时，电源/Boot准备完成即可回completed。RK查询时才回复本轮Freq。若有普通时序，须等本轮SPL普通心跳后逐项发送，等待心跳上限60秒。MCU不下发串口算法，也不检查EDK或报告服务；上电后配置失败仍保留SLT占用，须原连接010B确认实际结束。
-- PC确认实际启动、取得SLT报告后发送010B；示例emmc须与实际EDK部署位置一致。
+- 仅填Freq或使用默认空时序时，电源/Boot准备完成即可回completed。RK查询时才回复本轮Freq。若有普通时序，须等本轮SPL普通心跳后逐项发送，等待心跳上限60秒。示例emmc须与实际EDK部署位置一致。
+- B1准备完成后自动进入EDK/PXE，PC连接保持。EDK RELEASE应答发完后，MCU自动完成关电及串口恢复、解除测试占用；不等待010B、不发送010B completed，也不新增测试完成通知。未完成收尾时下一项回busy，PC等待后重试。
+- B1的RELEASE也可能来自启动失败或应用失败退出，不代表报告上传成功或测试PASS。PC确认报告收齐、解析结果，并在0107中提交本轮完整失败清单。断线不取消正在执行的SLT，后续RELEASE仍自动收尾，不把旧响应交给新连接。
+- V2保留原启动准备流程，不检查EDK或报告服务；须PC确认SLT实际结束后用原连接发送010B，收到确认后继续下一项。
 
-### 4.15 SLT结果回送（0x010B）
+### 4.15 SLT结果回送（0x010B，B1保留、V2使用）
 
-PC→MCU。回送整次SLT的汇总结论，当前两个镜像各一颗DDR，不逐算法回送；保留统一结果字段，无内容填空。
+B1不再使用此命令：合法JSON对象返回0006 failed/notSupported，不解析结果、不结束当前测试、不关电、不更新灯态。无论在SLT运行中、收尾后或下一项算法期间，旧010B均无业务副作用；非法帧/JSON仍按通用规则处理。
+
+以下请求及应答仅适用于V2保留的原流程。PC→MCU回送整次SLT汇总结论，当前两个镜像各一颗DDR，不逐算法回送；保留统一结果字段，无内容填空。
 
 ```json
 {
@@ -539,7 +545,7 @@ PC→MCU。回送整次SLT的汇总结论，当前两个镜像各一颗DDR，不
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| siteId | string | B1板标识，未配置为空字符串 |
+| siteId | string | 测试板标识，未配置为空字符串 |
 | algorithmType / algorithmName | string | slt及开始请求中的名称 |
 | algorithmIndex | null | 固定JSON null，不用于逐算法配对 |
 | testTimeMs | uint64/null | 整次SLT实际耗时ms，未知为null |
@@ -698,6 +704,8 @@ PC→MCU，请求`{}`；响应0602。测试期间可轮询，不因算法运行�
 | statistics.currentAvgMa | (number / null)[3] | 平均电流，单位mA |
 | statistics.currentPeakMa | (number / null)[3] | 采样最大电流，单位mA |
 | statistics.currentMinMa | (number / null)[3] | 采样最小电流，单位mA |
+
+电流统计为JSON数字，平均值四舍五入到最多3位小数；与0105/0109测量数据精度一致。
 
 | statistics.state | 含义 |
 |---|---|

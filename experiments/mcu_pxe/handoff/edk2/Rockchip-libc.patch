@@ -1,0 +1,154 @@
+--- a/edk2-platforms/Silicon/Rockchip/Library/PWMLib/PWMLib.c
++++ b/edk2-platforms/Silicon/Rockchip/Library/PWMLib/PWMLib.c
+@@ -10,7 +10,7 @@
+ #include <Library/DebugLib.h>
+ #include <Library/IoLib.h>
+ #include <Library/PWMLib.h>
+-#include <stdlib.h>
++#include <Library/BaseLib.h>
+ 
+ #define PWM_INT_EN(ch)                      (1 << (ch))
+ #define PWM_PWR_INT_EN(ch)                  (1 << ((ch) + 4 ))
+@@ -71,17 +71,13 @@
+   IN PWM_DATA                   *Data
+   )
+ {
+-  ldiv_t PeriodDiv, DutyDiv;
+   UINTN Base = mPwmControllerBase[Data->ControllerID];
+   UINT32 Ctrl;
+   UINT64 PeriodCycle, DutyCycle;
+   UINT64 ChannelOffset = Data->ChannelID * 0x10;
+ 
+-  PeriodDiv = ldiv((UINT64)FREQUENCY_24M * Data->PeriodNs, 1000000000);
+-  DutyDiv = ldiv((UINT64)FREQUENCY_24M * Data->DutyNs, 1000000000);
+-
+-  PeriodCycle = PeriodDiv.quot;
+-  DutyCycle = DutyDiv.quot;
++  PeriodCycle = DivU64x32((UINT64)FREQUENCY_24M * Data->PeriodNs, 1000000000);
++  DutyCycle = DivU64x32((UINT64)FREQUENCY_24M * Data->DutyNs, 1000000000);
+ 
+   Ctrl = MmioRead32(Base + ChannelOffset + PWM_CTRL_OFFSET);
+   Ctrl |= PWM_LOCK;
+--- a/edk2-platforms/Silicon/Rockchip/Library/PWMLib/PWMLib.inf
++++ b/edk2-platforms/Silicon/Rockchip/Library/PWMLib/PWMLib.inf
+@@ -19,6 +19,7 @@
+   PWMLib.c
+ 
+ [LibraryClasses]
++  BaseLib
+   DebugLib
+   IoLib
+ 
+--- a/edk2-platforms/Silicon/Rockchip/Drivers/PciPlatform/PcieInit.c
++++ b/edk2-platforms/Silicon/Rockchip/Drivers/PciPlatform/PcieInit.c
+@@ -12,11 +12,8 @@
+ #include <Library/OemMiscLib.h>
+ #include <Library/PlatformPciLib.h>
+ #include <Library/IoLib.h>
+-#include <stdlib.h>
+-#include <string.h>
+-#include <malloc.h>
++#include <Library/BaseMemoryLib.h>
+ #include <Library/MemoryAllocationLib.h>
+-#include <stdio.h>
+ #include <Library/PcdLib.h>
+ #include <Library/RockchipPlatformLib.h>
+ 
+@@ -376,7 +373,7 @@
+ 	}
+ 
+ 
+-	memset(priv, 0, sizeof(struct rk_pcie));
++	ZeroMem(priv, sizeof(struct rk_pcie));
+ 
+ 	/* 先调试3L4，配置Gen 3 */
+ 	priv->gen = 3;
+--- a/edk2-platforms/Silicon/Rockchip/Drivers/Vop2Dxe/Vop2Dxe.c
++++ b/edk2-platforms/Silicon/Rockchip/Drivers/Vop2Dxe/Vop2Dxe.c
+@@ -18,7 +18,7 @@
+ #include <Library/MediaBusFormat.h>
+ #include <Library/DrmModes.h>
+ 
+-#include <string.h>
++#include <Library/BaseMemoryLib.h>
+ 
+ #include <Protocol/RockchipCrtcProtocol.h>
+ 
+@@ -1406,7 +1406,7 @@
+     RockchipVop2->Version = mVop2RK3588.Version;
+     RockchipVop2->Data = &mVop2RK3588;
+     RockchipVop2->GlobalInit = FALSE;
+-    memset(RockchipVop2->VpPlaneMask, 0, sizeof(VOP2_VP_PLANE_MASK) * VOP2_VP_MAX);
++    ZeroMem(RockchipVop2->VpPlaneMask, sizeof(VOP2_VP_PLANE_MASK) * VOP2_VP_MAX);
+   }
+ 
+   CrtcState->Private = RockchipVop2;
+--- a/edk2-platforms/Silicon/Rockchip/Drivers/PciPlatform/PciPlatform.inf
++++ b/edk2-platforms/Silicon/Rockchip/Drivers/PciPlatform/PciPlatform.inf
+@@ -28,6 +28,7 @@
+   UefiDriverEntryPoint
+   UefiLib
+   BaseLib
++  BaseMemoryLib
+   DebugLib
+   ArmLib
+   IoLib
+--- a/edk2-platforms/Silicon/Rockchip/Drivers/Vop2Dxe/Vop2Dxe.inf
++++ b/edk2-platforms/Silicon/Rockchip/Drivers/Vop2Dxe/Vop2Dxe.inf
+@@ -30,6 +30,7 @@
+   IoLib
+   DebugLib
+   BaseLib
++  BaseMemoryLib
+   MemoryAllocationLib
+   RockchipDisplayLib
+   UefiDriverEntryPoint
+--- a/edk2-platforms/Silicon/Rockchip/Drivers/NorFlashDxe/NorFlashDxe.c
++++ b/edk2-platforms/Silicon/Rockchip/Drivers/NorFlashDxe/NorFlashDxe.c
+@@ -7,7 +7,6 @@
+ #include <Library/DebugLib.h>
+ #include <Library/IoLib.h>
+ #include <Library/PcdLib.h>
+-#include <string.h>
+ #include <Library/TimerLib.h>
+ #include <Library/SpiMem.h>
+ #include <Library/Fspi.h>
+@@ -1003,7 +1002,7 @@
+     }
+ 
+   if (Align) {
+-    memcpy(&TmpBuf[Align], Buf, ToUpdate);
++    CopyMem(&TmpBuf[Align], Buf, ToUpdate);
+     Status = HAL_SNOR_ProgData (g_nor, Offset - Align, TmpBuf, EraseSize);
+     if (EFI_ERROR (Status)) {
+       DEBUG((DEBUG_ERROR, "SpiFlash: Update: Error while writing new data\n"));
+--- a/edk2-platforms/Silicon/Rockchip/Drivers/SdhciHostDxe/SdhciHostDxe.c
++++ b/edk2-platforms/Silicon/Rockchip/Drivers/SdhciHostDxe/SdhciHostDxe.c
+@@ -12,7 +12,6 @@
+ #include <Library/RockchipPlatformLib.h>
+ #include <Library/CacheMaintenanceLib.h>
+ #include <Library/TimerLib.h>
+-#include <string.h>
+ 
+ #define CONFIG_MMC_SDHCI_SDMA
+ #define word32   *(volatile unsigned int *)(long)
+--- a/edk2-platforms/Silicon/Rockchip/Library/DisplayLib/DwHdmiQpLib.c
++++ b/edk2-platforms/Silicon/Rockchip/Library/DisplayLib/DwHdmiQpLib.c
+@@ -20,7 +20,6 @@
+ #include <Library/MediaBusFormat.h>
+ #include <Library/DrmModes.h>
+ 
+-#include <string.h>
+ 
+ #include <Protocol/RockchipConnectorProtocol.h>
+ 
+--- a/edk2-platforms/Silicon/Rockchip/Library/DisplayLib/AnalogixDpLib.c
++++ b/edk2-platforms/Silicon/Rockchip/Library/DisplayLib/AnalogixDpLib.c
+@@ -20,7 +20,6 @@
+ #include <Library/MediaBusFormat.h>
+ #include <Library/DrmModes.h>
+ 
+-#include <string.h>
+ 
+ #include <Protocol/RockchipConnectorProtocol.h>
+ 

@@ -182,11 +182,11 @@ def run(host: str, port: int) -> None:
         passed += 3
 
         body = send_json(connection, 0x0107,
-                         {"errorchip": [{"physicalAddr": "", "mirrorIndex": 3}]},
+                         {"failChips": [{"physicalAddr": "", "mirrorIndex": 3}]},
                          pc_seq, mcu_seq, 0x0006)
         assert body["errorCode"] == "invalidArgument"
         mcu_seq += 1; pc_seq += 1
-        body = send_json(connection, 0x0107, {"errorchip": []}, pc_seq, mcu_seq, 0x0006)
+        body = send_json(connection, 0x0107, {"failChips": []}, pc_seq, mcu_seq, 0x0006)
         assert body == {"requestCommandId": 0x0107, "status": "completed"}
         print("[PASS] 0107拒绝未知镜像且整包不改灯，空失败表收尾；三灯保留PASS")
         passed += 2
@@ -205,7 +205,7 @@ def run(host: str, port: int) -> None:
                            make_frame(0x0002, b"{}", 902))
         fields, body = recv_frame(connection)
         assert fields[3:6] == (0, 0x0001, 1) and body == {}
-        nul_body = br'{"errorchip":[{"physicalAddr":"bad\u0000tail","mirrorIndex":0}]}'
+        nul_body = br'{"failChips":[{"physicalAddr":"bad\u0000tail","mirrorIndex":0}]}'
         connection.sendall(make_frame(0x0107, nul_body, 903))
         fields, body = recv_frame(connection)
         assert fields[3:6] == (0, 0x0006, 2)

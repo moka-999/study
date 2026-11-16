@@ -1,5 +1,9 @@
 # PC–MCU JSON业务合同
 
+2026-11-16：按PC源码`UserMakePacket.MakePlanEndTestPacket`及实抓0107对齐，整轮失败数组改用`failChips`，每项仍为`physicalAddr`字符串及`mirrorIndex`整数；空数组表示全部PASS，同镜像多条合并为FAIL。旧`errorchip`及两个名称同时出现均回`invalidArgument`。该字段覆盖下方历史名称，不改变0105/0109的`testResults`。B1/V2/手动TLV同步；结果及0602统计共用组包逻辑，电流平均值四舍五入至1µA再换算mA，JSON数字最多3位小数，无样本仍为null，原始采样统计不变。实际C/QEMU已验证PC截图中的重复镜像、空数组、非法字段、舍入边界及查询/结果一致性，三工程构建通过；未烧录、未做本轮实板验收。Word本轮仅同步0107字段与测量精度，其余已记录的历史差异仍以当前Markdown为准。
+
+2026-11-13：B1正式SLT取消010B依赖。010A字段及accepted/completed的启动准备含义不变；EDK RELEASE最终应答发完后，MCU自动关电、恢复串口并解除占用，不等PC解析结果，也不新增测试完成通知。同一0106内可继续任意FUNC/PARA/SLT，早到下一项回busy；PC收齐并解析三类结果后，用0107.errorchip提交最终灯态。B1的010B编号保留，合法JSON对象回notSupported且无业务副作用。断线不取消SLT，后续RELEASE仍自动收尾；RELEASE不代表上传成功或PASS。V2仍保留原010A/010B基线。本条覆盖下方旧SLT描述，详情及验证见[正式接入](pc_slt_auto_integration_20261112.md)；本轮未修改Word。
+
 2026-11-05：用户确认16项时序字段及无应答发送。PC判定数值，MCU只校验十进制格式/位宽；Freq在启动早期回复0x35，普通时序在SPL后逐项发送，之后才投递算法。空串规则、重启/SLT边界及验证见[接入记录](rk_timing_frequency_20261105.md)。下方带日期的旧记录不覆盖本条。
 
 2026-10-26：0108/0109已接入PARA，包体复用FUNC字段，类别固定`parametric`、名称按双方定义匹配；RK只下发21～36编号，进入/退出和时序寄存器仅准备编解码。FUNC/PARA/SLT的`TimingParameters`统一为必填对象，默认用`{}`，缺失或null回invalidArgument，子字段仍可部分提供字符串。当前统计为全程统计，不是IDD有效窗口或判限。详见[本轮接入与验证](para_integration_20261026.md)；以下带日期的历史状态不覆盖本条。
@@ -59,13 +63,13 @@
 `power`为训练期间的绝对电压mV字符串，重复发送不累加；不是运行期拉偏。步进为10/5/5mV，旧steps不再接受。PC确认DDR安全范围与三轨组合，MCU严格校验格式、内存类型、TPS可编码范围和原生步进，不取整或钳位。
 与上一份成功生效且仍有效的配置相比，只要内存类型或任一目标电压改变，就必须受控冷重启，不能由`reboot=false`取消；
 Boot改变或配置状态未知/失效也需重新建立启动状态。`reboot`控制是否主动重启，重启统一采用受控断电方式；`bootMode`表示启动模式，不单列重启类型。
-FUNC以`algorithmType/algorithmName`标识，0103固定为functional；PARA的0108固定为parametric，结果用0109；SLT另用010A/010B且algorithmIndex=null。FUNC/PARA的`algorithmIndex`为PC当前计划中的算法项编号，同名算法可出现多次并用不同index区分。编号由PC提供，MCU在开始测试执行响应和最终结果中原样带回，不自增、不当作RK算法ID。现有0x0506/0x0509保留，不改变各自包体。
+FUNC以`algorithmType/algorithmName`标识，0103固定为functional；PARA的0108固定为parametric，结果用0109；SLT用010A且algorithmIndex=null；B1按RELEASE自动收尾、结果由PC纳入0107，V2仍用010B回送结果。FUNC/PARA的`algorithmIndex`为PC当前计划中的算法项编号，同名算法可出现多次并用不同index区分。编号由PC提供，MCU在开始测试执行响应和最终结果中原样带回，不自增、不当作RK算法ID。现有0x0506/0x0509保留，不改变各自包体。
 
 上述完整B1请求严格校验七个根字段及power四字段，不接受缺失、重复、未知键或错误类型；timeoutMs仅FUNC/PARA可选。TimingParameters对象必填，使用默认时序传{}；内层只接受新定义的16项字符串（见接入记录）。Freq为int64，其他15项为u32十进制；允许部分项和空字符串，不继承上一请求。合法请求受理后复制并按阶段发送，失败请求不覆盖原副本。
 三路电压复用TPS编码范围检查，但不代表已批准安全训练范围。参数非法回0006
 `failed/invalidArgument`；OTA未健康时回`otaNotReady`，在途冲突回`busy`。
 根对象的index唯一且为合法u32整数时，失败响应原样携带，即使其它字段非法；不合法时省略。
-B1完整路径已接DAC、上/下电、训练目标写入和本轮RK心跳等待；必要时直接断电重启，不等RK关机应答。PC/RK负责保证可直接切电。受理回accepted，启动准备及算法入队后回completed，FUNC最终结果用0105、PARA用0109；SLT只做启动准备，由PC回送总结果。电气验收见[初版配置](b1_power_business_20261013.md)，PARA边界见[接入记录](para_integration_20261026.md)。
+B1完整路径已接DAC、上/下电、训练目标写入和本轮RK心跳等待；必要时直接断电重启，不等RK关机应答。PC/RK负责保证可直接切电。受理回accepted，启动准备及算法入队后回completed，FUNC最终结果用0105、PARA用0109；B1 SLT准备完成后自动进入EDK，并按RELEASE自动收尾；PC在0107汇总其结果，不再发送010B。V2保留启动准备及PC回送010B的原流程。电气验收见[初版配置](b1_power_business_20261013.md)，PARA边界见[接入记录](para_integration_20261026.md)。
 
 V2外部已启动模式使用`{"algorithmType":"functional","algorithmName":"mats","algorithmIndex":1,"TimingParameters":{},"power":null,"reboot":false,"bootMode":null}`。这两个null明确表示不设置电压/Boot，不是标称档位0；PARA同样允许该模式，但必须用0108及parametric/IDD名称。timeoutMs省略或0表示无限等待，非零1..86400000毫秒。详细响应与保护规则见协议4.7/4.12节及[操作记录](rk_real_test_20260928.md)。
 
@@ -76,7 +80,7 @@ V2外部已启动模式使用`{"algorithmType":"functional","algorithmName":"mat
 - 顶层siteId从本次受理时读取的W25 FRU站点标签获取，未配置为空；不在每颗里重复。
 - testResults固定两项，mirrorIndex依次为0/1；每项含testStatus、resultDesc和保留空字符串physicalAddr。testStatus为0=FAIL、1=PASS。
 - FUNC失败条目按RK每组9001+3001的die归位，未列出的颗粒为PASS，前提是完整3/5/7 TLV最终包已通过一致性、算法和Seq窗口校验。不能把缺包/解析错误当成全PASS。
-- RK完整结果的非零失败地址输出0x加16位十六进制字符串；零地址明细表示PASS，不计入失败数组，PASS的firstErrorAddress为null。errorType为字符串，真实RK未提供时为空，PASS也为空。整体FAIL与明细是否含非零地址矛盾时整包拒绝，见[2026-11-05核查](rk_protocol_review_20261105.md)。
+- 按2026-11-16确认，RK的1017=1时已列颗粒全部FAIL，地址原样输出0x加16位十六进制字符串，地址0输出`"0x0000000000000000"`；未列颗粒仍PASS。1017=0允许无明细或全零地址明细，PASS的firstErrorAddress为null。FAIL无颗粒明细、PASS带非零地址仍整包拒绝。errorType为字符串，真实RK未提供时为空，PASS也为空。此规则覆盖11月5日零地址独立判PASS的旧约定，见[合同变更及核查](rk_protocol_review_20261105.md)。
 - V2显式MATS假FAIL仅改第一颗PC视图：原PASS时使用演示地址0x0000000012345678，原FAIL时保留原地址，类型SAF；第二颗仍为真实结果。B1禁止该模拟，RK原结果不被改写。
 - testTimeMs为RK9002原始uint64毫秒，用整数十进制输出，不通过double转换；算法名与计划index沿用请求。Seq仍是独立发送流水号，不改业务关联。
 - 顶层measurementData为两颗共轨共享的18项Vdd/Idd Ave/Peak/Min，单位mV/mA，不含state；无效单项null，完全无样本整个对象null。有效样本平均值和样点极值沿用原统计，不代表瞬态峰值或正式IDD判限。

@@ -51,7 +51,7 @@ B2 Mode0、8位MSB、硬件NSS低有效，初始1MHz。V2用SPI3，B1用SPI2；A
 
 ## 3. 测试、灯态与采样
 
-- PC先0106 `{}`建立整轮，再串行FUNC 0103/0105或SLT 010A/010B，最后0107提交`errorchip`失败数组。070x已删除。
+- PC先0106 `{}`建立整轮，再串行FUNC 0103/0105或SLT 010A/010B，最后0107提交`failChips`失败数组。070x已删除。
 - FUNC 0105顶层共享siteId和measurementData；testResults两条mirrorIndex=0/1，testStatus为0 FAIL、1 PASS；resultDesc承载首错地址/errorType，physicalAddr暂为空。
 - mirrorIndex表示镜像分组，可包含多芯片；physicalAddr用于镜像内物理芯片定位。现行RK硬件只对应两颗die，不从错误地址擅自推导新映射。
 - 0107镜像0/1/2映射两组LPDDR/eMCP结果灯，未知镜像拒绝。提前结束整轮只废弃结果，不取消RK或提前解除busy；断线后不凭index认领旧结果。

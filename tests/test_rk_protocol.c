@@ -18,6 +18,11 @@
 static uint32_t tick;
 static unsigned sent;
 static int tx_failure, power_on = PWR_CTRL_STATE_ON;
+#if defined(TEST_B1_PROTOCOL_TRACE)
+static int uart_idle = 1;
+int uart_tx_idle(int id) { (void)id; return uart_idle; }
+#include "handoff_test.h"
+#endif
 /* 仅测试桩使用：记录发送尝试，包含未入队的失败帧；不修改生产任务的接口。 */
 static unsigned tx_attempts;
 static struct { uint64_t sequence, value; uint32_t tick; uint16_t type, command; } tx_log[16];
@@ -147,6 +152,12 @@ static fake_queue_t requests = {.size = sizeof(rk_request_t)};
 static fake_queue_t responses = {.size = sizeof(rk_response_t)};
 QueueHandle_t rkRequestQueue = &requests;
 QueueHandle_t rkResponseQueue = &responses;
+unsigned uxQueueMessagesWaiting(QueueHandle_t handle)
+{
+    fake_queue_t *queue = handle;
+    CHECK(queue != NULL);
+    return queue->count;
+}
 int xQueueSend(QueueHandle_t handle, const void *data, uint32_t wait)
 {
     (void)wait;
@@ -1568,8 +1579,8 @@ static void test_dual_die_final_rules(void)
     CHECK(cleared(result.failures, sizeof(result.failures))); /* 不能残留上一包失败地址。 */
 }
 
-/* 服务器固定五TLV的PASS包及显式两颗明细：零地址为PASS，重复die仍须拒绝。 */
-static void test_explicit_pass_results(void)
+/* PASS兼容零地址明细；FAIL保留全部已列颗粒及原始地址，包括地址0。 */
+static void test_explicit_die_results(void)
 {
     static const uint8_t golden[] = {
         0x5A,0,0x28,0x51,0xCD,0,0,0,0,0,0,0,0x30,
@@ -1597,36 +1608,50 @@ static void test_explicit_pass_results(void)
     memcpy(wire, golden, sizeof(golden)); wire[29] ^= 1U;
     CHECK(tlv_unpack(wire, sizeof(golden), &frame) == -1);
     for (uint8_t pairs = 0U; pairs < 4U; ++pairs) {
-        for (uint8_t failed = 0U; failed < 4U; ++failed) {
-            if ((failed & ~pairs) != 0U) continue;
-            for (uint8_t reverse = 0U; reverse < 2U; ++reverse) {
-                frame = dual_die_frame(pairs, reverse, (failed & 1U) ? 1U : 0U,
-                                       (failed & 2U) ? UINT64_MAX : 0U, 0U);
-                frame.payload[frame.units[1].data_off] = failed != 0U;
-                CHECK(rk_final_result_decode(&frame, &result) == 0);
-                CHECK(result.failed == (failed != 0U));
-                CHECK(result.failure_count == ((failed & 1U) != 0U) + ((failed & 2U) != 0U));
-                uint8_t decoded_mask = 0U;
-                for (uint8_t i = 0U; i < result.failure_count; ++i) {
-                    decoded_mask |= (uint8_t)(1U << result.failures[i].die);
-                    CHECK(result.failures[i].error_address == (result.failures[i].die ? UINT64_MAX : 1U));
+        for (uint8_t nonzero = 0U; nonzero < 4U; ++nonzero) {
+            if ((nonzero & ~pairs) != 0U) continue;
+            for (uint8_t failed = 0U; failed <= 1U; ++failed) {
+                for (uint8_t reverse = 0U; reverse < 2U; ++reverse) {
+                    frame = dual_die_frame(pairs, reverse, (nonzero & 1U) ? 1U : 0U,
+                                           (nonzero & 2U) ? UINT64_MAX : 0U, 0U);
+                    frame.payload[frame.units[1].data_off] = failed;
+                    if ((failed && pairs == 0U) || (!failed && nonzero != 0U)) {
+                        final_result_rejected(&frame);
+                        continue;
+                    }
+                    CHECK(rk_final_result_decode(&frame, &result) == 0);
+                    CHECK(result.failed == failed);
+                    CHECK(result.failure_count == (failed ? ((pairs & 1U) != 0U) + ((pairs & 2U) != 0U) : 0));
+                    uint8_t decoded_mask = 0U;
+                    for (uint8_t i = 0U; i < result.failure_count; ++i) {
+                        uint8_t die = result.failures[i].die;
+                        decoded_mask |= (uint8_t)(1U << die);
+                        uint64_t expected = (nonzero & (1U << die)) ? (die ? UINT64_MAX : 1U) : 0U;
+                        CHECK(result.failures[i].error_address == expected);
+                    }
+                    CHECK(decoded_mask == (failed ? pairs : 0U));
+                    if (!failed) CHECK(cleared(result.failures, sizeof(result.failures)));
+                    /* FAIL标量可在明细后面，不能依赖遍历时是否已经读到1017。 */
+                    tlv_unit_t flag = frame.units[1];
+                    frame.units[1] = frame.units[frame.count - 1U];
+                    frame.units[frame.count - 1U] = flag;
+                    rk_final_result_t reordered;
+                    CHECK(rk_final_result_decode(&frame, &reordered) == 0);
+                    CHECK(memcmp(&result, &reordered, sizeof(result)) == 0);
+                    reset_task_test();
+                    rk_request_t request = {17U, 901U, 0U, 0U};
+                    rk_response_t response;
+                    CHECK(rk_link_request(&request) == 0); process_request();
+                    frame.sequence = s_pending.sequence;
+                    accept_frame(&frame); accept_frame(&frame); process_request();
+                    CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
+                    CHECK(memcmp(&response.result, &result, sizeof(result)) == 0);
+                    CHECK(!s_pending.waiting && rk_link_receive(&response) == 0);
                 }
-                CHECK(decoded_mask == failed);
-                reset_task_test();
-                rk_request_t request = {17U, 901U, 0U, 0U};
-                rk_response_t response;
-                CHECK(rk_link_request(&request) == 0); process_request();
-                frame.sequence = s_pending.sequence;
-                accept_frame(&frame); accept_frame(&frame); process_request();
-                CHECK(rk_link_receive(&response) == 1 && response.status == RK_RESPONSE_COMPLETE);
-                CHECK(memcmp(&response.result, &result, sizeof(result)) == 0);
-                CHECK(!s_pending.waiting && rk_link_receive(&response) == 0);
-                frame.payload[frame.units[1].data_off] = failed == 0U;
-                final_result_rejected(&frame);
             }
         }
     }
-    /* 已见die位独立于失败数量：PASS+PASS、PASS+FAIL都不能重复同一颗。 */
+    /* 全PASS及FAIL帧都禁止重复die，不能因零地址跳过查重。 */
     for (unsigned mixed = 0U; mixed < 2U; ++mixed) {
         frame = dual_die_frame(3U, 0U, 0U, mixed ? 1U : 0U, 0U);
         frame.payload[frame.units[1].data_off] = mixed;
@@ -1750,7 +1775,7 @@ static void test_timing_and_frequency(void)
 }
 
 #if defined(TEST_B1_PROTOCOL_TRACE)
-/* 从真实事务入口取日志。分别模拟只发FAIL和显式发零地址PASS，保留实际TLV顺序。 */
+/* 从真实事务入口取日志，保留FAIL帧的非零/零地址明细及实际TLV顺序。 */
 static void test_protocol_trace(void)
 {
     tlv_frame_t frame;
@@ -1789,7 +1814,7 @@ static void test_protocol_trace(void)
     CHECK(strstr(trace_capture_text(), "5000[2]=2B00 701B[4]=26000000 uart=failed"));
     CHECK(!strstr(trace_capture_text(), "uart=queued"));
 
-    for (unsigned explicit_pass = 0; explicit_pass <= 1; ++explicit_pass) {
+    for (unsigned include_zero_address = 0; include_zero_address <= 1; ++include_zero_address) {
         reset_task_test(); trace_capture_begin();
         rk_request_t algorithm = {5U, 2U, 0U, 0U};
         CHECK(rk_link_request(&algorithm) == 0); process_request();
@@ -1803,12 +1828,12 @@ static void test_protocol_trace(void)
         frame = progress_frame(s_pending.sequence, 5U, 24U); accept_frame(&frame);
         frame = progress_frame(s_pending.sequence, 5U, 25U); accept_frame(&frame);
         CHECK(strlen(trace_capture_text()) == progress_length);
-        frame = dual_die_frame(explicit_pass ? 3U : 1U, 0U, 0x200038U, 0U, 5497U);
+        frame = dual_die_frame(include_zero_address ? 3U : 1U, 0U, 0x200038U, 0U, 5497U);
         frame.sequence = s_pending.sequence;
         frame.payload[0] = 5U;
         accept_frame(&frame);
         CHECK(strstr(trace_capture_text(), "5001[2]=0500 1017[1]=01 9001[8]=3800200000000000 3001[1]=00"));
-        CHECK((strstr(trace_capture_text(), "9001[8]=0000000000000000 3001[1]=01") != NULL) == explicit_pass);
+        CHECK((strstr(trace_capture_text(), "9001[8]=0000000000000000 3001[1]=01") != NULL) == include_zero_address);
         CHECK(strstr(trace_capture_text(), "9002[8]=7915000000000000\r\n"));
     }
     trace_capture_begin();
@@ -1823,13 +1848,144 @@ static void test_protocol_trace(void)
 }
 #endif
 
+#if defined(TEST_B1_PROTOCOL_TRACE)
+/* 接管前仍遵守最后时序的20ms间隔；SENT已领取且UART没有新发送也不能提前放行。 */
+static void test_handoff_timing_gap(void)
+{
+    for (unsigned wrap = 0U; wrap < 2U; ++wrap) {
+        reset_task_test();
+        tick = wrap ? UINT32_MAX - 7U : 100U;
+        rk_request_t setting = {0x25U, 3000U, 0U, 36U};
+        rk_response_t event;
+        CHECK(rk_link_request(&setting) == 0);
+        process_request();
+        deliver_result();
+        CHECK(rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_SENT);
+        CHECK(!s_pending.delivery && requests.count == 0U && responses.count == 0U);
+        CHECK(s_timing_gap && !rk_task_handoff_idle());
+        tick += pdMS_TO_TICKS(RK_TIMING_GAP_MS) - 1U;
+        CHECK(!rk_task_handoff_idle());
+        ++tick;
+        CHECK(rk_task_handoff_idle() && s_timing_gap);
+        CHECK(tx_attempts == 1U); /* 没有靠再次process_request或追加UART发送清flag。 */
+    }
+    reset_task_test();
+    message("PASS: SLT handoff retains final timing gap through exact boundary and tick wrap\n");
+}
+
+/* 直接调用真实RK任务内部函数：早到的EDK不能吞掉PC正在等待的时序发送事件。 */
+static void test_handoff_unsent_timing(void)
+{
+    reset_task_test();
+    rk_request_t setting = {0x25U, 3001U, 0U, 36U};
+    rk_response_t event;
+    CHECK(rk_link_request(&setting) == 0);
+    process_request();
+    CHECK(tx_attempts == 1U && s_pending.delivery && s_pending.response.status == RK_RESPONSE_SENT);
+    setting.command_id = 0x26U; setting.cookie = 3002U;
+    CHECK(rk_link_request(&setting) == 0);
+    responses.count = 8U;
+    reject_handoff_requests();
+    CHECK(s_pending.delivery && s_pending.response.status == RK_RESPONSE_SENT);
+    CHECK(requests.count == 1U && tx_attempts == 1U);
+    responses.count = 0U;
+    reject_handoff_requests();
+    CHECK(requests.count == 0U && tx_attempts == 1U);
+    CHECK(rk_link_receive(&event) == 1 && event.cookie == 3001U && event.status == RK_RESPONSE_SENT);
+    CHECK(rk_link_receive(&event) == 1 && event.cookie == 3002U && event.status == RK_RESPONSE_TX_FAILED);
+    CHECK(rk_link_receive(&event) == 0);
+
+    /* 未发送设置的失败事件同样受背压保护，后续循环不重复发送或覆盖它。 */
+    setting.cookie = 3003U;
+    CHECK(rk_link_request(&setting) == 0);
+    responses.count = 8U;
+    reject_handoff_requests();
+    CHECK(requests.count == 0U && s_pending.delivery && tx_attempts == 1U);
+    CHECK(s_pending.response.cookie == 3003U && s_pending.response.status == RK_RESPONSE_TX_FAILED);
+    reject_handoff_requests();
+    CHECK(s_pending.delivery && tx_attempts == 1U);
+    responses.count = 0U;
+    reject_handoff_requests();
+    CHECK(!s_pending.delivery);
+    CHECK(rk_link_receive(&event) == 1 && event.cookie == 3003U && event.status == RK_RESPONSE_TX_FAILED);
+    CHECK(rk_link_receive(&event) == 0);
+    reset_task_test();
+    message("PASS: early EDK preserves SENT and rejects unsent timings with response backpressure\n");
+}
+#endif
+
+#if defined(TEST_RK_STOP)
+/* 实际停止路径覆盖排队、FUNC等待、IDD采集/退出及结果队列背压；不能伪造完成事件。 */
+static void test_stop_transaction(void)
+{
+    for (unsigned stage = 0U; stage < 6U; ++stage) {
+        reset_task_test();
+        handoff_test_reset();
+        tlv_sm_t parser; tlv_sm_init(&parser);
+        CHECK(tlv_sm_feed(&parser, 0x5AU) == 0);
+        rk_request_t request = {stage >= 2U && stage <= 4U ? 21U : 17U, 765U, 0U, 0U};
+        CHECK(rk_link_request(&request) == 0);
+        if (stage) process_request();
+        if (stage >= 3U && stage <= 4U) {
+            complete_tx(100U);
+            sample_at(105U, 105U, 1000U, MEMORY_MONITOR_VALID_ALL);
+        }
+        if (stage == 4U) { pump_samples(5105U); process_request(); }
+        if (stage == 5U) {
+            rk_response_t full = {.cookie = 765U, .status = RK_RESPONSE_COMPLETE};
+            for (unsigned i = 0; i < 8U; ++i) CHECK(xQueueSend(rkResponseQueue, &full, 0U));
+            tlv_frame_t result = task_result_frame(s_pending.sequence, request.command_id, 0U);
+            accept_frame(&result);
+            CHECK(s_pending.delivery);
+        }
+        unsigned transmissions = sent;
+        rk_task_stop_begin();
+        CHECK(process_stop(&parser) == 1 && !rk_task_stop_ready());
+        process_request();
+        CHECK(sent == transmissions);
+        if (stage == 3U) {
+            /* 停止后电源尚未OFF，新的采样也不得启动IDD退出发送。 */
+            sample_at(106U, 106U, 9000U, MEMORY_MONITOR_VALID_ALL);
+            CHECK(process_stop(&parser) == 1 && !rk_task_stop_ready() && sent == transmissions);
+        }
+        power_on = PWR_CTRL_STATE_OFF; handoff_test.reserved = 1;
+        CHECK(process_stop(&parser) == 1 && !rk_task_stop_ready());
+        handoff_test.reserved = 0; uart_idle = 0;
+        CHECK(process_stop(&parser) == 1 && !rk_task_stop_ready());
+        uart_idle = 1;
+        CHECK(process_stop(&parser) == 1 && rk_task_stop_ready());
+        CHECK(requests.count == 0U && responses.count == 0U && !s_pending.waiting && !s_pending.delivery);
+        CHECK(sent == transmissions);
+        tlv_frame_t decoded;
+        CHECK(tlv_sm_get_frame(&parser, &decoded) < 0);
+        uint8_t heartbeat[TLV_HEARTBEAT_FRAME_SIZE];
+        CHECK(tlv_pack_heartbeat(123U, heartbeat, sizeof(heartbeat)) == sizeof(heartbeat));
+        CHECK(feed(&parser, heartbeat, sizeof(heartbeat)) == 1U);
+        rk_task_stop_end(); CHECK(process_stop(&parser) == 0);
+        power_on = PWR_CTRL_STATE_ON;
+        CHECK(rk_link_request(&request) == 0); process_request();
+        CHECK(sent == transmissions + 1U && s_pending.waiting);
+    }
+    reset_task_test();
+    message("PASS: RK protocol and transaction 0104 drops pending/results after OFF and UART recovery, restarts FUNC/IDD\n");
+}
+#endif
+
 void test_main(void)
 {
+#if defined(TEST_RK_STOP)
+    test_stop_transaction();
+    finish(0U);
+#endif
+#if defined(TEST_B1_PROTOCOL_TRACE)
+    test_handoff_timing_gap();
+    test_handoff_unsent_timing();
+#endif
     test_timing_and_frequency();
     test_rx_diagnostics(); test_rx_tlv_diagnostics();
     message("PASS: RK receive rejection diagnostics; matching rules unchanged\n");
-    test_explicit_pass_results(); test_reply_only_heartbeat();
-    message("PASS: explicit zero-address PASS and reply-only RK heartbeat\n");
+    test_explicit_die_results(); test_reply_only_heartbeat();
+    message("PASS: flag-directed die results, zero-address FAIL and reply-only RK heartbeat\n");
     test_dual_die_final_golden(); test_dual_die_final_rules();
     message("PASS: dual-die 3/5/7-TLV final decoder\n");
     test_empty_heartbeat();

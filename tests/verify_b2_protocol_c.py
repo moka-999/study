@@ -68,6 +68,9 @@ int pc_test_round_update_modes(uint8_t, const uint8_t *);
     sources += [root / p for p in ("App/protocol/b2/b2_protocol.c",
                                    "App/protocol/b2/b2_state_machine.c", "App/protocol/common/crc.c")]
     support = Path(__file__).resolve().parent / "support"
+    if (root / 'App/tasks/net_handoff/handoff_mcu.h').is_file():
+        includes.append(root / 'App/tasks/net_handoff')
+        sources.append(support / 'handoff_idle.c')
     flags = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
                "-ffunction-sections", "-fdata-sections"]

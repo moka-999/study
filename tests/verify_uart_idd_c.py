@@ -46,6 +46,7 @@ TickType_t xTaskGetTickCount(void);
 QueueHandle_t xQueueCreate(UBaseType_t, UBaseType_t);
 BaseType_t xQueueSendFromISR(QueueHandle_t, const void *, BaseType_t *);
 BaseType_t xQueueReceive(QueueHandle_t, void *, TickType_t);
+BaseType_t xQueuePeek(QueueHandle_t, void *, TickType_t);
 BaseType_t xQueueReset(QueueHandle_t);
 UBaseType_t uxQueueMessagesWaiting(QueueHandle_t);
 int HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *);
@@ -63,6 +64,15 @@ uint32_t __get_IPSR(void);
         sources.append(root / "Core/Src/log_console.c")
         sources.append(root / "Core/Src/result_led.c")
         includes.append(root / "Core/Inc")
+    network_console = (root / 'App/tasks/console/net_console.h').is_file()
+    if network_console:
+        includes.append(root / 'App/tasks/console')
+        sources.append(support / 'net_console_fake.c')
+    if (root / 'App/tasks/net_handoff/handoff_mcu.h').is_file():
+        includes.append(root / 'App/tasks/net_handoff')
+        includes.append(root / 'App/protocol/serial_net')
+        sources.append(root / 'App/protocol/serial_net/serial_net.c')
+        sources.append(support / 'handoff_idle.c')
     command = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-ffunction-sections",
                "-fdata-sections", *["-I" + str(p) for p in includes], *map(str, sources),
@@ -70,6 +80,10 @@ uint32_t __get_IPSR(void);
                "-Wl,--gc-sections,--defsym=end=_ebss", "-o", str(build / "test.elf")]
     if is_b1:
         command += ["-DTEST_B1_LOG_CONSOLE=1", f"-DB1_LOG_DEFAULT_SOURCE={args.log_default}"]
+    if network_console:
+        command += ['-DTEST_NET_CONSOLE=1']
+    if (root / 'App/tasks/net_handoff/handoff_mcu.h').is_file():
+        command += ['-DTEST_B1_SERIAL_NET=1']
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode:

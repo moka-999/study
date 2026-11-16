@@ -43,7 +43,7 @@ def main():
                         vdd2="1100", vddq="600"), bootMode="emmc"), command=0x0103,
                         expect=6, error="notSupported")
             client.call({}, command=0x0002, expect=0x0001)
-            _, result = client.call({"errorchip": []}, command=0x0107, expect=6)
+            _, result = client.call({"failChips": []}, command=0x0107, expect=6)
             assert result.get("status") == "completed", result
             report["passed"] = True
             print("PASS: 心跳、W25信息、轮次与拒绝路径；三灯保留汇总PASS")

@@ -1,0 +1,24 @@
+[Defines]
+  INF_VERSION = 1.27
+  BASE_NAME = NetReturn
+  FILE_GUID = 4c701a74-edc5-4994-8f1a-b923a18e61cd
+  MODULE_TYPE = UEFI_APPLICATION
+  VERSION_STRING = 0.1
+  ENTRY_POINT = NetReturnEntry
+
+[Sources]
+  NetReturn.c
+  NetHandoffProtocol.h
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  BaseLib
+  TimerLib
+  UefiApplicationEntryPoint
+  UefiBootServicesTableLib
+  UefiLib
+
+[Protocols]
+  gEfiShellParametersProtocolGuid

@@ -1,0 +1,42 @@
+[Defines]
+  INF_VERSION = 1.27
+  BASE_NAME = SerialNetSnpDxe
+  FILE_GUID = 5d9a5076-d58e-4f1a-991c-bef1681ce6a4
+  MODULE_TYPE = DXE_DRIVER
+  VERSION_STRING = 0.1
+  ENTRY_POINT = SerialNetEntry
+
+[Sources]
+  SerialNetSnpDxe.c
+  serial_net.c
+  serial_net.h
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  NetworkPkg/NetworkPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DevicePathLib
+  IoLib
+  TimerLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiLib
+
+[BuildOptions]
+  GCC:*_*_*_CC_FLAGS = -DSERIAL_NET_EDK2
+
+[Guids]
+  gEfiEndOfDxeEventGroupGuid
+
+[Protocols]
+  gEfiSimpleNetworkProtocolGuid
+  gEfiDevicePathProtocolGuid
+  gEfiPxeBaseCodeProtocolGuid
+
+[Depex]
+  gEfiTimerArchProtocolGuid AND gEfiCpuArchProtocolGuid
