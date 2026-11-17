@@ -1233,7 +1233,8 @@ static void console_power_check(void)
 #endif
 
 #if defined(PC_TEST_ROUND_TEST)
-#define SLT_START "{\"algorithmType\":\"slt\",\"algorithmName\":\"memtest86\",\"algorithmIndex\":null,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\",\"TimingParameters\":{}}"
+/* PC可传index=0；后续受理、准备与收尾响应仍按原合同使用null。 */
+#define SLT_START "{\"algorithmType\":\"slt\",\"algorithmName\":\"memtest86\",\"algorithmIndex\":0,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\",\"TimingParameters\":{}}"
 #define SLT_RESULT "{\"siteId\":\"SITE-7\",\"algorithmType\":\"slt\",\"algorithmName\":\"memtest86\",\"algorithmIndex\":null,\"testTimeMs\":null,\"testResults\":[{\"mirrorIndex\":0,\"testStatus\":0,\"resultDesc\":null,\"physicalAddr\":\"\"},{\"mirrorIndex\":1,\"testStatus\":1,\"resultDesc\":null,\"physicalAddr\":\"\"}],\"measurementData\":null}"
 #if defined(TEST_B1_AUTO_SLT)
 #define SLT_LEGACY_STATE_ERROR "notSupported"
@@ -2288,7 +2289,6 @@ static void slt_flow_check(void)
     round_begin();
     mutated_slt(PC_COMMAND_SLT_START, SLT_START, "algorithmName", cJSON_CreateString("MemTest86"), "invalidArgument");
     mutated_slt(PC_COMMAND_SLT_START, SLT_START, "algorithmType", cJSON_CreateString("functional"), "invalidArgument");
-    mutated_slt(PC_COMMAND_SLT_START, SLT_START, "algorithmIndex", cJSON_CreateNumber(0), "invalidArgument");
     mutated_slt(PC_COMMAND_SLT_START, SLT_START, "power", cJSON_CreateNull(), "invalidArgument");
     mutated_slt(PC_COMMAND_SLT_START, SLT_START, "bootMode", cJSON_CreateString(""), "invalidArgument");
     mutated_slt(PC_COMMAND_SLT_START, SLT_START, "reboot", cJSON_CreateString("true"), "invalidArgument");

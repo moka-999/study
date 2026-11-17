@@ -241,6 +241,29 @@ static cJSON *external_request(void)
     return root;
 }
 
+static void test_slt_index_ignored(void)
+{
+    /* SLT只保留index键，任何合法JSON值均不改变启动参数或内部编号。 */
+    static const char *const values[] = {
+        "null", "0", "37", "4294967295", "4294967296", "-1", "1.5",
+        "\"0\"", "true", "{}", "[]"
+    };
+    for (size_t i = 0U; i < sizeof(values) / sizeof(values[0]); ++i) {
+        cJSON *root = base_request();
+        replace(root, "algorithmType", cJSON_CreateString("slt"));
+        replace(root, "algorithmName", cJSON_CreateString("memtest86"));
+        replace(root, "algorithmIndex", cJSON_Parse(values[i]));
+        replace(root, "bootMode", cJSON_CreateString("fspiM1"));
+        pc_test_start_view_t view = {.algorithm_index = UINT32_MAX};
+        CHECK(pc_slt_start_parse(root, &view) == PC_TEST_JSON_OK);
+        CHECK(view.algorithm_index == 0U && strcmp(view.boot_mode, "fspiM1") == 0);
+        cJSON_DeleteItemFromObjectCaseSensitive(root, "algorithmIndex");
+        CHECK(pc_slt_start_parse(root, &view) == PC_TEST_JSON_ERROR_FIELDS);
+        cJSON_Delete(root);
+    }
+    message("PASS: SLT ignores index values, preserves required key and fspiM1 boot\n");
+}
+
 /* 三类开始都须带时序对象；空对象表示默认，子字段可部分填写，不猜测单位或RK编码。 */
 static void test_timing_parameters(void)
 {
@@ -704,6 +727,7 @@ static void test_para_message_contract(void)
 void test_main(void)
 {
     test_para_message_contract();
+    test_slt_index_ignored();
     test_timing_parameters();
     test_native_power_mv();
     test_result_capacity_and_allocation();
