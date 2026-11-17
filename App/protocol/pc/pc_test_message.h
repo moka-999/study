@@ -106,7 +106,7 @@ pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type
 pc_test_json_result_t pc_test_start_parse(const cJSON *root,
                                           pc_test_start_view_t *view);
 
-/** 010A专用解析：严格匹配slt/memtest86，index为null，power/bootMode非null。
+/** 010A专用解析：严格匹配slt/memtest86，index字段必填但忽略值，power/bootMode非null。
  * 复用三轨字符串mV、Boot与reboot校验；不接受timeoutMs，不检查RK软件状态。
  * TimingParameters必须为对象，默认时序传{}；省略或显式填null均拒绝。
  * view仍借用root，algorithm_index置0但不得在线上回填0（SLT必须回null）。

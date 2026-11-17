@@ -192,7 +192,7 @@ static pc_test_json_result_t parse_timing_parameters(const cJSON *timing, pc_tim
     return PC_TEST_JSON_OK;
 }
 
-/* 三类开始请求共用电压/Boot规则；仅SLT允许null index且禁止外部已启动模式。 */
+/* 三类开始请求共用电压/Boot规则；SLT忽略index值且禁止外部已启动模式。 */
 static pc_test_json_result_t parse_start(const cJSON *root,
                                         pc_test_start_view_t *view, int slt)
 {
@@ -222,10 +222,8 @@ static pc_test_json_result_t parse_start(const cJSON *root,
     pc_test_json_result_t result = parse_timing_parameters(timing, &candidate.timing);
     if (result != PC_TEST_JSON_OK) return result;
     candidate.timing_parameters = timing;
-    if (slt) {
-        if (!cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(root, "algorithmIndex")))
-            return PC_TEST_JSON_ERROR_FIELD_TYPE;
-    } else result = pc_test_start_read_index(root, &candidate.algorithm_index);
+    /* SLT的index只保留字段，不参与执行或响应；FUNC/PARA仍按u32编号校验。 */
+    if (!slt) result = pc_test_start_read_index(root, &candidate.algorithm_index);
     if (result != PC_TEST_JSON_OK) return result;
     if (timeout) {
         result = read_required_u32(root, "timeoutMs", &candidate.timeout_ms);

@@ -2,6 +2,18 @@
 
 STM32H743IIT6/LQFP176 独立工程。工具链保持 STM32Cube CMake + Ninja + GNU Arm，25MHz HSE、400MHz内核，精简Boot使用首128KiB，单App位于0x08020000、容量1920KiB。两者合并一次烧录，无OTA或回滚；保留耦合复位安全关电。
 
+## 仓库分支与本地目录
+
+Gitea 默认分支为 `app-b1`，保留以下三个开发入口：
+
+| 分支 | 本地目录 | 用途 |
+|---|---|---|
+| `app-b1` | `D:/pro/b1` | B1 主工程，包含当前使用的精简 `boot/` 和单 App |
+| `bootloader` | `D:/pro/bootloader` | 独立 Bootloader 历史工程及维护工具，不替代 B1 当前的精简 Boot |
+| `codex/b1-tlv` | `D:/pro/b1_tlv` | B1 手动 TLV 透传特化工程，与主工程分别构建 |
+
+V2 工程、共用离线测试及 EDK 联调资料保存在归档标签 [archive/app-v2-20261117](http://192.168.1.122:3000/LILIHONG/stm32h743/src/tag/archive/app-v2-20261117)。本地 `D:/pro/test` 继续保留；其源码未合并进 B1 的板级工程。旧 `main`、`b1` 分支的提交已包含在保留的历史中，不再单独维护分支入口。
+
 ## 当前整合状态
 
 V2通用软件已整合到B1，并保留B1板级映射。当前是**已编译的软件集成基线，不是真板验收完成**。
@@ -44,7 +56,7 @@ PC双方发送Seq独立递增、ServiceID固定0的合同已接入：每条连�
 
 `-TestIpLastOctet`允许1～254，省略时采用头文件的完整地址。显式选择202仍使用独立构建目录。各板MAC由自身UID生成；B2成功配置编号后按正式规则改IP。多板同时调试时分配不同地址。
 
-UART4固定连接RK UART0_M0运行协议，`B1_RK_UART`只允许4；USART2连接RK UART2_M0_DEBUG接收日志，USART1连接串口助手。三路RX在RTOS运行后启动；RK未上电时UART4不主动发命令或心跳，日志接收不修改电源门禁。
+UART4固定连接RK UART1_M0运行协议，`B1_RK_UART`只允许4；USART2连接RK UART2_M0_DEBUG接收日志，USART1连接串口助手。三路RX在RTOS运行后启动；RK未上电时UART4不主动发命令或心跳，日志接收不修改电源门禁。
 
 USART1、USART2当前均为115200/8N1、无流控（RK调试端实际波特率待真板核对）。串口助手使用文本发送`log mcu`或`log rk`并附CR、LF或CRLF；默认MCU，只切换本次运行，重启恢复构建默认值。编译时可用：
 

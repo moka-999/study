@@ -18,7 +18,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
 - 通用同步及离线复跑入口见`../test/doc/v2_b1_sync_20261010.md`；板型差异不靠整目录覆盖消除。
 - B1结果灯不作RK通信指示，PC温控边界不变。代码/离线/构建与B1实板验收分开记录，见`docs/rk_protocol_migration_20260923.md`。
 - 整轮先0106 `{}`；同一连接轮内任意顺序串行FUNC0103/0105、PARA0108/0109、SLT010A，允许重复算法，执行下一项可与上一份SLT报告解析并行，最后由PC收齐并解析三类结果，再以0107提交汇总failChips数组；MCU仅按该数组显示最终灯态。镜像0/1/2分别映射LPDDR0/LPDDR1/eMCP，其他编号整包拒绝；070x已删除，合法旧请求回notSupported。0108沿用FUNC开始包字段、类别为parametric，0109只允许MCU方向。0107不取消RK或提前释放SLT占用，只阻止尚未入队的FUNC/PARA及废弃其未交付结果。0106按B2已知镜像模式显示常温/高温闪，未知灭；轮内局部模式更新显示，0107后仅缓存，不覆盖最终PASS/FAIL。
-- 正式SLT只匹配slt/memtest86、index=null：010A受理后走既有冷启动，以本轮power设置训练电压；0x35仅问才回Freq，不查询也继续；普通时序等SPL心跳后逐项发完，再回completed并通过共享底层进入003E/EDK/数据速率/PXE。010A completed只表示准备完成。EDK最终RELEASE OK发完至TC后，自动沿既有OFF流程确认掉电、115200和解析器复位，再解除执行占用，保留整轮供任意下一项FUNC/PARA/SLT；不等010B、不发送010B completed，也不新增完成通知。早到下一项回busy，PC等待后重试。010B仅保留编号，合法JSON回notSupported，不解析SLT结果或影响当前算法/灯态。断线不取消SLT且新连接不可认领，后续RELEASE仍自动清理，不向新连接交付旧响应。RELEASE也用于失败退出，不代表上传成功或PASS。PC正式入口与串口调试入口分开；`B1_SERIAL_NET_KEEP_TCP=0`只支持手动独占交接，正式010A回notSupported。V2尚未接EDK，保留原010A/010B基线。验证边界见`../test/doc/pc_slt_auto_integration_20261112.md`。
+- 正式SLT只匹配slt/memtest86，index键必填但忽略其值、应答仍为null：010A受理后走既有冷启动，以本轮power设置训练电压；0x35仅问才回Freq，不查询也继续；普通时序等SPL心跳后逐项发完，再回completed并通过共享底层进入003E/EDK/数据速率/PXE。010A completed只表示准备完成。EDK最终RELEASE OK发完至TC后，自动沿既有OFF流程确认掉电、115200和解析器复位，再解除执行占用，保留整轮供任意下一项FUNC/PARA/SLT；不等010B、不发送010B completed，也不新增完成通知。早到下一项回busy，PC等待后重试。010B仅保留编号，合法JSON回notSupported，不解析SLT结果或影响当前算法/灯态。断线不取消SLT且新连接不可认领，后续RELEASE仍自动清理，不向新连接交付旧响应。RELEASE也用于失败退出，不代表上传成功或PASS。PC正式入口与串口调试入口分开；`B1_SERIAL_NET_KEEP_TCP=0`只支持手动独占交接，正式010A回notSupported。V2尚未接EDK，保留原010A/010B基线。验证边界见`../test/doc/pc_slt_auto_integration_20261112.md`。
 
 ## 20260920-2134原理图适配边界
 
