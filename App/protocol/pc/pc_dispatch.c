@@ -8,6 +8,7 @@
 #include "pwr_ctrl.h"
 #include "result_led.h"
 #include "pc_test_service.h"
+#include "pc_site_control.h"
 #include "pc_power_service.h"
 #if defined(B1_RK_UART)
 #include "log_console.h"
@@ -336,15 +337,9 @@ static pc_dispatch_result_t handle_start_test(
                                             error_code, valid_index, response);
 }
 
-/* 停止单项执行但不结束整轮；只在真实OFF及RK清理完成后异步回复0006。 */
-static pc_dispatch_result_t handle_stop_test(const pc_protocol_frame_t *request,
-    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
+/* 停测或关站已接管OFF，原PC/调试电源命令不能再消费这个OFF事件。 */
+static void cancel_power_reply(void)
 {
-    if (root->child != NULL)
-        return build_command_failure(request, sequence, "invalidArgument", response);
-    const char *error = pc_test_service_stop();
-    if (error) return build_command_failure(request, sequence, error, response);
-    /* 0104取代原启动/电源操作，避免旧消费者误领此次OFF结果。 */
     s_power_command = 0U;
     s_power_owner_connected = 0U;
 #if defined(B1_RK_UART)
@@ -353,7 +348,32 @@ static pc_dispatch_result_t handle_stop_test(const pc_protocol_frame_t *request,
         s_console_power = LOG_CONSOLE_POWER_NONE;
     }
 #endif
+}
+
+/* 停止单项执行但不结束整轮；只在真实OFF及RK清理完成后异步回复0006。 */
+static pc_dispatch_result_t handle_stop_test(const pc_protocol_frame_t *request,
+    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
+{
+    if (root->child != NULL)
+        return build_command_failure(request, sequence, "invalidArgument", response);
+    const char *error = pc_test_service_stop();
+    if (error) return build_command_failure(request, sequence, error, response);
+    cancel_power_reply();
     return PC_DISPATCH_NO_RESPONSE;
+}
+
+static pc_dispatch_result_t handle_site_enable(const pc_protocol_frame_t *request,
+    uint32_t sequence, const cJSON *root, pc_dispatch_response_t *response)
+{
+    pc_site_config_t config;
+    int deferred;
+    if (pc_site_config_parse(root, &config) != PC_TEST_JSON_OK)
+        return build_command_failure(request, sequence, "invalidArgument", response);
+    const char *error = pc_site_configure(&config, &deferred);
+    if (error) return build_command_failure(request, sequence, error, response);
+    if (!pc_site_enabled()) cancel_power_reply();
+    return deferred ? build_command_accepted(request, sequence, response)
+                    : build_command_success(request, sequence, response);
 }
 
 /* 整轮命令只在完整校验之后提交业务，避免半张失败清单部分改变灯态。 */
@@ -811,6 +831,7 @@ static const pc_command_entry_t s_command_table[] = {
     {PC_COMMAND_PARA_START,        handle_start_test},        /* 轮内PARA，最终上报0109。 */
     {PC_COMMAND_PARA_RESULT,       reject_response_command},  /* MCU→PC，拒收。 */
     {PC_COMMAND_SLT_START,         handle_slt_start},         /* 电源/Boot准备，不等待RK。 */
+    {PC_COMMAND_SITE_ENABLE,       handle_site_enable},      /* 站点开关与两镜像DUT灯，不受算法busy限制。 */
     {PC_COMMAND_POWER_ON,          handle_power_on},          /* 非阻塞上电请求。 */
     {PC_COMMAND_POWER_OFF,         handle_power_off},         /* 直接关电，仍须通过在途互斥。 */
     {PC_COMMAND_QUERY_POWER_STATUS, handle_query_power_status}, /* PC -> MCU，只读。 */
@@ -862,6 +883,17 @@ pc_dispatch_result_t pc_dispatch_handle(
         }
         /* 完整帧边界由状态机提供，JSON失败不影响下一帧；不得调用任何业务。 */
         return build_command_failure(request, mcu_tx_sequence, "invalidArgument", response);
+    }
+
+    if (!pc_site_enabled() && request->command_id != PC_COMMAND_SITE_ENABLE &&
+        request->command_id != PC_COMMAND_CLIENT_HEARTBEAT) {
+        uint32_t index;
+        const uint32_t *valid_index = NULL;
+        if ((request->command_id == PC_COMMAND_START_TEST || request->command_id == PC_COMMAND_PARA_START) &&
+            pc_test_start_read_index(root, &index) == PC_TEST_JSON_OK)
+            valid_index = &index;
+        cJSON_Delete(root);
+        return build_command_failure_with_index(request, mcu_tx_sequence, "siteDisabled", valid_index, response);
     }
 
     /* 算法在途或超时后执行状态未知时，禁止会改变运行环境的业务。
@@ -930,6 +962,10 @@ static void poll_console_power(void)
     }
     log_console_power_request_t request = log_console_take_power_request();
     if (request == LOG_CONSOLE_POWER_NONE) return;
+    if (!pc_site_enabled()) {
+        log_console_complete_power_request("siteDisabled");
+        return;
+    }
     if (!handoff_mcu_power_allowed(request == LOG_CONSOLE_POWER_END_RK)) {
         log_console_complete_power_request("busy");
         return;
@@ -972,6 +1008,11 @@ void pc_dispatch_poll(void)
 int pc_dispatch_next_response(uint32_t sequence, pc_dispatch_response_t *response)
 {
     const char *error;
+    if (response && pc_site_take_reply(&error)) {
+        pc_protocol_frame_t request = {.command_id = PC_COMMAND_SITE_ENABLE};
+        return error ? build_command_failure(&request, sequence, error, response)
+                     : build_command_success(&request, sequence, response);
+    }
     if (s_power_command && s_power_owner_connected && response &&
         pc_power_service_take(s_power_action, &error)) {
         pc_protocol_frame_t request = {.command_id = s_power_command};
@@ -990,6 +1031,7 @@ int pc_dispatch_next_response(uint32_t sequence, pc_dispatch_response_t *respons
 void pc_dispatch_disconnected(void)
 {
     s_power_owner_connected = 0U;
+    pc_site_disconnected();
     pc_test_service_disconnected();
 #if defined(ENABLE_RK_GATEWAY_TEST) && ENABLE_RK_GATEWAY_TEST
     rk_gateway_test_disconnect();

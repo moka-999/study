@@ -50,7 +50,7 @@ static b2_status_t apply_request(const b2_request_t *request, int connected)
     uint8_t site = b2_board_site_id();
     uint8_t tester = request->has_tester_id ? request->tester_id : s_tester_id;
     //判断是否需要更改IP配置，如果需要更改，则检查是否有PC连接或正在进行的业务，如果有则返回忙状态
-    if (site < 1U || site > 8U) return B2_STATUS_FAILED;
+    if (site < 1U || site > B2_SITE_ID_MAX) return B2_STATUS_FAILED;
     int change_ip = tester != 0U && (tester != s_tester_id || site != s_site_id);
     if (change_ip && network_change_busy(connected)) return B2_STATUS_BUSY;
 
@@ -104,4 +104,10 @@ uint8_t b2_service_site_id(void)
 {
     //给tcp任务提供当前生效的槽位号，如果尚未采用B2配置，则返回0
     return s_tester_id ? s_site_id : 0U;
+}
+
+int b2_service_matches_site(uint16_t tester_id, uint16_t site_id)
+{
+    if (!tester_id || tester_id > B2_TESTER_ID_MAX || !site_id || site_id > B2_SITE_ID_MAX) return 0;
+    return !s_tester_id || (tester_id == s_tester_id && site_id == s_site_id);
 }

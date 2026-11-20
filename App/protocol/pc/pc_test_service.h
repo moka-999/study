@@ -24,6 +24,8 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
  * 不等待RK/EDK回应，沿用既有下电；真实OFF及队列/串口清理后才由poll报completed。
  * 废弃当前未交付结果，保留整轮；失败保留占用，可再次0104重试，不跨连接补响应。 */
 const char *pc_test_service_stop(void);
+/* 010C关站结束当前整轮；加入在途0104或发起同一停机流程，结算时通知站点服务。 */
+void pc_test_service_stop_site(void);
 
 /** 0106只建立当前连接的整轮；已有整轮/测试/维护操作时拒绝。
  * 使用B2已知模式显示；尚未知的镜像灭灯，不推断为常温；不操作实际加热。

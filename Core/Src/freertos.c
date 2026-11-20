@@ -58,8 +58,8 @@ static void StartDefaultTask(void *argument)
     net_console_start();
     (void)log_console_write(network_done, sizeof(network_done) - 1U);
 
-    /* 只表示MCU已完成启动初始化，不表示RK/DDR上电、网络连通或测试PASS。 */
-    HAL_GPIO_WritePin(B1_LED7_PORT, B1_LED7_PIN, GPIO_PIN_SET);
+    /* 初始化完成后，PG6在开站期间指示MCU就绪，与RK上电及测试结果无关。 */
+    result_led_mcu_ready(B1_LED7_PORT, B1_LED7_PIN);
     printf("B1 slot code: %u (PB5..PB3)\r\n", (unsigned int)board_slot_code());
 
     for (;;) {

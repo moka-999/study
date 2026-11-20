@@ -32,6 +32,7 @@ static console_t s_serial, s_network;
 static console_t *s_rk_owner, *s_status_owner, *s_power_owner;
 static uint32_t s_status_session, s_power_session;
 static uint8_t s_started;
+static uint8_t s_site_enabled = 1U;
 static log_console_power_request_t s_power_request;
 static uint8_t s_power_taken, s_power_reply_ready;
 static char s_power_reply[128];
@@ -209,6 +210,8 @@ static void finish_command(console_t *console)
         } else {
             console->reply = "\r\n[log] select MCU first: log mcu\r\n";
         }
+    } else if (!s_site_enabled) {
+        console->reply = "\r\n[log] siteDisabled\r\n";
     } else if (!console->discard_line &&
                (strcmp(console->command, "start rk") == 0 || strcmp(console->command, "end rk") == 0)) {
         /* 只入单槽请求，电源编排由唯一TCP上下文处理；此处仍在短临界区内。 */
@@ -394,9 +397,9 @@ log_console_power_request_t log_console_take_power_request(void)
     return request;
 }
 
-void log_console_complete_power_request(const char *error)
+/* 调用者已经进入临界区；控制台拥塞时保留终态，直到原输出端能消费。 */
+static void complete_power_locked(const char *error)
 {
-    taskENTER_CRITICAL();
     if (s_power_request != LOG_CONSOLE_POWER_NONE && s_power_taken && !s_power_reply_ready) {
         const char *command = s_power_request == LOG_CONSOLE_POWER_START_RK ? "start rk" : "end rk";
         if (error) (void)snprintf(s_power_reply, sizeof(s_power_reply),
@@ -406,6 +409,24 @@ void log_console_complete_power_request(const char *error)
                            "\r\n[rk power] power ON; LPDDR4X 1800/1100/600mV; fspiM1; check RK boot log\r\n");
         else (void)snprintf(s_power_reply, sizeof(s_power_reply), "\r\n[rk power] power OFF\r\n");
         s_power_reply_ready = 1U;
+    }
+}
+
+void log_console_complete_power_request(const char *error)
+{
+    taskENTER_CRITICAL();
+    complete_power_locked(error);
+    taskEXIT_CRITICAL();
+}
+
+void log_console_set_site_enabled(uint8_t enabled)
+{
+    taskENTER_CRITICAL();
+    s_site_enabled = enabled;
+    /* 命令可能在关站前已入槽，但“queued”仍堵在输出端；不能留到再开站才启动RK。 */
+    if (!enabled && s_power_request != LOG_CONSOLE_POWER_NONE && !s_power_taken) {
+        s_power_taken = 1U;
+        complete_power_locked("cancelled");
     }
     taskEXIT_CRITICAL();
 }

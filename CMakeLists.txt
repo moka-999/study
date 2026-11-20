@@ -141,6 +141,7 @@ add_executable(b1
     App/protocol/pc/pc_dispatch.c
     App/protocol/pc/pc_tester_info.c
     App/protocol/pc/pc_test_message.c
+    App/protocol/pc/pc_site_control.c
     App/protocol/pc/pc_test_service.c
     App/protocol/pc/pc_power_service.c
     App/protocol/common/crc.c

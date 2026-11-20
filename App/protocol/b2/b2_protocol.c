@@ -21,7 +21,7 @@ static int parse_command(b2_request_t *request, const uint8_t *value, size_t siz
 //提取测试机号字段
 static int parse_tester(b2_request_t *request, const uint8_t *value, size_t size)
 {
-    if (size != 1U || value[0] < 1U || value[0] > 21U) return 0;
+    if (size != 1U || value[0] < 1U || value[0] > B2_TESTER_ID_MAX) return 0;
     request->has_tester_id = 1U;
     request->tester_id = value[0];
     return 1;
@@ -130,7 +130,8 @@ size_t b2_response_build(const b2_request_t *request, b2_status_t status,
     size_t length = status == B2_STATUS_OK ? 37U : 27U;
 
     if (!request || !out || capacity < length || (unsigned int)status > B2_STATUS_FAILED ||
-        (status == B2_STATUS_OK && (tester_id > 21U || site_id < 1U || site_id > 8U))) return 0U;
+        (status == B2_STATUS_OK &&
+         (tester_id > B2_TESTER_ID_MAX || site_id < 1U || site_id > B2_SITE_ID_MAX))) return 0U;
     //写帧头，目前协议里最大回应为37，理论为0xFFFF，后续再拓展
     out[0] = 0x5AU; out[1] = 0U; out[2] = (uint8_t)(length - 16U);
     uint16_t crc = crc16_modbus(out, 3U);

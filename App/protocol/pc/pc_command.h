@@ -33,6 +33,7 @@
 #define PC_COMMAND_PARA_RESULT         0x0109U /* MCU→PC，返回RK结果及全程统计；反向请求拒绝。 */
 #define PC_COMMAND_SLT_START           0x010AU /* slt/memtest86，按参数准备电源与Boot。 */
 #define PC_COMMAND_SLT_RESULT          0x010BU /* 历史SLT结果编号保留，当前返回notSupported。 */
+#define PC_COMMAND_SITE_ENABLE         0x010CU /* PC提交本站及各镜像DUT的完整使能配置。 */
 
 /* RK及内存电源业务：非阻塞编排；初版直接关电，不等待RK关机应答。 */
 #define PC_COMMAND_POWER_ON            0x0501U

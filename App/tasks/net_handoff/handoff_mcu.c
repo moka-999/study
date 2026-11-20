@@ -18,6 +18,7 @@
 #include "uart_router.h"
 #include "pwr_ctrl.h"
 #include "pc_test_service.h"
+#include "pc_site_control.h"
 #include "pc_power_service.h"
 #include "task_watchdog.h"
 #include "log_console.h"
@@ -310,7 +311,7 @@ void handoff_mcu_tcp_poll(int connected, int listener_open)
     if (command != HANDOFF_COMMAND_NONE) {
         int accepted;
         taskENTER_CRITICAL();
-        if (automatic || s_stopping) accepted = 0; /* 正式SLT/0104不受调试命令干扰。 */
+        if (!pc_site_enabled() || automatic || s_stopping) accepted = 0; /* 关站、正式SLT及停机优先。 */
         else if (command == HANDOFF_COMMAND_RK) {
             accepted = handoff_state_arm(&s_state, off,
                 idle && uart_tx_idle(UART_PORT_RK_PROTOCOL));

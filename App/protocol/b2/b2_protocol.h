@@ -11,6 +11,8 @@
 #define B2_MAX_TLVS          16U
 #define B2_RESPONSE_SIZE     37U
 #define B2_MIRROR_COUNT      3U
+#define B2_TESTER_ID_MAX     21U
+#define B2_SITE_ID_MAX       8U
 #define B2_COMMAND_EXCHANGE  0x0004U
 
 typedef enum {

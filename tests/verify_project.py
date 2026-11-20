@@ -126,7 +126,7 @@ def main() -> int:
     require("B1_LED7_PIN" not in source.split("s_result_led_map", 1)[1].split("};", 1)[0],
             "PG6 single-color status LED must not enter the result LED map")
     default_task = rtos_source.split("static void StartDefaultTask", 1)[1].split("#if", 1)[0]
-    ready_led = "HAL_GPIO_WritePin(B1_LED7_PORT, B1_LED7_PIN, GPIO_PIN_SET);"
+    ready_led = "result_led_mcu_ready(B1_LED7_PORT, B1_LED7_PIN);"
     require(default_task.index("MX_LWIP_Init();") < default_task.index(ready_led) <
             default_task.index("for (;;)") and "board_slot_code()" in default_task,
             "PG6应在默认任务初始化完成后常亮，并读取槽位码；不新增灯任务")

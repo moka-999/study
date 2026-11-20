@@ -12,7 +12,7 @@ Gitea 默认分支为 `app-b1`，保留以下三个开发入口：
 | `bootloader` | `D:/pro/bootloader` | 独立 Bootloader 历史工程及维护工具，不替代 B1 当前的精简 Boot |
 | `codex/b1-tlv` | `D:/pro/b1_tlv` | B1 手动 TLV 透传特化工程，与主工程分别构建 |
 
-V2 工程、共用离线测试及 EDK 联调资料保存在归档标签 [archive/app-v2-20261117](http://192.168.1.122:3000/LILIHONG/stm32h743/src/tag/archive/app-v2-20261117)。本地 `D:/pro/test` 继续保留；其源码未合并进 B1 的板级工程。旧 `main`、`b1` 分支的提交已包含在保留的历史中，不再单独维护分支入口。
+本版 B1 的 `010C` 和 RK 时序开关回归使用同级 `test` 目录中的测试工具。该归档同时包含 V2 工程、共用离线测试和 EDK 联调资料。[archive/app-v2-20261120](http://192.168.1.122:3000/LILIHONG/stm32h743/src/tag/archive/app-v2-20261120)
 
 ## 当前整合状态
 
@@ -101,6 +101,8 @@ USART1、USART2当前均为115200/8N1、无流控（RK调试端实际波特率�
 `b1.ioc`保存引脚/时钟与RX DMA配置；重新生成时须保持Boot=0x08000000/128KiB、App=0x08020000/1920KiB及链接段、B1正式任务创建和板级适配，不能用V2生成代码覆盖。
 
 ## 文档入口
+
+- [PC 010C 站点开关、DUT 灯屏蔽与应答](docs/site_enable_010c.md)
 
 - [正常上电灯、槽位读取与真板验收](docs/board_status_slot_20261010.md)
 

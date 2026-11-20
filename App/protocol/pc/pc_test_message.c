@@ -69,6 +69,44 @@ static int has_exact_fields(const cJSON *root, const char *const *fields, size_t
     return 1;
 }
 
+pc_test_json_result_t pc_site_config_parse(const cJSON *root, pc_site_config_t *config)
+{
+    static const char *const fields[] = {"testerId", "siteId", "siteEnabled", "dutEnabled"};
+    static const char *const group_fields[] = {"mirrorIndex", "dut"};
+    uint32_t tester, site;
+    if (!config || !has_exact_fields(root, fields, sizeof(fields) / sizeof(fields[0])))
+        return PC_TEST_JSON_ERROR_FIELDS;
+    const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(root, "siteEnabled");
+    if (!cJSON_IsBool(enabled) || read_required_u32(root, "testerId", &tester) != PC_TEST_JSON_OK ||
+        read_required_u32(root, "siteId", &site) != PC_TEST_JSON_OK ||
+        tester > UINT16_MAX || site > UINT16_MAX)
+        return PC_TEST_JSON_ERROR_FIELDS;
+    pc_site_config_t parsed = {
+        .tester_id = (uint16_t)tester, .site_id = (uint16_t)site, .enabled = cJSON_IsTrue(enabled)
+    };
+    if (parsed.enabled) {
+        const cJSON *groups = cJSON_GetObjectItemCaseSensitive(root, "dutEnabled");
+        uint8_t seen = 0U;
+        if (!cJSON_IsArray(groups) || cJSON_GetArraySize(groups) != PC_SITE_MIRROR_COUNT)
+            return PC_TEST_JSON_ERROR_FIELDS;
+        const cJSON *group;
+        cJSON_ArrayForEach(group, groups) {
+            uint32_t mirror;
+            if (!has_exact_fields(group, group_fields, sizeof(group_fields) / sizeof(group_fields[0])) ||
+                read_required_u32(group, "mirrorIndex", &mirror) != PC_TEST_JSON_OK ||
+                mirror >= PC_SITE_MIRROR_COUNT || (seen & (1U << mirror)))
+                return PC_TEST_JSON_ERROR_FIELDS;
+            const cJSON *dut = cJSON_GetObjectItemCaseSensitive(group, "dut");
+            if (!cJSON_IsArray(dut) || cJSON_GetArraySize(dut) != 1 || !cJSON_IsBool(dut->child))
+                return PC_TEST_JSON_ERROR_FIELDS;
+            seen |= (uint8_t)(1U << mirror);
+            if (cJSON_IsTrue(dut->child)) parsed.mirror_mask |= (uint8_t)(1U << mirror);
+        }
+    }
+    *config = parsed;
+    return PC_TEST_JSON_OK;
+}
+
 static const char *read_name(const cJSON *root, const char *field,
                             const char *const *names, size_t count)
 {

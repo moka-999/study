@@ -1,4 +1,5 @@
 #include "pc_test_service.h"
+#include "pc_site_control.h"
 #include "handoff_mcu.h"
 #include "pc_trace.h"
 #include "pc_tester_info.h"
@@ -603,11 +604,12 @@ static void release_delivery(void)
     s_test.delivery_pending = 0U;
 }
 
-const char *pc_test_service_stop(void)
+static const char *begin_stop(int closing_site)
 {
-    if (s_stop.active && !s_stop.error) return "busy";
+    if (s_stop.active && (!s_stop.error || !s_stop.reported))
+        return closing_site ? NULL : "busy";
     const char *error = pc_power_service_stop();
-    if (error) return error;
+    if (error && !closing_site) return error;
     if (s_test.active && !s_test.discarded) pc_trace_discard(s_test.cookie, "stop");
     s_test.discarded = 1U;
     s_test.owner_connected = s_test.preparing = s_test.configuring = 0U;
@@ -617,10 +619,22 @@ const char *pc_test_service_stop(void)
     monitor_idd_cancel();
     handoff_mcu_stop();
     rk_task_stop_begin();
-    s_stop.active = s_stop.owner_connected = 1U;
+    s_stop.active = 1U;
+    s_stop.owner_connected = !closing_site;
     s_stop.power_done = s_stop.reported = 0U;
-    s_stop.error = NULL;
+    s_stop.error = error;
     return NULL;
+}
+
+const char *pc_test_service_stop(void)
+{
+    return begin_stop(0);
+}
+
+void pc_test_service_stop_site(void)
+{
+    s_round_active = 0U;
+    (void)begin_stop(1);
 }
 
 static int poll_stop(uint32_t sequence, pc_dispatch_response_t *response)
@@ -651,6 +665,7 @@ static int poll_stop(uint32_t sequence, pc_dispatch_response_t *response)
         s_test.active = s_test.slt = 0U;
         s_last_frequency = -1;
     }
+    pc_site_stop_finished(s_stop.error);
     return result;
 }
 

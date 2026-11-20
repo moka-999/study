@@ -16,6 +16,9 @@
 /* 默认任务在uart_start_all()后调用一次；不初始化硬件，不访问电源或Flash。 */
 void log_console_start(void);
 
+/* 010C按站点状态放行两路控制台的电源、网络交接和验灯命令；关站仍可选日志和看status。 */
+void log_console_set_site_enabled(uint8_t enabled);
+
 /* 默认任务每轮调用一次；MCU模式解释log mcu/log rk/status及led验灯命令，
  * start rk/end rk只登记请求，另由唯一TCP业务上下文推进电源和Boot。
  * led 0|1|2|all off|pass|fail|normal|hot仅用于空闲验灯，单组命令关闭其他组；

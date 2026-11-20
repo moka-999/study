@@ -21,6 +21,10 @@ static const result_led_board_map_t *s_board_map;
 static result_led_state_t s_states[RESULT_LED_TARGET_COUNT];
 static uint32_t s_last_blink_ms;
 static uint8_t s_blink_on;
+static uint8_t s_site_enabled = 1U;
+static uint32_t s_visible_mask = (1U << RESULT_LED_TARGET_COUNT) - 1U;
+static GPIO_TypeDef *s_ready_port;
+static uint16_t s_ready_pin;
 
 static uint8_t result_led_is_blinking(result_led_state_t state)
 {
@@ -69,7 +73,8 @@ static result_led_levels_t result_led_render(result_led_state_t state,
 static void result_led_apply(result_led_target_t target)
 {
     const result_led_pin_pair_t *pair = &s_board_map->pairs[target];
-    result_led_levels_t levels = result_led_render(s_states[target], s_blink_on);
+    result_led_state_t visible = (s_visible_mask & (1U << target)) ? s_states[target] : RESULT_LED_OFF;
+    result_led_levels_t levels = result_led_render(visible, s_blink_on);
 
     HAL_GPIO_WritePin(pair->fail_port, pair->fail_pin,
                       levels.fail_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -99,6 +104,30 @@ HAL_StatusTypeDef result_led_init(const result_led_board_map_t *map)
     return HAL_OK;
 }
 
+void result_led_mcu_ready(GPIO_TypeDef *port, uint16_t pin)
+{
+    taskENTER_CRITICAL();
+    s_ready_port = port;
+    s_ready_pin = pin;
+    HAL_GPIO_WritePin(port, pin, s_site_enabled ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    taskEXIT_CRITICAL();
+}
+
+void result_led_set_site(uint8_t site_enabled, uint32_t visible_mask)
+{
+    taskENTER_CRITICAL();
+    s_site_enabled = site_enabled;
+    s_visible_mask = site_enabled ? visible_mask : 0U;
+    if (!site_enabled) {
+        for (size_t i = 0; i < RESULT_LED_TARGET_COUNT; ++i) s_states[i] = RESULT_LED_OFF;
+        s_blink_on = 0U;
+    }
+    result_led_apply_all();
+    if (s_ready_port)
+        HAL_GPIO_WritePin(s_ready_port, s_ready_pin, site_enabled ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    taskEXIT_CRITICAL();
+}
+
 HAL_StatusTypeDef result_led_set(result_led_target_t target, result_led_state_t state)
 {
     if (s_board_map == NULL || (uint32_t)target >= RESULT_LED_TARGET_COUNT ||
@@ -111,7 +140,7 @@ HAL_StatusTypeDef result_led_set(result_led_target_t target, result_led_state_t 
      * 最多写六次GPIO BSRR，不执行延时或外设通信。
     */
     taskENTER_CRITICAL();
-    if (s_states[target] == state) {
+    if (!s_site_enabled || s_states[target] == state) {
         /* TCP重试必须幂等，不能反复把全局500ms闪烁相位重置为亮。 */
         taskEXIT_CRITICAL();
         return HAL_OK;
@@ -150,6 +179,10 @@ HAL_StatusTypeDef result_led_set_all(const result_led_state_t states[RESULT_LED_
     for (uint32_t i = 0U; i < RESULT_LED_TARGET_COUNT; ++i)
         if ((uint32_t)states[i] > RESULT_LED_DEBUG_BOTH_ON) return HAL_ERROR;
     taskENTER_CRITICAL();
+    if (!s_site_enabled) {
+        taskEXIT_CRITICAL();
+        return HAL_OK;
+    }
     uint8_t start_blink = 0U;
     for (uint32_t i = 0U; i < RESULT_LED_TARGET_COUNT; ++i) {
         if (s_states[i] != states[i] && result_led_is_blinking(states[i])) start_blink = 1U;

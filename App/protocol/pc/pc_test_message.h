@@ -22,6 +22,17 @@ typedef enum {
     PC_TEST_JSON_ERROR_POWER_RANGE,      /* 三轨目标不能用TPS寄存器准确表示。 */
 } pc_test_json_result_t;
 
+/* 当前B1有两个LPDDR镜像，各只有dut[0]；ID只用于核对收件板，不修改B2配置。 */
+#define PC_SITE_MIRROR_COUNT 2U
+typedef struct {
+    uint16_t tester_id, site_id;
+    uint8_t enabled;
+    uint8_t mirror_mask; /* 位0/1表示对应镜像的dut[0]可显示。 */
+} pc_site_config_t;
+
+/* 解析010C完整快照。关站时只要求dutEnabled键存在，不读取其内容；失败不改输出。 */
+pc_test_json_result_t pc_site_config_parse(const cJSON *root, pc_site_config_t *config);
+
 #define PC_TIMING_PARAMETER_COUNT 15U
 /* PC负责参数单位、器件适用性及安全范围；MCU只检查十进制整数能否无损编码。
  * present按下方命令映射的序号置位；空串/缺省不置位，frequency缺省为-1。

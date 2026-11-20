@@ -21,5 +21,7 @@ void b2_service_poll(int connected);
 uint8_t b2_service_thermal_modes(uint8_t modes[B2_MIRROR_COUNT]);
 /** 返回正式配置使用的siteId；0表示尚未采用B2配置，调用方保留原本地测试标签。 */
 uint8_t b2_service_site_id(void);
+/* 仅TCP上下文核对010C的目标。已分配时须两项均匹配，单板直连时仍检查物理编号范围。 */
+int b2_service_matches_site(uint16_t tester_id, uint16_t site_id);
 
 #endif

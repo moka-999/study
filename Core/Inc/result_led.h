@@ -8,7 +8,7 @@
  * 驱动只处理 PASS、FAIL、常温测试和高温测试的显示/闪烁语义，不把
  * 业务结果绑定到某个颜色名称；双通道同时闪烁表示常温测试，FAIL通道
  * 闪烁表示高温测试。实际颜色和测试对象的物理顺序待真板确认，由板级映射表提供。
- * PG6为初始化完成后常亮的正常上电指示，不属于本驱动。
+ * PG6是独立的MCU就绪灯，仅随整站使能变化，不参与测试闪烁。
  */
 
 #include "stm32h7xx_hal.h"
@@ -44,6 +44,13 @@ typedef struct {
 
 /** 使用板级映射并立即关闭六路结果灯。调用前GPIO时钟和输出模式必须已配置。 */
 HAL_StatusTypeDef result_led_init(const result_led_board_map_t *map);
+
+/* 默认任务完成初始化后登记并点亮MCU就绪灯；若此时已关站则保持灭。 */
+void result_led_mcu_ready(GPIO_TypeDef *port, uint16_t pin);
+
+/* site_enabled=0关闭全部结果灯和就绪灯，清除旧灯态；开站时visible_mask按target位生效。
+ * 单改DUT掩码保留各镜像当前逻辑状态及闪烁相位，不修改任何测试结果。 */
+void result_led_set_site(uint8_t site_enabled, uint32_t visible_mask);
 
 /** 更新一组测试对象的显示状态；闪烁状态从亮相位开始。 */
 HAL_StatusTypeDef result_led_set(result_led_target_t target, result_led_state_t state);
