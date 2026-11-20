@@ -85,6 +85,22 @@ static uint8_t b2_modes[3], b2_known = 7U, b2_site;
 uint8_t b2_service_thermal_modes(uint8_t modes[3])
 { memcpy(modes, b2_modes, sizeof(b2_modes)); return b2_known; }
 uint8_t b2_service_site_id(void) { return b2_site; }
+#ifdef PC_COMMAND_SITE_ENABLE
+/* 固定测试仪2模拟B2分配；有效编号和真实B2分配另由B2服务实际C覆盖。 */
+int b2_service_matches_site(uint16_t tester, uint16_t site)
+{ return tester && tester <= B2_TESTER_ID_MAX && site && site <= B2_SITE_ID_MAX &&
+         (!b2_site || (tester == 2U && site == b2_site)); }
+static uint32_t visible_leds = (1U << RESULT_LED_TARGET_COUNT) - 1U;
+static uint8_t site_ready_led = 1U;
+/* 控制台实际收包和拥塞撤销由UART套件覆盖；此处只验证业务和灯的输出。 */
+void log_console_set_site_enabled(uint8_t enabled) { (void)enabled; }
+void result_led_set_site(uint8_t enabled, uint32_t visible_mask)
+{
+    site_ready_led = enabled;
+    visible_leds = visible_mask;
+    if (!enabled) memset(led_states, 0, sizeof(led_states));
+}
+#endif
 static char site_label[16] = "SITE-7";
 static rk_request_t queued_request;
 static rk_response_t queued_response;

@@ -556,6 +556,14 @@ void test_main(void)
     check_pc_network();
     message("PASS: MCU legacy 2M request, ACK/TC switching, confirmation and OFF baud recovery\n");
 
+#ifdef PC_SITE_CONTROL_H
+    /* 关站期间调试口提交net rk也不能占用串口或打断在线PC。 */
+    site_enabled = 0;
+    CHECK(handoff_mcu_console_request(HANDOFF_COMMAND_RK));
+    poll_connected();
+    CHECK(!handoff_mcu_busy() && !s_reset_stream && !s_state.authorized);
+    site_enabled = 1;
+#endif
     /* 尚未授权时取消准备同样不依赖PC主动断开。 */
     CHECK(handoff_mcu_console_request(HANDOFF_COMMAND_RK));
     poll_connected();

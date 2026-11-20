@@ -28,7 +28,7 @@ void mock_enter(void) { CHECK(!critical); critical = 1U; }
 void mock_exit(void) { CHECK(critical == 1U); critical = 0U; }
 void HAL_GPIO_WritePin(GPIO_TypeDef *gpio, uint16_t pin, GPIO_PinState state)
 {
-    CHECK(gpio == &port && pin && (pin & (pin - 1U)) == 0U && pin <= 32U);
+    CHECK(gpio == &port && pin && (pin & (pin - 1U)) == 0U && pin <= (1U << 6));
     CHECK(!check_lock || critical == 1U);
     ++writes;
     if (state == GPIO_PIN_SET) levels |= pin;
@@ -67,6 +67,35 @@ void test_main(void)
     CHECK(result_led_set_all(states) == HAL_OK && levels == 31U);
     result_led_process(399U); CHECK(levels == 31U);
     result_led_process(400U); CHECK(levels == 0U && !critical);
+#if defined(TEST_SITE_LEDS)
+    /* 先关站再完成MCU初始化，PG6不能被启动任务重新点亮。 */
+    const uint16_t mcu_pin = 1U << 6;
+    result_led_set_site(0U, 0U);
+    result_led_mcu_ready(&port, mcu_pin);
+    CHECK(!levels);
+    CHECK(result_led_set(RESULT_LED_EMCP, RESULT_LED_PASS) == HAL_OK);
+    CHECK(result_led_set_all(states) == HAL_OK);
+    result_led_process(900U);
+    CHECK(!levels);
+    result_led_set_site(1U, 7U);
+    CHECK(levels == mcu_pin);
+    /* DUT1的FAIL逻辑保留，关灯期间继续更新；恢复时立刻显示最新状态。 */
+    states[0] = RESULT_LED_PASS; states[1] = RESULT_LED_FAIL; states[2] = RESULT_LED_PASS;
+    CHECK(result_led_set_all(states) == HAL_OK && levels == (mcu_pin | 38U));
+    result_led_set_site(1U, 5U); CHECK(levels == (mcu_pin | 34U));
+    CHECK(result_led_set(RESULT_LED_LPDDR1, RESULT_LED_PASS) == HAL_OK && levels == (mcu_pin | 34U));
+    CHECK(result_led_get_all(out) == HAL_OK && out[1] == RESULT_LED_PASS);
+    result_led_set_site(1U, 7U); CHECK(levels == (mcu_pin | 42U));
+    tick = 1000U;
+    CHECK(result_led_set(RESULT_LED_LPDDR1, RESULT_LED_TEST_NORMAL) == HAL_OK);
+    result_led_set_site(1U, 4U);
+    CHECK(levels == (mcu_pin | 32U));
+    result_led_process(1500U);
+    result_led_set_site(1U, 7U); CHECK(levels == (mcu_pin | 34U));
+    result_led_process(2000U); CHECK(levels == (mcu_pin | 46U));
+    result_led_set_site(0U, 0U); CHECK(!levels);
+    message("PASS: actual LED C site gate, MCU ready, DUT mask and blink phase\n");
+#endif
     message("PASS: actual LED C atomic batch, invalid input, idempotence, 500ms and tick wrap\n");
     finish(0U);
 }

@@ -643,6 +643,21 @@ static void test_console_power(void)
     isr = 1; HAL_UART_ErrorCallback(&uart[2]); isr = 0;
     tick += 100U; log_console_process(); console_input("rk\n");
     CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+#if defined(TEST_SITE_CONSOLE)
+    /* 关站时撤销尚未领取的调试启动；即使排队提示堵到开站后，也不能补执行。 */
+    fail_console_send = 1; console_input("start rk\n");
+    log_console_set_site_enabled(0U);
+    log_console_set_site_enabled(1U);
+    fail_console_send = 0;
+    clear_console_output(); log_console_process(); log_console_process();
+    CHECK(strstr(console_output, "cancelled"));
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    log_console_set_site_enabled(0U);
+    clear_console_output(); console_input("start rk\nnet rk\nled all pass\n");
+    CHECK(strstr(console_output, "siteDisabled") && !strstr(console_output, "queued"));
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    log_console_set_site_enabled(1U);
+#endif
     clear_console_output(); clear_rk_console_output();
     message("PASS: B1 console power command framing, single slot, backpressure and mode isolation\n");
 }
@@ -934,6 +949,13 @@ static void test_network_console(void)
     network_input("end rk\n"); CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_END_RK);
     log_console_complete_power_request(NULL); log_console_process();
     CHECK(strstr(fake_net_output, "power OFF"));
+#if defined(TEST_SITE_CONSOLE)
+    log_console_set_site_enabled(0U);
+    clear_network_output(); network_input("start rk\nnet rk\n");
+    CHECK(strstr(fake_net_output, "siteDisabled") && !strstr(fake_net_output, "queued"));
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    log_console_set_site_enabled(1U);
+#endif
 
     /* 网络拥塞不阻塞串口日志和命令；两路共用电源单槽，不能并发动作。 */
     fake_net_blocked = 1; network_input("status\n");

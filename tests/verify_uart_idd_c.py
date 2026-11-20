@@ -80,6 +80,8 @@ uint32_t __get_IPSR(void);
                "-Wl,--gc-sections,--defsym=end=_ebss", "-o", str(build / "test.elf")]
     if is_b1:
         command += ["-DTEST_B1_LOG_CONSOLE=1", f"-DB1_LOG_DEFAULT_SOURCE={args.log_default}"]
+    if (root / "App/protocol/pc/pc_site_control.h").is_file():
+        command += ["-DTEST_SITE_CONSOLE=1"]
     if network_console:
         command += ['-DTEST_NET_CONSOLE=1']
     if (root / 'App/tasks/net_handoff/handoff_mcu.h').is_file():

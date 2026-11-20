@@ -62,6 +62,10 @@ void uart_wait_rx(int id, uint32_t timeout_ms)
 }
 pwr_ctrl_state_t pwr_ctrl_get_state(void) { return power_state; }
 int pc_test_service_busy(void) { return test_busy; }
+#ifdef PC_SITE_CONTROL_H
+static int site_enabled = 1;
+int pc_site_enabled(void) { return site_enabled; }
+#endif
 int pc_power_service_busy(void) { return power_busy; }
 UBaseType_t uxQueueMessagesWaiting(const QueueHandle_t queue)
 { CHECK(queue == rkRequestQueue || queue == rkResponseQueue); return rk_idle ? 0U : 1U; }

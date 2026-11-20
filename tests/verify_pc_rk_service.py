@@ -16,11 +16,19 @@ def main():
     parser.add_argument("--power-sequence", action="store_true", help="执行正式电源编排与0103的故障注入，不访问设备")
     parser.add_argument("--round", action="store_true", help="验证整轮、SLT收尾和070x删除；只运行离线实际C")
     parser.add_argument("--stop", action="store_true", help="B1的0104中止及掉电清理回归")
+    parser.add_argument("--site", action="store_true", help="B1的010C站点开关、灯屏蔽及下电交错回归")
+    parser.add_argument("--timing-switches", nargs=2, type=int, choices=(0, 1),
+                        metavar=("TIMING", "FREQ"), help="B1普通时序/Freq编译开关专项，0关闭、1启用")
     parser.add_argument("--slt-fault", choices=("off", "transport", "transport-after", "power-off"),
                         help="B1整轮专项：独立进程验证SLT故障只报告一次并保持占用")
     args = parser.parse_args()
     root = args.app_root.resolve()
-    if args.stop and (root.name != "b1" or not args.power_sequence or not args.round):
+    if args.timing_switches is not None and (root.name != "b1" or not args.power_sequence or
+                                             not args.round or args.stop or args.slt_fault):
+        parser.error("时序开关专项要求B1、--power-sequence、--round，不能混用停止/SLT故障专项")
+    if args.site and (args.stop or args.timing_switches is not None or args.slt_fault):
+        parser.error("--site单独运行")
+    if (args.stop or args.site) and (root.name != "b1" or not args.power_sequence or not args.round):
         parser.error("停止回归要求B1、--power-sequence和--round")
     if args.power_simulation and (args.b1_guard or root.name == "b1"):
         parser.error("B1禁止电源模拟")
@@ -39,8 +47,12 @@ def main():
         suffix += "-round"
     if args.stop:
         suffix += "-stop"
+    if args.site:
+        suffix += "-site"
     if args.slt_fault:
         suffix += "-slt-fault-" + args.slt_fault
+    if args.timing_switches is not None:
+        suffix += "-timing%d-freq%d" % tuple(args.timing_switches)
     build = root / "build" / ("pc-rk-service" + suffix)
     build.mkdir(parents=True, exist_ok=True)
     # 只模拟RTOS队列和HAL类型，不替换命令表、JSON解析、服务生命周期或响应组包。
@@ -75,6 +87,12 @@ uint32_t HAL_GetTick(void);
         "App/protocol/pc/pc_protocol.c", "App/protocol/pc/pc_test_message.c",
         "App/tasks/rk/rk_link.c", "App/protocol/rk/frame.c", "App/protocol/common/crc.c",
         "HAL_Drv/ddr_power.c", "Middlewares/Third_Party/cJSON/cJSON.c")]]
+    if args.timing_switches is not None:
+        sources[0] = root / "tests/test_pc_timing_switches.c"
+    if args.site:
+        sources[0] = root / "tests/test_pc_site_control.c"
+    if (root / "App/protocol/pc/pc_site_control.c").is_file():
+        sources.append(root / "App/protocol/pc/pc_site_control.c")
     if args.power_simulation or args.b1_guard or root.name == "b1":
         sources.append(root / "HAL_Drv/idd_stats.c")
     if args.power_simulation:
@@ -106,6 +124,12 @@ uint32_t HAL_GetTick(void);
         command += ["-DPC_POWER_SEQUENCE_TEST=1"]
     if args.round:
         command += ["-DPC_TEST_ROUND_TEST=1"]
+    if args.timing_switches is not None:
+        timing, frequency = args.timing_switches
+        command += [f"-DB1_RK_TIMING_ENABLE={timing}", f"-DB1_RK_FREQ_ENABLE={frequency}"]
+    elif root.name == "b1" and args.round and not args.site:
+        # 原整轮/停止用例明确检查主动时序和频率交互；独立于开发板当前用于对照的宏值。
+        command += ["-DB1_RK_TIMING_ENABLE=1", "-DB1_RK_FREQ_ENABLE=1"]
     if args.slt_fault:
         mode = ("off", "transport", "transport-after", "power-off").index(args.slt_fault) + 1
         command += [f"-DPC_SLT_FAULT_TEST={mode}"]

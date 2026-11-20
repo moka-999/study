@@ -60,6 +60,15 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *view, uint32_
         service_stub += '''pc_dispatch_result_t pc_test_slt_result(const pc_slt_result_view_t *view, uint32_t seq, pc_dispatch_response_t *out)
 { (void)view; (void)seq; (void)out; return PC_DISPATCH_ERROR; }
 '''
+    if (root / 'App/protocol/pc/pc_site_control.h').is_file():
+        service_stub += '''#include "pc_site_control.h"
+/* 此套件固定开站，010C的真实分发、停机和恢复由站点专项运行。 */
+int pc_site_enabled(void) { return 1; }
+const char *pc_site_configure(const pc_site_config_t *config, int *deferred)
+{ (void)config; (void)deferred; __builtin_trap(); }
+int pc_site_take_reply(const char **error) { (void)error; return 0; }
+void pc_site_disconnected(void) { }
+'''
     (build / 'service_stub.c').write_text(service_stub, encoding='utf-8')
     sources = [Path(__file__).with_name("test_pc_start.c"), build / "service_stub.c",
                *[root / p for p in ("App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_protocol.c",

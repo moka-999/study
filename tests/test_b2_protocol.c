@@ -209,7 +209,16 @@ static void business_checks(void)
     CHECK(b2_service_prepare());
     master_state_t empty = {0}, full = {3U, 7U, {1U,0U,0U}};
     CHECK(transact(1U, empty).tester_id == 0U && !net_writes);
+#if defined(B2_TESTER_ID_MAX)
+    CHECK(b2_service_matches_site(21U, 8U) && !b2_service_matches_site(22U, 8U));
+    CHECK(!b2_service_matches_site(0U, 1U) && !b2_service_matches_site(1U, 0U) &&
+          !b2_service_matches_site(1U, 9U));
+#endif
     CHECK(transact(2U, full).status == 0U && net_writes == 1U);
+#if defined(B2_TESTER_ID_MAX)
+    CHECK(b2_service_matches_site(3U, 1U) && !b2_service_matches_site(3U, 2U) &&
+          !b2_service_matches_site(4U, 1U));
+#endif
     uint8_t modes[3];
     CHECK(b2_service_site_id() == 1U && b2_service_thermal_modes(modes) == 7U && modes[0] == 1U);
     unsigned writes = mode_calls;

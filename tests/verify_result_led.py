@@ -101,6 +101,8 @@ void mock_exit(void);
                str(ROOT / "tests/test_result_led.c"), str(root / "Core/Src/result_led.c"),
                str(support / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
                "-T" + str(support / "qemu_test.ld"), "-o", str(build / "test.elf")]
+    if (root / "App/protocol/pc/pc_site_control.h").is_file():
+        command.insert(1, "-DTEST_SITE_LEDS=1")
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode:
