@@ -12,8 +12,9 @@
  * request_command仅允许0103/FUNC或0108/PARA，名称须属于对应RK算法类别。
  * PARA发送101A进入，实际发完后等5ms并采集5s，再发送退出；不等待RK应答。
  * 0109两颗默认PASS/resultDesc=null，电流使用逐点统计；这是开发约定，不是标准判限。
- * Freq在启动查询0x35中回复，目标变化通过既有冷启动流程处理；外部模式不接受非负Freq。
- * 普通时序在准备完成后逐项发送，不等待RK回应；发送失败停止，不自动重发。
+ * board_rk_config.h分别控制普通时序和Freq；关闭后仍校验PC请求，原文副本不改。
+ * Freq启用时按本轮目标回复0x35、变化走冷启动且外部模式拒绝非负值；关闭统一使用-1。
+ * 普通时序启用时在准备完成后逐项发送，不等待RK回应；发送失败停止，不自动重发。
  * accepted/completed不表示参数已生效；FUNC统计在算法入队前开始；IDD统计以进入帧实际发完为基准。
  */
 pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_test_start_view_t *start,
@@ -43,7 +44,7 @@ pc_dispatch_result_t pc_test_round_end(uint32_t failed_mask,
     uint32_t sequence, pc_dispatch_response_t *response);
 
 /** 010A的start须经专用解析器验证，沿用FUNC/PARA的整轮及电源/Boot/时序准备。
- * Freq仅在RK查询时回复，不问也继续；普通时序等本轮SPL心跳后逐项发送。
+ * 沿用同一组普通时序/Freq开关。Freq仅问才回，关闭回复-1；普通时序启用才等心跳并逐项发送。
  * completed只表示本地准备/发送完成，随后自动003E/EDK/PXE；不表示测试通过。
  * RELEASE最终应答发完后自动OFF并恢复串口，才解除执行占用；不等待PC结果解析。
  * 正式流程独立于串口net/start调试入口，仅支持保持PC连接的共存配置。

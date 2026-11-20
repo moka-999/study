@@ -7,9 +7,9 @@
 #define BOARD_AD_USE_AVDD_REFERENCE 1U
 #endif
 
-/* 本块首板AVDD对AVSS实测3333mV；换板或供电条件变化须重新测量。 */
+/* 用万用表测得的AVDD对AVSS电压，单位mV。换板或供电条件变化时应重新测量。 */
 #ifndef BOARD_AD_AVDD_MV
-#define BOARD_AD_AVDD_MV 3333U
+#define BOARD_AD_AVDD_MV 3355U
 #endif
 
 #if BOARD_AD_USE_AVDD_REFERENCE != 0U && BOARD_AD_USE_AVDD_REFERENCE != 1U

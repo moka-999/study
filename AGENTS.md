@@ -2,6 +2,8 @@
 
 FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时序传{}，缺失或null回invalidArgument。16个子字段可部分提供字符串：CASReadLatency/CASWriteLatency/Freq/tREFI/tWR/tRTP/tRCD/tRP/tRASmin/tRASmax/tWTR/tRFCmin/tFAW/tCCD/tRRD/BL。Freq为int64，其余为u32十进制整数；PC判定取值及适用性，MCU只检查格式/位宽并原值编码。空串/省略不下发普通时序，Freq缺省回复-1；不继承上一请求。Freq变化走既有冷启动并在0x35查询中回复，普通时序在SPL就绪后无应答逐项发送，再下发算法；发送完成不代表生效。见[接入记录](../test/doc/rk_timing_frequency_20261105.md)。旧请求补字段后必须重算Length。
 
+`Core/Inc/board_rk_config.h` 集中配置两个开关。默认 `B1_RK_TIMING_ENABLE=0` 跳过 FUNC/PARA/SLT 的 15 项普通设置，`B1_RK_FREQ_ENABLE=1` 在 RK 查询 0x35 时回复本轮 Freq。Freq 关闭时有效频率为 -1，外部已启动模式允许携带非负 Freq。PC JSON 仍完整校验，日志 RK CONFIG 显示两个开关。比较 RK 默认寄存器值须冷启动。[开关说明](docs/rk_timing_switches_20261117.md)
+
 ## RK协议替换约束（2026-09-23）
 
 - B1的0104严格接收`{}`，停止当前FUNC/PARA/SLT及未完成的启动/电源操作，保留同连接0106。不发取消TLV、不等EDK RELEASE，沿现有下电顺序，真实OFF、串口115200恢复和RK任务清理队列后才回0006 completed；清理失败回failed并保留占用，可再次0104重试。断线仍清理，不向新连接交付旧应答。完成不代表PASS或报告上传成功；见`docs/test_stop_20261116.md`。
@@ -71,7 +73,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
 - AD7124-4仅绑定B1 SPI4，Mode3、约390.625kHz；ON后才初始化，实板ID为0x07。
   三路保持AIN0/1、2/3、4/5，负端为板上AGND，不改为内部AVSS。
   增益1、双端无缓冲，内部校零后保留出厂GAIN；接地负端UV策略见排查记录。
-  当前按用户确认采用AVDD基准，关闭内部REF_EN；板级开关及实测3333mV集中在
+  当前采用AVDD基准并关闭内部REF_EN，板级开关及默认换算值3355mV集中在
   `Core/Inc/board_adc_config.h`，同步/增量采样共用换算值。AVDD不是稳定基准承诺，
   更换板卡或供电条件需复测，精度待与万用表验收。内部2.5V方案保留但须先补齐
   REFOUT到AVSS的0.1µF去耦；不直接补焊FB2306，避免并联内外基准。
@@ -165,7 +167,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
   connection/heartbeat toggles. Exclude the old TLV GPIO reboot dispatcher.
 - See docs/integration_20260831.md for migrated scope and remaining acceptance.
 - PB3/PB4/PB5为GPIO输入、GPIO_NOPULL；B1各有4.7kΩ上拉，B2贴0Ω接地为0、不贴为1，不允许MCU输出高。`board_slot_code()`返回PB5:PB4:PB3的0..7码，加1为siteId；111有效，独立的SLOT_ONLINE#才是B2在位检测。每次0004重新读取槽位，实际八槽贴装/片选仍待验收。
-- B2通过0004通知testerId=1～21，成功配置后IP为`192.168.210.(10*testerId+siteId)`，PC结果siteId使用同一槽位字符串。不同编号/槽位动态切换，但已有PC连接或测试/电源在途则整包busy；同IP不重配。掩码255.255.255.0、网关0.0.0.0，RAM保存、不写FRU；首次配置前保留本地192.168.1.201，正式多板上线仍须处理默认IP冲突隔离。见`../test/doc/b2_spi_integration_20261020.md`；本轮仅离线/构建通过，未实板验收。
+- B2通过0004通知testerId=1～21，成功配置后IP为`192.168.210.(10*testerId+siteId)`，PC结果siteId使用同一槽位字符串。不同编号/槽位动态切换，但已有PC连接或测试/电源在途则整包busy；同IP不重配。掩码255.255.255.0、网关0.0.0.0，RAM保存、不写FRU。首次配置前使用 `B1_TEST_IP` 的本地地址，正式多板上线仍须处理默认IP冲突隔离。见`../test/doc/b2_spi_integration_20261020.md`；本轮仅离线/构建通过，未实板验收。
 - Build with `.\tools\dev.ps1 build`; run `.\tools\dev.ps1 check` before commit.
 
 ## TCP单客户端连接准入

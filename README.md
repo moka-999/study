@@ -33,7 +33,7 @@ PC双方发送Seq独立递增、ServiceID固定0的合同已接入：每条连�
 
 ## 构建与检查
 
-在 VS Code 打开本 B1 文件夹。修改 [board_network_config.h](Core/Inc/board_network_config.h) 中的 `#define B1_TEST_IP "192.168.1.201"`，保存后按 **Ctrl+Shift+B**。编译完成后，到 `build/standalone/Debug/` 取 `b1.elf` 和 `b1.bin`。本地使用 /24，网关为同网段的 .1，端口为 8888。
+在 VS Code 打开本 B1 文件夹。调试地址由 `B1_TEST_IP` 指定，默认 `192.168.1.205`。修改并保存后按 **Ctrl+Shift+B**，在 `build/standalone/Debug/` 取 `b1.elf` 和 `b1.bin`。本地使用 /24，网关为同网段的 .1，端口为 8888。[网络配置](Core/Inc/board_network_config.h)
 
 ```powershell
 .\tools\dev.ps1 check
@@ -41,6 +41,8 @@ PC双方发送Seq独立递增、ServiceID固定0的合同已接入：每条连�
 ```
 
 产物为`build/standalone/Debug/b1.elf`、`b1.bin`、`b1.manifest.json`及76字节`b1.version.bin`；可选Release。build/check不操作设备，flash才连接并复位MCU。
+
+默认使用 `B1_RK_TIMING_ENABLE=0` 和 `B1_RK_FREQ_ENABLE=1`。MCU 跳过普通时序设置，RK 查询 `0x35` 时回复本轮 Freq。AD7124 使用 AVDD 参考，默认按 3355 mV 换算。[RK 开关配置](Core/Inc/board_rk_config.h) · [ADC 配置](Core/Inc/board_adc_config.h) · [开关说明与离线验证](docs/rk_timing_switches_20261117.md)
 
 批量构建时也可显式覆盖末段。以下示例使用板级头的默认网段：
 
@@ -110,4 +112,4 @@ USART1、USART2当前均为115200/8N1、无流控（RK调试端实际波特率�
 - [PC协议目标框架](docs/protocol/pc/pc_tcp_protocol_spec.md)
 - [RK当前实现基线与差异](docs/protocol/rk/implementation_baseline.md)
 
-首次B2配置前使用本地测试IPv4 `192.168.1.201/24`；收到testerId=1～21后按槽位siteId=1～8切换到`192.168.210.(10*testerId+siteId):8888`。不同IP在PC已连接或测试/电源在途时整包回busy，同IP不重配；断电后需重新通知。八板同时上线前仍须隔离默认地址冲突。现工程PHY型号标记仍为YT8512H，与先前确认的YT8512C需核对BOM/芯片ID；不以编译通过代替型号和硬件确认。
+首次B2配置前使用 `B1_TEST_IP` 指定的本地测试地址。收到testerId=1～21后按槽位siteId=1～8切换到`192.168.210.(10*testerId+siteId):8888`。不同IP在PC已连接或测试/电源在途时整包回busy，同IP不重配；断电后需重新通知。八板同时上线前仍须隔离默认地址冲突。现工程PHY型号标记仍为YT8512H，与先前确认的YT8512C需核对BOM/芯片ID；不以编译通过代替型号和硬件确认。

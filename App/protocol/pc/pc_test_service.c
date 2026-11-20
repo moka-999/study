@@ -7,6 +7,7 @@
 #include "rk_task_control.h"
 #include "result_led.h"
 #include "b2_service.h"
+#include "board_rk_config.h"
 #if defined(B1_RK_UART)
 #include "monitor_task.h"
 #include "board_network_config.h"
@@ -226,6 +227,19 @@ const cJSON *pc_test_service_timing_parameters(void)
     return s_test.timing_parameters;
 }
 
+/* 开关只改变本轮执行副本；保留PC原文和解析校验，频率复用比较也使用实际目标。 */
+static pc_timing_parameters_t effective_timing(const pc_timing_parameters_t *requested)
+{
+    pc_timing_parameters_t timing = *requested;
+#if !B1_RK_TIMING_ENABLE
+    timing.present = 0U;
+#endif
+#if !B1_RK_FREQ_ENABLE
+    timing.frequency = -1;
+#endif
+    return timing;
+}
+
 /* 在真正投递算法之前才开启采样统计；队列失败时收回窗口，不自动重发。 */
 static const char *queue_test(const rk_request_t *request)
 {
@@ -284,8 +298,9 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
     const rk_command_descriptor_t *algorithm = rk_command_find_by_name(start->algorithm_name);
     if (!algorithm || algorithm->category != kind->category)
         return status_response(request_command, sequence, start->algorithm_index, "notSupported", response);
-    /* 外部已启动模式不能重新进入DDR初始化，不静默忽略PC要求的启动频率。 */
-    if (start->external_ready && start->timing.frequency >= 0)
+    pc_timing_parameters_t rk_timing = effective_timing(&start->timing);
+    /* 外部模式不重新训练；仅在Freq开关启用时拒绝非负启动频率。 */
+    if (start->external_ready && rk_timing.frequency >= 0)
         return status_response(request_command, sequence, start->algorithm_index, "invalidState", response);
     fru_info_t fru;
     if (pc_tester_info_load(&fru) != 0)
@@ -313,20 +328,20 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
         if (pc_boot_mode_parse(start->boot_mode, &target.boot_mode) != 0)
             error = "invalidArgument";
         else error = pc_power_service_start(PC_POWER_PREPARE_TEST, &target,
-            start->reboot || start->timing.frequency != s_last_frequency);
+            start->reboot || rk_timing.frequency != s_last_frequency);
         preparing = error == NULL;
         booting = preparing && pc_power_service_diagnostic()->phase != PC_POWER_DONE;
     } else
 #else
     /* 模拟电源时也只按查询回复Freq；本次还要发普通时序才等真实SPL心跳。 */
-    if (!start->external_ready && start->timing.frequency >= 0) {
+    if (!start->external_ready && rk_timing.frequency >= 0) {
         booting = 1U;
-        ready_required = start->timing.present != 0U;
+        ready_required = rk_timing.present != 0U;
     } else
 #endif
     {
-        if (start->timing.present) {
-            error = queue_timing(&start->timing, &cursor, cookie);
+        if (rk_timing.present) {
+            error = queue_timing(&rk_timing, &cursor, cookie);
             inflight = error == NULL;
         } else error = queue_test(&request);
     }
@@ -351,16 +366,16 @@ pc_dispatch_result_t pc_test_service_start(uint16_t request_command, const pc_te
     s_test.slt = 0U;
     s_test.discarded = 0U;
     s_test.pending = request;
-    s_test.timing = start->timing;
+    s_test.timing = rk_timing;
     s_test.timing_cursor = cursor;
     s_test.timing_inflight = inflight;
     s_test.configuring = inflight || booting;
     s_test.report_prepared = preparing;
-    s_test.check_frequency_tx = booting && start->timing.frequency >= 0;
+    s_test.check_frequency_tx = booting && rk_timing.frequency >= 0;
     s_test.ready_required = ready_required;
     s_test.startup_since_ms = ready_required ? HAL_GetTick() : 0U;
-    if (!start->external_ready) s_last_frequency = start->timing.frequency;
-    if (booting) rk_link_frequency_begin(cookie, start->timing.frequency);
+    if (!start->external_ready) s_last_frequency = rk_timing.frequency;
+    if (booting) rk_link_frequency_begin(cookie, rk_timing.frequency);
     if (ready_required) (void)rk_link_ready_begin(cookie);
     pc_trace_start(request_command, start, s_test.name, cookie);
     cJSON_Delete(s_test.timing_parameters);
@@ -380,6 +395,7 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     /* 正式PC流程必须保持原连接；独占IP模式仅供串口调试。 */
     return slt_status_response(sequence, "failed", "notSupported", response);
 #endif
+    pc_timing_parameters_t rk_timing = effective_timing(&start->timing);
     fru_info_t fru;
     if (pc_tester_info_load(&fru) != 0)
         return slt_status_response(sequence, "failed", "flashError", response);
@@ -420,13 +436,13 @@ pc_dispatch_result_t pc_test_slt_start(const pc_test_start_view_t *start,
     s_test.slt_off_started = s_test.slt_off_done = s_test.slt_error_reported = 0U;
     s_test.slt_error = NULL;
     s_test.cookie = cookie;
-    s_test.timing = start->timing;
+    s_test.timing = rk_timing;
     s_test.timing_cursor = s_test.timing_inflight = 0U;
     s_test.configuring = s_test.report_prepared = 1U;
-    s_test.check_frequency_tx = start->timing.frequency >= 0;
-    s_test.ready_required = start->timing.present != 0U;
-    s_last_frequency = start->timing.frequency;
-    rk_link_frequency_begin(cookie, start->timing.frequency);
+    s_test.check_frequency_tx = rk_timing.frequency >= 0;
+    s_test.ready_required = rk_timing.present != 0U;
+    s_last_frequency = rk_timing.frequency;
+    rk_link_frequency_begin(cookie, rk_timing.frequency);
     if (s_test.ready_required) (void)rk_link_ready_begin(cookie);
     pc_trace_start(PC_COMMAND_SLT_START, start, s_test.name, cookie);
     cJSON_Delete(s_test.timing_parameters);

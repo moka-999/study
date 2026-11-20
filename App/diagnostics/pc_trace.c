@@ -7,6 +7,7 @@
 #include "ddr_power.h"
 #include "protocol_trace.h"
 #include "log_console.h"
+#include "board_rk_config.h"
 #include <stdio.h>
 
 static uint32_t s_connection;
@@ -98,6 +99,8 @@ void pc_trace_start(uint16_t cmd, const pc_test_start_view_t *start, const char 
     trace_line("PC RX", "cmd=%04X type=%s test=%s idx=%s cookie=%lu reboot=%u boot=%s Freq=%s%s timingCount=%u",
                cmd, start->algorithm_type, name, idx, (unsigned long)cookie, start->reboot,
                start->external_ready ? "external" : start->boot_mode, frequency < 0 ? "-" : "", value, count);
+    trace_line("RK CONFIG", "cookie=%lu timingEnable=%u freqEnable=%u",
+               (unsigned long)cookie, (unsigned)B1_RK_TIMING_ENABLE, (unsigned)B1_RK_FREQ_ENABLE);
     if (!start->external_ready)
         trace_line("PC RX", "cookie=%lu power=%s target_mV=%u/%u/%u", (unsigned long)cookie,
                    start->memory_type, start->target_mv[DDR_RAIL_VDD1], start->target_mv[DDR_RAIL_VDD2],
