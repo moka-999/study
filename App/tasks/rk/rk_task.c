@@ -11,6 +11,7 @@
 #include "state_machine.h"
 #include "rk_link.h"
 #include "rk_task_control.h"
+#include "rk_timing_readback.h"
 #include "rk_idd.h"
 #include "rk_trace.h"
 #include "protocol_trace.h"
@@ -30,6 +31,13 @@
 #define RK_TIMING_GAP_MS 20U
 static TickType_t s_timing_sent_tick;
 static uint8_t s_timing_gap;
+
+/* 最后一帧设置入队后，让SPL完成处理，再启动读回或交给EDK。 */
+static int timing_gap_active(void)
+{
+    return s_timing_gap && (TickType_t)(xTaskGetTickCount() - s_timing_sent_tick) <
+                           pdMS_TO_TICKS(RK_TIMING_GAP_MS);
+}
 
 typedef struct {
     rk_request_t request;
@@ -51,10 +59,24 @@ typedef enum { RK_STOP_NONE = 0, RK_STOP_REQUESTED, RK_STOP_READY } rk_stop_stat
 static volatile rk_stop_state_t s_stop;
 
 void rk_task_stop_begin(void) { s_stop = RK_STOP_REQUESTED; }
+int rk_task_stopping(void) { return s_stop != RK_STOP_NONE; }
 int rk_task_stop_ready(void) { return s_stop == RK_STOP_READY; }
 void rk_task_stop_end(void) { if (s_stop == RK_STOP_READY) s_stop = RK_STOP_NONE; }
 /* 仅RK任务写；volatile保留调试器可读的s_rx_diagnostics符号，不逐帧打印日志。 */
 static volatile rk_rx_diagnostics_t s_rx_diagnostics;
+
+tlv_sm_t *rk_task_spl_stream(void)
+{
+    static tlv_sm_t stream;
+    return &stream;
+}
+
+/* RK回包可携带它最近收到的任一MCU流水号。只有整帧成功入队才扩大窗口。 */
+void rk_link_note_queued(uint64_t seq)
+{
+    if (s_pending.waiting) s_pending.last_tx_sequence = seq;
+    rk_timing_readback_note_queued(seq);
+}
 
 int rk_link_get_rx_diagnostics(rk_rx_diagnostics_t *out)
 {
@@ -65,6 +87,18 @@ int rk_link_get_rx_diagnostics(rk_rx_diagnostics_t *out)
     *out = s_rx_diagnostics;
     taskEXIT_CRITICAL();
     return 0;
+}
+
+int rk_link_progress_percent(uint32_t cookie, uint16_t command_id)
+{
+    int percent = -1;
+    taskENTER_CRITICAL();
+    if (s_pending.waiting && s_pending.progress_valid && s_pending.request.cookie == cookie &&
+        s_pending.request.command_id == command_id) {
+        percent = s_pending.progress_percent;
+    }
+    taskEXIT_CRITICAL();
+    return percent;
 }
 
 /* 记录拒绝时的窗口及原因；只读取pending，不改变结果匹配或队列交付。 */
@@ -161,8 +195,10 @@ static void accept_frame(const tlv_frame_t *frame)
         uint32_t token;
         int64_t value = rk_link_frequency_get(&token);
         uint8_t wire[TLV_FREQUENCY_FRAME_SIZE];
-        int length = tlv_pack_frequency(value, rk_link_next_sequence(), wire, sizeof(wire));
+        uint64_t seq = rk_link_next_sequence();
+        int length = tlv_pack_frequency(value, seq, wire, sizeof(wire));
         int success = length == TLV_FREQUENCY_FRAME_SIZE && uart_send(0, wire, (uint16_t)length) == 0;
+        if (success) rk_link_note_queued(seq);
         rk_link_frequency_note_tx(token, success);
         rk_trace_received(frame);
         rk_trace_sent(RK_CMD_QUERY_FREQUENCY, wire, length, success);
@@ -174,14 +210,18 @@ static void accept_frame(const tlv_frame_t *frame)
 #endif
     /* 普通心跳无需有在途算法；启动编排等待它之后才会投递测试请求。 */
     // 启动就绪模块只检查普通心跳；双TLV进度和最终结果在下方分别处理。
-    rk_link_ready_note_rx(frame);
     // 空指针直接返回；零TLV或兼容的单个0x0000空Value心跳不进入结果处理。
     if (frame == NULL || frame->count == 0U ||
         (frame->count == 1U && frame->units[0].type == TLV_TYPE_HEARTBEAT &&
          frame->units[0].data_len == 0U)) {
-        if (frame) trace_count(TRACE_RK_HEARTBEAT, TRACE_RX);
+        if (frame) {
+            rk_timing_readback_heartbeat_rx(frame->sequence);
+            rk_link_ready_note_rx(frame);
+            trace_count(TRACE_RK_HEARTBEAT, TRACE_RX);
+        }
         return;
     }
+    if (rk_timing_readback_receive(frame)) return;
     // 如果当前没有等待的请求，记录拒绝原因并返回
     if (!s_pending.waiting) {
         note_rx_reject(RK_RX_REJECT_NO_PENDING, frame, 0U);
@@ -205,10 +245,13 @@ static void accept_frame(const tlv_frame_t *frame)
             //检查是否是当前的算法号
             note_rx_reject(RK_RX_REJECT_ALGORITHM, frame, report.result.command_id);
         } else {
-            rk_trace_progress(frame, s_pending.progress_valid, report.progress_percent);
+            uint8_t previous_valid = s_pending.progress_valid;
+            taskENTER_CRITICAL();
             s_pending.progress_percent = report.progress_percent;
             s_pending.progress_sequence = frame->sequence;
             s_pending.progress_valid = 1U;
+            taskEXIT_CRITICAL();
+            rk_trace_progress(frame, previous_valid, report.progress_percent);
         }
         return;
     }
@@ -247,6 +290,13 @@ static void process_request(void)
     if (s_stop != RK_STOP_NONE) return;
     // 先交付上轮结果，让pc任务取走
     deliver_result();
+    if (!timing_gap_active() && rk_timing_manual_write_poll()) {
+        s_timing_sent_tick = xTaskGetTickCount();
+        s_timing_gap = 1U;
+        return;
+    }
+    /* 手动查询走同一个UART任务，但不占用算法事务，也不推迟IDD采样或结果交付。 */
+    if (!timing_gap_active()) (void)rk_timing_readback_poll(RK_READBACK_MANUAL);
     // 如果上轮请求仍在等待中，检查是否超时
     if (s_pending.waiting) {
         if (s_pending.idd) {
@@ -282,10 +332,9 @@ static void process_request(void)
     // 没有在途等待后，仍须确认旧响应/恢复事件已交付且队列可用，才能取新请求。
     if (s_pending.delivery || s_pending.recovered ||
         rkRequestQueue == NULL || rkResponseQueue == NULL) return;
-    if (s_timing_gap) {
-        if ((TickType_t)(xTaskGetTickCount() - s_timing_sent_tick) < pdMS_TO_TICKS(RK_TIMING_GAP_MS)) return;
-        s_timing_gap = 0U;
-    }
+    if (timing_gap_active()) return;
+    s_timing_gap = 0U;
+    if (rk_timing_readback_poll(RK_READBACK_STARTUP)) return;
     //准备新的请求
     rk_request_t request;
     // 从队列中获取新的请求 并保存
@@ -329,7 +378,9 @@ static void process_request(void)
         finish_request(RK_RESPONSE_TX_FAILED);
         return;
     }
+    rk_link_note_queued(s_pending.sequence);
     if (timing) {
+        rk_timing_readback_note_write();
         s_timing_sent_tick = queued_at;
         s_timing_gap = 1U;
         finish_request(RK_RESPONSE_SENT);
@@ -345,6 +396,7 @@ static void process_request(void)
 static void process_power_off(void)
 {
     rk_idd_power_off();
+    rk_timing_readback_power_off();
     s_timing_gap = 0U;
     if (s_pending.waiting) {
         s_pending.waiting = 0U;
@@ -389,7 +441,8 @@ static void process_heartbeat(TickType_t *last_tick)
     int length = tlv_pack_heartbeat(sequence, wire, sizeof(wire));
     if (length == TLV_HEARTBEAT_FRAME_SIZE && uart_send(0, wire, (uint16_t)length) == 0) {
         rk_link_ready_note_tx(sequence);
-        if (s_pending.waiting) s_pending.last_tx_sequence = sequence;
+        rk_timing_readback_heartbeat_tx(sequence);
+        rk_link_note_queued(sequence);
         trace_count(TRACE_RK_HEARTBEAT, TRACE_TX);
     } else trace_count(TRACE_RK_HEARTBEAT, TRACE_ERROR);
 }
@@ -403,6 +456,11 @@ void rk_task_handoff_receive(const tlv_frame_t *frame)
 void rk_task_handoff_heartbeat(void)
 {
     static TickType_t last_tick;
+    if (s_stop == RK_STOP_NONE && pwr_ctrl_get_state() == PWR_CTRL_STATE_ON && !timing_gap_active()) {
+        /* 接管前的 SPL 探测阶段继续收发时序查询；发出跳转后该串口切给 EDK。 */
+        (void)rk_timing_readback_poll(RK_READBACK_MANUAL);
+        (void)rk_timing_readback_poll(RK_READBACK_STARTUP);
+    }
     process_heartbeat(&last_tick);
 }
 
@@ -411,11 +469,11 @@ void rk_task_handoff_heartbeat(void)
 int rk_task_handoff_idle(void)
 {
     taskENTER_CRITICAL();
-    int idle = !s_pending.waiting && !s_pending.delivery && !s_pending.recovered &&
+    int idle = s_stop == RK_STOP_NONE && !rk_timing_readback_busy() &&
+        !rk_timing_readback_manual_pending() &&
+        !s_pending.waiting && !s_pending.delivery && !s_pending.recovered &&
         rkRequestQueue && rkResponseQueue && uxQueueMessagesWaiting(rkRequestQueue) == 0U &&
-        uxQueueMessagesWaiting(rkResponseQueue) == 0U &&
-        (!s_timing_gap || (TickType_t)(xTaskGetTickCount() - s_timing_sent_tick) >=
-                          pdMS_TO_TICKS(RK_TIMING_GAP_MS));
+        uxQueueMessagesWaiting(rkResponseQueue) == 0U && !timing_gap_active();
     taskEXIT_CRITICAL();
     return idle;
 }
@@ -448,6 +506,7 @@ static int process_stop(tlv_sm_t *stream)
         !uart_tx_idle(UART_PORT_RK_PROTOCOL)) return 1;
     if (s_stop == RK_STOP_READY) return 1;
     rk_idd_power_off();
+    rk_timing_readback_cancel();
     while (xQueueReceive(rkRequestQueue, &s_pending.request, 0U) == pdTRUE) { }
     while (xQueueReceive(rkResponseQueue, &s_pending.response, 0U) == pdTRUE) { }
     memset(&s_pending, 0, sizeof(s_pending));
@@ -463,8 +522,8 @@ void StartRkTask(void *argument)
     (void)argument;
     // 初始化接收状态机和当前请求记录；请求/结果队列已由RTOS初始化代码创建。
     uint8_t buffer[UART_RX_BUF_SIZE];
-    tlv_sm_t stream;
-    tlv_sm_init(&stream);
+    tlv_sm_t *stream = rk_task_spl_stream();
+    tlv_sm_init(stream);
 
     memset(&s_pending, 0, sizeof(s_pending));
     rk_idd_init();
@@ -473,7 +532,7 @@ void StartRkTask(void *argument)
 
     //循环读取
     for (;;) {
-        if (process_stop(&stream)) {
+        if (process_stop(stream)) {
             last_heartbeat = xTaskGetTickCount();
             task_watchdog_progress(TASK_WATCHDOG_RK);
             vTaskDelay(pdMS_TO_TICKS(10U));
@@ -482,7 +541,6 @@ void StartRkTask(void *argument)
         /* 正式SLT和调试模式共用后级接管；进入EDK后停TLV，仍由本任务消费UART。 */
         if (handoff_mcu_rk_poll()) {
             reject_handoff_requests();
-            tlv_sm_reset(&stream);
             last_heartbeat = xTaskGetTickCount();
             task_watchdog_progress(TASK_WATCHDOG_RK);
             handoff_mcu_rk_wait();
@@ -491,7 +549,7 @@ void StartRkTask(void *argument)
 #if defined(B1_RK_UART)
         // 电源状态不是ON时重置接收状态、处理等待请求，每轮最多丢弃8个接收块。
         if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON && !startup_rx_allowed()) {
-            tlv_sm_reset(&stream);
+            tlv_sm_reset(stream);
             process_power_off();
             for (unsigned block = 0U; block < RK_RX_BATCH_MAX; ++block) {
                 if (uart_poll_rx(0, buffer, sizeof(buffer)) == 0) break;
@@ -510,7 +568,7 @@ void StartRkTask(void *argument)
             if (length == 0) break;
             //数据不连续，重置状态机
             if (length == UART_RX_GAP) {
-                tlv_sm_reset(&stream);
+                tlv_sm_reset(stream);
                 handoff_mcu_rk_reset_probe();
                 continue;
             }
@@ -518,14 +576,14 @@ void StartRkTask(void *argument)
             for (int i = 0; i < length; ++i) {
                 if (handoff_mcu_rk_observe(buffer[i])) {
                     edk_seen = 1;
-                    tlv_sm_reset(&stream);
+                    tlv_sm_reset(stream);
                     continue;
                 }
-                if (tlv_sm_feed(&stream, buffer[i]) == 1) {
+                if (tlv_sm_feed(stream, buffer[i]) == 1) {
                     handoff_mcu_rk_reset_probe();
                     //状态机已接收完整帧，尝试解析并交付
                     tlv_frame_t frame;
-                    if (tlv_sm_get_frame(&stream, &frame) < 0) {
+                    if (tlv_sm_get_frame(stream, &frame) < 0) {
                         // 解包失败时记录拒绝原因，继续处理当前接收块的下一个字节。
                         note_rx_reject(RK_RX_REJECT_TLV, NULL, 0U);
                         continue;
@@ -542,7 +600,7 @@ void StartRkTask(void *argument)
             continue;
         }
         //半帧是否超时
-        (void)tlv_sm_check_timeout(&stream, RK_BYTE_TIMEOUT_MS);
+        (void)tlv_sm_check_timeout(stream, RK_BYTE_TIMEOUT_MS);
         // 推进请求发送、等待时限和内部结果交付。
 #if defined(B1_RK_UART)
         if (pwr_ctrl_get_state() == PWR_CTRL_STATE_ON) process_request();

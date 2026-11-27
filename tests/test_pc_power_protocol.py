@@ -69,9 +69,6 @@ def main() -> None:
     monitor_task = (ROOT / "App/tasks/common/monitor_task.c").read_text(
         encoding="utf-8"
     )
-    monitor_driver = (ROOT / "HAL_Drv/memory_monitor.c").read_text(
-        encoding="utf-8"
-    )
     power_control = (ROOT / "HAL_Drv/pwr_ctrl.c").read_text(encoding="utf-8")
     ddr_source = (ROOT / "HAL_Drv/ddr_power.c").read_text(encoding="utf-8")
     led_source = (ROOT / "Core/Src/result_led.c").read_text(encoding="utf-8")
@@ -171,8 +168,8 @@ def main() -> None:
     require("pwr_ctrl_apply_ddr_steps(steps)" in monitor_task and
             "ready强制门待双方业务握手冻结" in monitor_task,
             "ON状态三轨调压业务路径或RK ready待办缺失")
-    require("* 101" in monitor_driver and "(scaled + 50) / 100" in monitor_driver,
-            "AD7124上报电压缺少B1前端1.01换算")
+    require('add_i32_array(body, "voltageMv", snapshot.memory.voltage_mv)' in dispatch,
+            "0602应直接上报AD7124快照中的三路整数mV")
     require(power_control.index("ddr_power_build_step_targets") <
             power_control.index("ddr_power_set(DDR_RAIL_MASK_ALL"),
             "调压必须先纯校验，非法JSON不能触发FAULT关断")

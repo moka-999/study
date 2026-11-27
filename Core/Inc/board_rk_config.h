@@ -13,6 +13,9 @@
 #define B1_RK_FREQ_ENABLE 1
 #endif
 
+/* DDRbin 等待上限，单位 ms。冷启动从启动供电时起算，复用运行中的 RK 从首项受理起算。 */
+#define B1_RK_CHIP_INFO_TIMEOUT_MS 15000U
+
 #if (B1_RK_TIMING_ENABLE != 0 && B1_RK_TIMING_ENABLE != 1) || \
     (B1_RK_FREQ_ENABLE != 0 && B1_RK_FREQ_ENABLE != 1)
 #error "RK timing and frequency switches must be 0 or 1"

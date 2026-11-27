@@ -182,8 +182,9 @@ def main() -> int:
     ethernet = (ROOT / "LWIP/Target/ethernetif.c").read_text(encoding="utf-8")
     ethernet_board = (ROOT / "Core/Src/ethernet_board.c").read_text(encoding="utf-8")
     interrupts = (ROOT / "Core/Src/stm32h7xx_it.c").read_text(encoding="utf-8")
-    require("configTOTAL_HEAP_SIZE                    ((size_t)131072)" in freertos_config,
-            "FreeRTOS heap must remain 128KiB")
+    require("configTOTAL_HEAP_SIZE                    ((size_t)196608)" in freertos_config and
+            "FREERTOS.configTOTAL_HEAP_SIZE=196608" in ioc,
+            "B1 和 CubeMX 应使用相同的 192 KiB FreeRTOS 堆")
     require("#define WITH_RTOS 1" in lwip_options,
             "LwIP must use its FreeRTOS sys_arch port")
     require("osKernelInitialize()" in source and "osKernelStart()" in source and
@@ -241,8 +242,8 @@ def main() -> int:
     spi_source = (ROOT / "HAL_Drv/spi_hw.c").read_text(encoding="utf-8")
     require(all(value in ad_header for value in (
         "AD7124_ID_AD7124_4_STD", "AD7124_ID_AD7124_4_B",
-        "AD7124_ID_AD7124_4_REV_E", "AD7124_DIV_100R_10K")),
-            "AD7124-4 ID白名单或B1分压系数缺失")
+        "AD7124_ID_AD7124_4_REV_E")),
+            "AD7124-4 ID白名单缺失")
     require("AD7124_AIN_AIN0, AD7124_AIN_AIN2, AD7124_AIN_AIN4" in ad_source and
             "AD7124_AIN_AIN1, AD7124_AIN_AIN3, AD7124_AIN_AIN5" in ad_source and
             "AD7124_CH_AINM(b1_ainm[ch])" in ad_source,
@@ -331,8 +332,6 @@ def main() -> int:
             "PG11必须只作防御性TPS总闸，且不能替代PC6完成可靠关断")
     require("memory_monitor_configure" in monitor_source and "valid_mask" in monitor_source,
             "TPS/PAC/AD未组合为可部分有效的监测快照")
-    require("* 101" in monitor_source and "(scaled + 50) / 100" in monitor_source,
-            "B1 AD7124电压快照必须应用100R+10k前端的1.01换算")
     require("ddr_power_init();" not in source and "memory_monitor_init" not in source and
             "pwr_ctrl_request_on" not in source,
             "B1启动期禁止自动访问采样器件或打开DDR电源")
@@ -492,7 +491,8 @@ def main() -> int:
             "invalid_frame:" in rk_frame,
             "RK必须传播解包错误并保留短帧/数量/整帧原子拒绝保护")
     require(rk_task.count("rk_link_next_sequence()") == 3 and
-            "tlv_pack_frequency(value, rk_link_next_sequence()" in rk_task and
+            re.search(r"uint64_t (\w+) = rk_link_next_sequence\(\);\s*"
+                      r"int length = tlv_pack_frequency\(value, \1,", rk_task) and
             "process_heartbeat(&last_heartbeat);" in rk_task,
             "RK命令、心跳与启动频率回复必须通过独立序号入口分配，不借用PC Seq")
     require(not (ROOT / "App/tasks/rk/hb_task.c").exists() and
@@ -502,7 +502,7 @@ def main() -> int:
 
     task_paths = (
         "App/tasks/pc/tcp_task.c", "App/tasks/rk/rk_task.c",
-        "App/tasks/rk/rk_link.c",
+        "App/tasks/rk/rk_link.c", "App/tasks/rk/rk_timing_readback.c",
         "App/tasks/common/monitor_task.c",
         "App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_state_machine.c",
         "App/protocol/pc/pc_tester_info.c", "App/protocol/pc/pc_test_service.c",
@@ -582,16 +582,22 @@ def main() -> int:
             "extern uart_if_t uart2_if;" in interfaces and "extern uart_if_t uart1_if;" in interfaces and
             "uart_tx_mutex_init();" in uart_router and "uart_tx_isr_attach();" in uart_router,
             "B1 UART实例必须归属板级接口，并在启动接收前建立TX锁和中断钩子")
-    require('section(".uart_dma")' in uart_router and
-            re.search(r"\.uart_dma\s*\(NOLOAD\)\s*:\s*\{[^}]*\}\s*>\s*RAM\b", linker) and
+    require(all(f'section(".{section}")' in uart_router and
+                re.search(rf"\.{section}\s*\(NOLOAD\)\s*:\s*\{{[^}}]*\}}\s*>\s*RAM\b", linker)
+                for section in ("uart_dma", "uart_rx_ring")) and
             ".lwip_heap" in linker and "0x30005000" in linker,
-            "UART DMA必须放AXI RAM，且显式预留D2中的固定LwIP堆防重叠")
+            "UART DMA和协议软件环必须放AXI RAM，且显式预留D2中的固定LwIP堆防重叠")
+    uart_dma_config = (ROOT / "b1.ioc").read_text(encoding="utf-8")
     require(all(f"DMA_REQUEST_{port}_RX" in source for port in ("UART4", "USART2", "USART1")) and
             "DMA1_Stream2_IRQHandler" in interrupts and "USART1_IRQHandler" in interrupts and
-            "DMA_NORMAL" in source and "HAL_UARTEx_ReceiveToIdle_DMA" in uart_hw and
+            "uart->Instance == USART1 ? DMA_NORMAL : DMA_CIRCULAR" in source and
+            "Dma.UART4_RX.0.Mode=DMA_CIRCULAR" in uart_dma_config and
+            "Dma.USART2_RX.1.Mode=DMA_CIRCULAR" in uart_dma_config and
+            "Dma.USART1_RX.2.Mode=DMA_NORMAL" in uart_dma_config and
+            "HAL_UARTEx_ReceiveToIdle_DMA" in uart_hw and
             "DMA_IT_HT" in uart_hw and "HAL_UART_RXEVENT_HT" in uart_router and
             "HAL_DMA_IRQHandler" in interrupts and "HAL_UART_IRQHandler" in interrupts,
-            "B1 UART RX必须使用NORMAL DMA+IDLE，并忽略HT重复前缀")
+            "B1 UART4协议和USART2日志须连续接收，USART1控制台使用NORMAL DMA")
     console = (ROOT / "Core/Src/log_console.c").read_text(encoding="utf-8")
     require("uart == &huart4 ? pdMS_TO_TICKS(UART_TX_LOCK_TIMEOUT_MS) : 0U" in uart_hw and
             "uart->Init.Mode = UART_MODE_TX_RX;" in source and "huart2.TxISR = uart_tx_drain;" in uart_hw and
@@ -655,7 +661,7 @@ def main() -> int:
     print("Safe defaults, SPI2 slave mode 0, SPI4 mode 3 and YT8512H PASS")
     print("Result LED states, 500ms scheduler, active-high PG0-PG5 map and boundary PASS")
     print("W25Q256 32MiB layout, 4-byte QSPI, version/FRU and manifest contract PASS")
-    print("FreeRTOS 128KiB heap, LwIP IPv4, YT8512H reset and UID MAC contract PASS")
+    print("FreeRTOS 192KiB heap, LwIP IPv4, YT8512H reset and UID MAC contract PASS")
     print("AD7124-4 driver, SPI4-only binding and conservative mode-3 clock PASS")
     print("MCP4725 Boot map, Fast Write and I2C2-only binding contract PASS")
     print("TPS/PAC/AD monitor, pwr_ctrl and all native DDR steps contract PASS")

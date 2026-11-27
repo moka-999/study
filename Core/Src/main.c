@@ -344,7 +344,7 @@ static void uart_init(UART_HandleTypeDef *uart, USART_TypeDef *instance)
 }
 
 /*
- * UART4协议、USART2双向调试、USART1本地控制台各配独立NORMAL RX DMA。
+ * UART4协议和USART2日志连续使用循环DMA；USART1本地命令使用NORMAL。
  * RX DMA在调度器启动后的默认任务中才开启，避免FromISR早于内核运行。
  * 三路TX各用独立软件环+TXE中断，不占用DMA Stream。
  */
@@ -358,7 +358,7 @@ static void uart_rx_dma_init(UART_HandleTypeDef *uart, DMA_HandleTypeDef *dma,
     dma->Init.MemInc = DMA_MINC_ENABLE;
     dma->Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
     dma->Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    dma->Init.Mode = DMA_NORMAL;
+    dma->Init.Mode = uart->Instance == USART1 ? DMA_NORMAL : DMA_CIRCULAR;
     dma->Init.Priority = DMA_PRIORITY_HIGH;
     dma->Init.FIFOMode = DMA_FIFOMODE_DISABLE;
     require_ok(HAL_DMA_Init(dma));

@@ -86,7 +86,7 @@ typedef struct {
 
 /* session首次必须零初始化。仅IDLE受理；0成功/-1参数或状态错误，拒绝不改旧事务。
  * points由调用方持有，容量1..5120；推荐5120项共81920字节，不能放任务栈。
- * 本模块不malloc、不清整块缓冲；实际启用时应静态预留RAM，不挤占128KiB RTOS堆。
+ * 采样缓冲静态预留 RAM，采样时无需动态分配或清空整块缓冲。
  */
 int idd_session_begin(idd_session_t *session, uint16_t command,
                       idd_session_point_t *points, uint32_t capacity);

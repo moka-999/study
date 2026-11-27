@@ -7,6 +7,8 @@
 #include "main.h"
 #include <string.h>
 
+#define B2_LINK_TIMEOUT_MS 3000U
+
 static b2_link_diagnostics_t s_diagnostics;
 /* 固定缓冲不占任务栈，不进行每帧malloc；只保留上一请求及应答，不做历史重放表。 */
 static b2_state_machine_t s_parser;
@@ -16,6 +18,11 @@ static size_t s_previous_length;
 static uint64_t s_previous_sequence;
 static uint8_t s_response[B2_RESPONSE_SIZE];
 static size_t s_response_length;
+
+static int link_expired(uint32_t now_ms, uint32_t last_ms)
+{
+    return (uint32_t)(now_ms - last_ms) >= B2_LINK_TIMEOUT_MS;
+}
 
 static void handle_packet(void)
 {
@@ -31,8 +38,14 @@ static void handle_packet(void)
         return;
     }
     taskENTER_CRITICAL();
+    uint32_t now = HAL_GetTick();
+    if (!s_diagnostics.online || link_expired(now, s_diagnostics.last_valid_ms)) {
+        ++s_diagnostics.session;
+        /* B2重新上线可从原序号开始，上一会话的应答不能代替本次状态更新。 */
+        s_previous_length = 0U;
+    }
     ++s_diagnostics.valid_requests;
-    s_diagnostics.last_valid_ms = HAL_GetTick();
+    s_diagnostics.last_valid_ms = now;
     s_diagnostics.online = 1U;
     taskEXIT_CRITICAL();
     //如果收到的请求与上一请求相同，则直接返回上一应答；否则调用业务处理函数
@@ -70,7 +83,7 @@ void StartB2Task(void *argument)
         if (b2_spi_receive(&s_packet)) handle_packet();
         taskENTER_CRITICAL();
         // 3秒没有结构完整、命令可识别的帧则离线
-        if ((uint32_t)(HAL_GetTick() - s_diagnostics.last_valid_ms) >= 3000U)
+        if (link_expired(HAL_GetTick(), s_diagnostics.last_valid_ms))
             s_diagnostics.online = 0U;
         taskEXIT_CRITICAL();
         /* IRQ已收存CS快照；任务不忙轮询SPI寄存器，1ms让出CPU给RK与采样。 */
@@ -84,6 +97,6 @@ void b2_link_diagnostics(b2_link_diagnostics_t *out)
     taskENTER_CRITICAL();
     *out = s_diagnostics;
     /* 业务应答可能仍在排队，读取时也按时间计算，不能把阻塞前的在线位当作实时值。 */
-    if ((uint32_t)(HAL_GetTick() - out->last_valid_ms) >= 3000U) out->online = 0U;
+    if (link_expired(HAL_GetTick(), out->last_valid_ms)) out->online = 0U;
     taskEXIT_CRITICAL();
 }

@@ -4,7 +4,7 @@
 /* 0：未焊W25，Boot跳过器件、PC使用下方常量；1：Boot维护FRU，App只读。
  * 当前验板目标未焊W25，默认0；已装器件板须改为1并重编完整Boot＋App。 */
 #ifndef BOARD_W25_PRESENT
-#define BOARD_W25_PRESENT 0
+#define BOARD_W25_PRESENT 1
 #endif
 #if BOARD_W25_PRESENT != 0 && BOARD_W25_PRESENT != 1
 #error "BOARD_W25_PRESENT只能为0或1"

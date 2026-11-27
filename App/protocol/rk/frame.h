@@ -29,7 +29,16 @@
 #define TLV_TYPE_PARAM_ACTION 0x101AU /* 独立动作：tag26、1字节bool，1进入、0退出。 */
 #define TLV_TYPE_TIMING_VALUE 0x701BU /* SPL时序设置参数，4字节u32LE。 */
 #define TLV_TYPE_FREQUENCY_VALUE 0x801CU /* 启动频率查询的应答，8字节int64LE；负数保留RK默认。 */
+#define TLV_TYPE_TIMING_INDEX    0x3021U /* 回读选择的时序，1字节。 */
+#define TLV_TYPE_TIMING_CH0      0x7022U /* 四个连续标签分别为CH0..3，值均为u32LE。 */
+#define TLV_TYPE_TIMING_CH1      0x7023U
+#define TLV_TYPE_TIMING_CH2      0x7024U
+#define TLV_TYPE_TIMING_CH3      0x7025U
 #define RK_CMD_QUERY_FREQUENCY 0x35U
+#define RK_CMD_SET_TIMING_BASE 0x25U /* 设置命令 = 基值 + 回读索引，跳过保留索引2。 */
+#define RK_CMD_QUERY_TIMING    0x43U
+#define RK_TIMING_INDEX_COUNT 16U /* 索引0..15，2保留，不查询频率。 */
+#define RK_TIMING_CHANNEL_COUNT 4U
 
 /* 容量单位均为字节。线上Length只统计TLV区，不能与整帧长度混用。 */
 #define TLV_PAYLOAD_MIN       4U     /* 非空TLV区下限；零TLV心跳另允许Length=0，1..3非法。 */
@@ -42,6 +51,7 @@
 #define TLV_CMD_FRAME_SIZE    22U    /* 无参数命令：外层16+TLV头4+CmdID2。 */
 #define TLV_IDD_ACTION_FRAME_SIZE 27U /* 编号命令22字节再加101A的4字节头和1字节Value。 */
 #define TLV_TIMING_FRAME_SIZE 30U
+#define TLV_TIMING_QUERY_FRAME_SIZE 27U /* 命令22字节，加3021的头和值。 */
 #define TLV_FREQUENCY_FRAME_SIZE 34U
 #define TLV_HEARTBEAT_FRAME_SIZE TLV_FRAME_MIN /* 本端普通心跳不附加任何TLV。 */
 
@@ -128,6 +138,18 @@ int tlv_pack_idd_action(uint16_t cmd, uint8_t action, uint64_t seq,
  */
 int rk_is_timing_command(uint16_t cmd);
 int tlv_pack_timing(uint16_t cmd, uint32_t value, uint64_t seq, uint8_t *out, uint16_t out_max);
+/* 返回0x43索引对应的时序名；2或越界均返回NULL。 */
+const char *rk_timing_index_name(uint8_t index);
+/* 组0x5000=0x43、0x3021=index。成功27字节；索引非法或空间不足返回0。 */
+int tlv_pack_timing_query(uint8_t index, uint64_t seq, uint8_t *out, uint16_t out_max);
+typedef struct {
+    uint32_t values[RK_TIMING_CHANNEL_COUNT];
+    uint8_t present; /* 位 0..3 分别表示收到 CH0..3，通道值为 0 也有效。 */
+} rk_timing_readback_t;
+
+/* 一帧须包含 0x43、指定索引以及 1..4 个不同通道。成功返回 0，失败返回 -1 并保留 out。 */
+int rk_timing_readback_decode(const tlv_frame_t *frame, uint8_t expected_index,
+                              rk_timing_readback_t *out);
 /* 回复启动查询：5001=0x35＋801C=int64LE；成功34字节，失败0，不把RK查询Seq回显。 */
 int tlv_pack_frequency(int64_t value, uint64_t seq, uint8_t *out, uint16_t out_max);
 /* 只认单个5000、2字节0x35查询；CRC须已由解包器验证，不使用算法Seq窗口。 */

@@ -38,6 +38,11 @@ static const rk_tlv_rule_t s_tlv_rules[] = {
     {TLV_TYPE_PARAM_ACTION,   1U,  1U,              RK_RESULT_FIELD_COUNT,          1U},
     {TLV_TYPE_TIMING_VALUE,   4U,  4U,              RK_RESULT_FIELD_COUNT,          0U},
     {TLV_TYPE_FREQUENCY_VALUE, 8U, 8U,              RK_RESULT_FIELD_COUNT,          0U},
+    {TLV_TYPE_TIMING_INDEX,   1U,  1U,              RK_RESULT_FIELD_COUNT,          0U},
+    {TLV_TYPE_TIMING_CH0,     4U,  4U,              RK_RESULT_FIELD_COUNT,          0U},
+    {TLV_TYPE_TIMING_CH1,     4U,  4U,              RK_RESULT_FIELD_COUNT,          0U},
+    {TLV_TYPE_TIMING_CH2,     4U,  4U,              RK_RESULT_FIELD_COUNT,          0U},
+    {TLV_TYPE_TIMING_CH3,     4U,  4U,              RK_RESULT_FIELD_COUNT,          0U},
 };
 
 /* 返回只读规则；NULL代表未知扩展类型，由上层决定是否消费。 */
@@ -69,7 +74,7 @@ static void write_be16(uint8_t *out, uint16_t value)
     out[0] = (uint8_t)(value >> 8);
     out[1] = (uint8_t)value;
 }
-/* 读取小端Value；只在已知结果规则校验后调用，length为1、2或8。 */
+/* 读取宽度已经校验的小端标量，length为1、2、4或8字节。 */
 static uint64_t read_le(const uint8_t *value, uint16_t length)
 {
     uint64_t result = 0U;
@@ -183,7 +188,7 @@ int tlv_pack_idd_action(uint16_t cmd, uint8_t action, uint64_t seq,
 
 int rk_is_timing_command(uint16_t cmd)
 {
-    return cmd >= 0x25U && cmd <= 0x34U && cmd != 0x27U;
+    return cmd >= RK_CMD_SET_TIMING_BASE && cmd <= 0x34U && cmd != 0x27U;
 }
 
 int tlv_pack_timing(uint16_t cmd, uint32_t value, uint64_t seq, uint8_t *out, uint16_t out_max)
@@ -197,6 +202,58 @@ int tlv_pack_timing(uint16_t cmd, uint32_t value, uint64_t seq, uint8_t *out, ui
     if (tlv_pack(&frame, TLV_TYPE_CMD, command, sizeof(command)) != 0 ||
         tlv_pack(&frame, TLV_TYPE_TIMING_VALUE, bytes, sizeof(bytes)) != 0) return 0;
     return tlv_pack_frame(&frame, seq, out, out_max);
+}
+
+const char *rk_timing_index_name(uint8_t index)
+{
+    /* RK的索引表按写延迟、读延迟排序；2保留，频率仍走独立的0x35。 */
+    static const char *const names[RK_TIMING_INDEX_COUNT] = {
+        "CASWriteLatency", "CASReadLatency", NULL, "tREFI", "tWR", "tRTP", "tRCD", "tRP",
+        "tRASmin", "tRASmax", "tWTR", "tRFCmin", "tFAW", "tCCD", "tRRD", "BL"
+    };
+    return index < RK_TIMING_INDEX_COUNT ? names[index] : NULL;
+}
+
+int tlv_pack_timing_query(uint8_t index, uint64_t seq, uint8_t *out, uint16_t out_max)
+{
+    if (!rk_timing_index_name(index) || !out || out_max < TLV_TIMING_QUERY_FRAME_SIZE) return 0;
+    tlv_frame_t frame;
+    frame_init(&frame);
+    const uint8_t command[] = {RK_CMD_QUERY_TIMING, 0U};
+    if (tlv_pack(&frame, TLV_TYPE_CMD, command, sizeof(command)) != 0 ||
+        tlv_pack(&frame, TLV_TYPE_TIMING_INDEX, &index, sizeof(index)) != 0) return 0;
+    return tlv_pack_frame(&frame, seq, out, out_max);
+}
+
+int rk_timing_readback_decode(const tlv_frame_t *frame, uint8_t expected_index,
+                              rk_timing_readback_t *out)
+{
+    if (!out || !rk_timing_index_name(expected_index) || payload_length(frame) < 0) return -1;
+
+    rk_timing_readback_t result = {0};
+    int has_command = 0, has_index = 0;
+    for (unsigned i = 0; i < frame->count; ++i) {
+        const tlv_unit_t *unit = &frame->units[i];
+        const uint8_t *data = tlv_unit_get_data(frame, unit);
+        if (unit->type == TLV_TYPE_RESULT_CMD) {
+            if (has_command || read_le(data, unit->data_len) != RK_CMD_QUERY_TIMING) return -1;
+            has_command = 1;
+        } else if (unit->type == TLV_TYPE_TIMING_INDEX) {
+            if (has_index || data[0] != expected_index) return -1;
+            has_index = 1;
+        } else if (unit->type >= TLV_TYPE_TIMING_CH0 && unit->type <= TLV_TYPE_TIMING_CH3) {
+            unsigned channel = unit->type - TLV_TYPE_TIMING_CH0;
+            uint8_t bit = (uint8_t)(1U << channel);
+            if (result.present & bit) return -1;
+            result.present |= bit;
+            result.values[channel] = (uint32_t)read_le(data, unit->data_len);
+        } else {
+            return -1;
+        }
+    }
+    if (!has_command || !has_index || !result.present) return -1;
+    *out = result;
+    return 0;
 }
 
 int tlv_pack_frequency(int64_t value, uint64_t seq, uint8_t *out, uint16_t out_max)

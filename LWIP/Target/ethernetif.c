@@ -99,7 +99,7 @@ static user_phy_IOCtx_t    UserPhyIOCtx = {
 #define ETHIF_TX_TIMEOUT (2000U)
 /* USER CODE BEGIN OS_THREAD_STACK_SIZE_WITH_RTOS */
 /* Stack size of the interface thread */
-#define INTERFACE_THREAD_STACK_SIZE ( 2048 )    /* 收包处理(pbuf分配/复制/校验)栈消耗大, 1024仍会溢出踩堆 */
+#define INTERFACE_THREAD_STACK_SIZE ( 4096 )    /* 以字节计，为收包线程处理 pbuf 和串口网卡分流预留栈。 */
 /* USER CODE END OS_THREAD_STACK_SIZE_WITH_RTOS */
 /* Network interface name */
 #define IFNAME0 's'

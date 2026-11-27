@@ -15,6 +15,8 @@ int handoff_mcu_console_request(handoff_command_t command);
 void handoff_mcu_tcp_poll(int connected, int listener_open);
 int handoff_mcu_listen_allowed(void);
 int handoff_mcu_busy(void);
+/* 返回1表示协议口仍由SPL使用；预约本身不占UART，发出跳转或开始恢复后返回0。 */
+int handoff_mcu_tlv_allowed(void);
 /* 0104停止转发并撤销预约；真实OFF后沿用网络排空/115200恢复，不等待EDK RELEASE。 */
 void handoff_mcu_stop(void);
 /* 正式SLT只在共存模式使用；cookie为本轮非零标识。begin预留但不替换电源流程，

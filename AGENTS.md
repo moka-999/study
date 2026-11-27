@@ -19,7 +19,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
 - RK字节间超时与V2统一为100ms；仅丢弃超时半帧，不改变算法等待或Seq窗口。B1构建拒绝ENABLE_V2_MATS_FAIL_TEST、电源模拟及旧网关联调开关。
 - 通用同步及离线复跑入口见`../test/doc/v2_b1_sync_20261010.md`；板型差异不靠整目录覆盖消除。
 - B1结果灯不作RK通信指示，PC温控边界不变。代码/离线/构建与B1实板验收分开记录，见`docs/rk_protocol_migration_20260923.md`。
-- 整轮先0106 `{}`；同一连接轮内任意顺序串行FUNC0103/0105、PARA0108/0109、SLT010A，允许重复算法，执行下一项可与上一份SLT报告解析并行，最后由PC收齐并解析三类结果，再以0107提交汇总failChips数组；MCU仅按该数组显示最终灯态。镜像0/1/2分别映射LPDDR0/LPDDR1/eMCP，其他编号整包拒绝；070x已删除，合法旧请求回notSupported。0108沿用FUNC开始包字段、类别为parametric，0109只允许MCU方向。0107不取消RK或提前释放SLT占用，只阻止尚未入队的FUNC/PARA及废弃其未交付结果。0106按B2已知镜像模式显示常温/高温闪，未知灭；轮内局部模式更新显示，0107后仅缓存，不覆盖最终PASS/FAIL。
+- 整轮先0106 `{}`；同一连接轮内任意顺序串行FUNC0103/0105、PARA0108/0109、SLT010A，允许重复算法，执行下一项可与上一份SLT报告解析并行，最后由PC收齐并解析三类结果，再以0107提交汇总failChips数组；MCU仅按该数组显示最终灯态。镜像0/1/2分别映射LPDDR0/LPDDR1/eMCP，其他编号整包拒绝；070x已删除，合法旧请求回notSupported。0108沿用FUNC开始包字段、类别为parametric，0109只允许MCU方向。合法0107废弃未交付结果，结束当前测试并关闭RK/DDR；电源确认OFF、轮次及结果灯收尾后回completed。B1在0106整轮内只让在线B2已通过0004设为高温的镜像闪烁。常温、未知及B2失联时对应结果灯熄灭。0107后按最终PASS/FAIL显示。
 - 正式SLT只匹配slt/memtest86，index键必填但忽略其值、应答仍为null：010A受理后走既有冷启动，以本轮power设置训练电压；0x35仅问才回Freq，不查询也继续；普通时序等SPL心跳后逐项发完，再回completed并通过共享底层进入003E/EDK/数据速率/PXE。010A completed只表示准备完成。EDK最终RELEASE OK发完至TC后，自动沿既有OFF流程确认掉电、115200和解析器复位，再解除执行占用，保留整轮供任意下一项FUNC/PARA/SLT；不等010B、不发送010B completed，也不新增完成通知。早到下一项回busy，PC等待后重试。010B仅保留编号，合法JSON回notSupported，不解析SLT结果或影响当前算法/灯态。断线不取消SLT且新连接不可认领，后续RELEASE仍自动清理，不向新连接交付旧响应。RELEASE也用于失败退出，不代表上传成功或PASS。PC正式入口与串口调试入口分开；`B1_SERIAL_NET_KEEP_TCP=0`只支持手动独占交接，正式010A回notSupported。V2尚未接EDK，保留原010A/010B基线。验证边界见`../test/doc/pc_slt_auto_integration_20261112.md`。
 
 ## 20260920-2134原理图适配边界
@@ -62,7 +62,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
 - PH4/PH5 are the schematic's logical I2C4 bus and must remain open-drain GPIOs
   for software I2C; do not configure the invalid `GPIO_AF4_I2C4` mapping.
 - UART4固定连接RK UART1_M0运行协议；USART2双向连接RK UART2_M0_DEBUG；USART1在MCU模式接收本地命令，RK模式转发输入，行首log mcu加换行截获返回MCU。UART4协议不参与调试转发。
-- USART1在MCU模式接受`start rk`/`end rk`加换行：前者以LPDDR4X标称1800/1100/600mV、fspiM1走现有冷启动，已ON也先正常下电；后者正常下电。请求由唯一TCP业务上下文推进，无需PC连接；测试/电源在途返回busy，不建立SLT占用、不等RK心跳，power ON不证明RK启动成功。RK模式须先log mcu；详细回复与离线验证见`docs/uart_log_console_20261010.md`。
+- USART1和8889的MCU模式按行接收手动命令。`start rk LPDDR4` 和 `start rk LPDDR4X` 从 fspiM1 按对应类型的标称电压冷启动，省略类型默认 LPDDR4X。上电且 SPL 就绪、启动回读结束后，可用 `func <算法名>` 单独运行一项 FUNC。结果返回原调试端；测完可用 `end rk` 正常下电。各命令由唯一 TCP 业务上下文推进，见 `docs/network_debug_console_20261116.md`。
 - 同IP串口网卡已纳入默认构建：编解码及无状态帧分流在`App/protocol/serial_net`，会话协调在`App/tasks/net_handoff`。`board_network_config.h`的`B1_SERIAL_NET_KEEP_TCP=1`保留MCU地址、物理MAC及TCP8888/8889连接，EDK虚拟MAC经L2转换共享IP；设0仅保留旧手动独占交接。调试仍可在OFF时`net rk`准备、`start rk`启动；正式010A由PC测试服务预约/推进，不调用串口命令。SPL的0x35/0x3E保持115200，EDK授权后优先协商4M，兼容旧端2M，明确OFF后恢复115200。仍由唯一RK任务消费UART4，不改电源时序；正式010A按RELEASE自动收尾，不依赖010B，验证状态见`../test/doc/pc_slt_auto_integration_20261112.md`。传输通路及分项实板证据见`docs/net_coexist_4m_20261112.md`，历史2M证据见`docs/net_handoff_20261111.md`。
 - `b1.ioc` is the CubeMX hardware baseline. PA13/PA14 are explicitly reserved for
   SWD and PH4/PH5 start high/released; preserve both settings. After regeneration,
@@ -137,7 +137,8 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
   内部使用10/5/5mV有符号档位；0501在ON时不重启，目标缓存不证明物理启动时序。
   采样、Boot I2C、调压和pwr_ctrl推进共用监测层事务锁。0501/0502/0505及完整0103
   已由pc_power_service分阶段推进，原任务不变；main同时装载轨间和业务初值。
-  0502直接关电；0505/完整0103上电后等待本轮有效普通心跳，超时报告timeout，
+  0502直接关电；0505上电后等待启动心跳超时回timeout。完整0103/0108冷启动后缺本次心跳，
+  分别上报0105/0109，两颗均FAIL、错误类型DdrTrainingFailed、地址为null，
   不自动关电或重试。RK心跳发送时点、电气时序及直接掉电存储风险待验收。B1阶段日志走log_console，
   不往RK协议口打印，也不增加PC字段。
 - 0x0006 is the generic command execution result, not an error-only response.
@@ -149,14 +150,14 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
   JSON词法检查拒绝原始NUL、未转义控制字符及`\u0000`，防止C字符串截断。
 - B1 and V2 both keep D-Cache disabled. ETH DMA memory belongs in D2 SRAM and
   the FreeRTOS heap belongs in AXI SRAM; never add SCB cache maintenance calls.
-- PG0-PG5仅用于三颗双色结果灯：奇数LED1/3/5为FAIL通道，偶数LED2/4/6为PASS通道；常温测试双通道闪烁，高温测试仅FAIL通道闪烁，亮灭各500ms。图纸料号L-C295JFLBCT的手册为琥珀/蓝，实际灯色及LPDDR0/LPDDR1/eMCP物理顺序等真板确认，不按图面红绿旁注改业务。
+- PG0-PG5仅用于三颗双色结果灯：奇数LED1/3/5为FAIL通道，偶数LED2/4/6为PASS通道；整轮内，B2在线且已通知高温的镜像只闪FAIL通道，亮灭各500ms。图纸料号L-C295JFLBCT的手册为琥珀/蓝，实际灯色及LPDDR0/LPDDR1/eMCP物理顺序等真板确认，不按图面红绿旁注改业务。
   PC不再单独设置灯态；0107按失败芯片所属mirrorIndex汇总，0/1/2对应两组LPDDR/eMCP。
 - PG6/LED7已确认为MCU正常上电指示：GPIO初始化先低，默认任务完成串口及LwIP初始化后置高常亮，不跟随结果灯、网络连接或RK/DDR电源状态闪烁；不代表整板电压或RK就绪。详见`docs/board_status_slot_20261010.md`。
 - Do not copy V2 pin mappings, PCF8574 PHY reset, fixed MAC or test scripts.
 - `B1_RK_UART=4`已固定，CMake拒绝2；逻辑slot0=UART4协议、slot1=USART2日志、slot2=USART1控制台，后两路绝不进入RK解析器。USART2独立TX发送环、0等待取锁；调试输入拥塞暂存一块，RX丢失报告并丢弃至换行。
 - UART4 PA11 RX/PA12 TX经U4008到RK UART1_M0（GPIO2_B7 TX/GPIO2_B6 RX），USART2 PD5/PD6经U4013到RK UART2_M0_DEBUG，USART1 PA9/PA10为本地日志出口。映射按20260920-2134原图第6/14页核对，纠正旧UART0记载；三路当前115200/8N1，协议线路仍待实板验收。
-- RX为NORMAL DMA1 Stream0/UART4、Stream1/USART2、Stream2/USART1，IRQ优先级5；HT忽略，IDLE/TC交给各自唯一消费者。队列在调度前注册，uart_start_all()在调度后启动。
-- TCP8889是独立纯文本调试Server，与8888各自单客户端，接手后关闭各自listener；断开调试端不结束正式测试。网络/串口各自选源与半行，RK调试输入由一路独占；命令仍由默认任务解析并复用电源业务门禁。网络raw API只在lwIP回调执行，4KiB发送环、512B接收环、1KiB未ACK上限，慢端只关闭8889；B2改IP后重连，不占用B2改IP的PC业务门禁。详见`docs/network_debug_console_20261116.md`。
+- RX使用DMA1，IRQ优先级5。Stream1/USART2以循环DMA连续接收RK调试日志，HT/TC/IDLE按写入位置追加到4KiB字节环。Stream0/UART4和Stream2/USART1使用NORMAL DMA，忽略HT，IDLE/TC按块交付。队列在调度前注册，uart_start_all()在调度后启动。
+- TCP8889 是可同时接两个客户端的纯文本调试服务，8888 独立接一个正式客户端。两个网络会话和物理串口各自选源、保存半行，RK 输入由一路独占。两路 8889 接满时关闭监听，任一槽空闲后恢复。每路分别使用 4 KiB 发送环、512 B 接收环及 1 KiB 未确认数据额度，拥塞超时只关闭对应客户端。命令仍由默认任务解析并复用电源业务门禁。B2 改 IP 后使用新地址重连。详见`docs/network_debug_console_20261116.md`。
 - 串口日志复用默认任务，不新增任务；编译`B1_LOG_DEFAULT_SOURCE=MCU|RK`指定上电默认，运行时USART1文本`log mcu`/`log rk`加换行选择，重启恢复默认且不写Flash。每个出口仅一来源输出，运行期MCU printf经log_console分别过滤，禁止直接写huart1。唯一调度前例外为board_diagnostics：USART1初始化后、内核对象创建前按MCU默认来源输出有界启动阶段；进入内核前永久关闭此出口。USART1新增status只读查询，由默认任务读取缓存并限速输出，不触发采样、上电或修改协议。USART1取TX锁为0等待，拥塞允许丢日志，不能阻塞协议或业务；说明见`docs/uart_log_console_20261010.md`。
 - Keep `.uart_dma` in AXI SRAM after the RTOS heap. Reserve the fixed 30KiB LwIP
   allocator plus metadata in `.lwip_heap` at 0x30005000 (32KiB reserved), so ETH
@@ -167,7 +168,7 @@ FUNC0103、PARA0108、SLT010A均必须携带TimingParameters对象；默认时�
   connection/heartbeat toggles. Exclude the old TLV GPIO reboot dispatcher.
 - See docs/integration_20260831.md for migrated scope and remaining acceptance.
 - PB3/PB4/PB5为GPIO输入、GPIO_NOPULL；B1各有4.7kΩ上拉，B2贴0Ω接地为0、不贴为1，不允许MCU输出高。`board_slot_code()`返回PB5:PB4:PB3的0..7码，加1为siteId；111有效，独立的SLOT_ONLINE#才是B2在位检测。每次0004重新读取槽位，实际八槽贴装/片选仍待验收。
-- B2通过0004通知testerId=1～21，成功配置后IP为`192.168.210.(10*testerId+siteId)`，PC结果siteId使用同一槽位字符串。不同编号/槽位动态切换，但已有PC连接或测试/电源在途则整包busy；同IP不重配。掩码255.255.255.0、网关0.0.0.0，RAM保存、不写FRU。首次配置前使用 `B1_TEST_IP` 的本地地址，正式多板上线仍须处理默认IP冲突隔离。见`../test/doc/b2_spi_integration_20261020.md`；本轮仅离线/构建通过，未实板验收。
+- B2通过0004通知testerId=1～21，B1从`Core/Inc/board_network_config.h`的`B1_PRODUCTION_SUBNET`取产线网段（默认`192.168.210.0/24`，宏内填`192.168.210.0`），末段为`10*testerId+siteId`，PC结果siteId使用同一槽位字符串。不同编号/槽位动态切换，但已有PC连接或测试/电源在途则整包busy；同IP不重配。掩码255.255.255.0、网关0.0.0.0，RAM保存、不写FRU。首次配置前使用 `B1_TEST_IP` 的本地地址，正式多板上线仍须处理默认IP冲突隔离。见`../test/doc/b2_spi_integration_20261020.md`；本轮仅离线/构建通过，未实板验收。
 - Build with `.\tools\dev.ps1 build`; run `.\tools\dev.ps1 check` before commit.
 
 ## TCP单客户端连接准入

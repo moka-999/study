@@ -12,6 +12,8 @@
 #include "pc_power_service.h"
 #if defined(B1_RK_UART)
 #include "log_console.h"
+#include "rk_task_control.h"
+#include <stdio.h>
 #endif
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
 #include "v2_power_sim.h"
@@ -42,6 +44,7 @@ static pc_power_action_t s_power_action;
 static uint8_t s_power_owner_connected;
 #if defined(B1_RK_UART)
 static log_console_power_request_t s_console_power;
+static int64_t s_next_manual_frequency = -1; /* 控制台暂存，只有受理start rk才消费。 */
 #endif
 
 /*
@@ -337,7 +340,15 @@ static pc_dispatch_result_t handle_start_test(
                                             error_code, valid_index, response);
 }
 
-/* 停测或关站已接管OFF，原PC/调试电源命令不能再消费这个OFF事件。 */
+static pc_dispatch_result_t handle_shmoo_start(
+    const pc_protocol_frame_t *request, uint32_t sequence,
+    const cJSON *root, pc_dispatch_response_t *response)
+{
+    (void)request;
+    return pc_test_shmoo_start(root, sequence, response);
+}
+
+/* 停测、结束整轮或关站已接管OFF，原PC/调试电源命令不能再消费同一事件。 */
 static void cancel_power_reply(void)
 {
     s_power_command = 0U;
@@ -391,7 +402,9 @@ static pc_dispatch_result_t handle_round_end(const pc_protocol_frame_t *request,
     uint32_t failed_mask;
     if (pc_round_end_parse(root, RESULT_LED_TARGET_COUNT, &failed_mask) != PC_TEST_JSON_OK)
         return build_command_failure(request, sequence, "invalidArgument", response);
-    return pc_test_round_end(failed_mask, sequence, response);
+    pc_dispatch_result_t result = pc_test_round_end(failed_mask, sequence, response);
+    if (result == PC_DISPATCH_NO_RESPONSE) cancel_power_reply();
+    return result;
 }
 
 static pc_dispatch_result_t handle_slt_start(const pc_protocol_frame_t *request,
@@ -827,11 +840,14 @@ static const pc_command_entry_t s_command_table[] = {
     {PC_COMMAND_STOP_TEST,         handle_stop_test},         /* 中止执行并关RK，保留整轮。 */
     {PC_COMMAND_TEST_RESULT_REPORT, reject_response_command}, /* MCU→PC，拒收。 */
     {PC_COMMAND_ROUND_BEGIN,       handle_round_begin},       /* 建立当前连接的整轮。 */
-    {PC_COMMAND_ROUND_END,         handle_round_end},         /* 汇总灯、废弃未交付结果。 */
+    {PC_COMMAND_ROUND_END,         handle_round_end},         /* 汇总灯、停止当前测试并下电。 */
     {PC_COMMAND_PARA_START,        handle_start_test},        /* 轮内PARA，最终上报0109。 */
     {PC_COMMAND_PARA_RESULT,       reject_response_command},  /* MCU→PC，拒收。 */
     {PC_COMMAND_SLT_START,         handle_slt_start},         /* 电源/Boot准备，不等待RK。 */
     {PC_COMMAND_SITE_ENABLE,       handle_site_enable},      /* 站点开关与两镜像DUT灯，不受算法busy限制。 */
+    {PC_COMMAND_CHIP_INFO,         reject_response_command}, /* 010D仅由MCU主动上报。 */
+    {PC_COMMAND_SHMOO_START,       handle_shmoo_start},
+    {PC_COMMAND_SHMOO_RESULT,      reject_response_command},
     {PC_COMMAND_POWER_ON,          handle_power_on},          /* 非阻塞上电请求。 */
     {PC_COMMAND_POWER_OFF,         handle_power_off},         /* 直接关电，仍须通过在途互斥。 */
     {PC_COMMAND_QUERY_POWER_STATUS, handle_query_power_status}, /* PC -> MCU，只读。 */
@@ -903,7 +919,19 @@ pc_dispatch_result_t pc_dispatch_handle(
         PC_COMMAND_POWER_ON, PC_COMMAND_POWER_OFF, PC_COMMAND_RESET_RK,
         PC_COMMAND_SET_BOOT_MODE, PC_COMMAND_SET_DDR_CONFIG,
     };
-    if (pc_test_service_busy() || pc_power_service_busy()) {
+    int setting = 0;
+#if defined(B1_RK_UART)
+    setting = rk_task_set_pending();
+    if (setting && (request->command_id == PC_COMMAND_START_TEST || request->command_id == PC_COMMAND_PARA_START ||
+                    request->command_id == PC_COMMAND_SLT_START || request->command_id == PC_COMMAND_SHMOO_START)) {
+        uint32_t index;
+        const uint32_t *valid_index = (request->command_id == PC_COMMAND_START_TEST || request->command_id == PC_COMMAND_PARA_START) &&
+            pc_test_start_read_index(root, &index) == PC_TEST_JSON_OK ? &index : NULL;
+        cJSON_Delete(root);
+        return build_command_failure_with_index(request, mcu_tx_sequence, "busy", valid_index, response);
+    }
+#endif
+    if (setting || pc_test_service_busy() || pc_power_service_busy()) {
         int conflict = 0;
         for (size_t i = 0U; i < sizeof(test_conflicts) / sizeof(test_conflicts[0]); ++i)
             if (request->command_id == test_conflicts[i]) conflict = 1;
@@ -946,6 +974,25 @@ pc_dispatch_result_t pc_dispatch_handle(
 }
 
 #if defined(B1_RK_UART)
+const char *pc_dispatch_debug_set(const char *name, int64_t value)
+{
+    if (!name) return "invalidArgument";
+    if (!pc_site_enabled()) return "siteDisabled";
+    if (strcmp(name, "Freq") == 0 || strcmp(name, "freq") == 0) {
+        if (value < -1) return "invalidArgument";
+        s_next_manual_frequency = value;
+        return NULL;
+    }
+    int index = pc_timing_field_index(name);
+    if (index < 0) return "invalidTiming";
+    if (value < 0 || value > UINT32_MAX) return "invalidArgument";
+    if (pc_test_service_busy() || pc_power_service_busy() || s_power_command || handoff_mcu_busy()) return "busy";
+    const char *error = rk_task_set_timing(pc_timing_command((unsigned)index), (uint32_t)value);
+    /* 写入可能改变当前RK配置，下一次正式带电源参数的测试须重新准备。 */
+    if (!error) pc_power_service_invalidate();
+    return error;
+}
+
 /* 本地串口与PC共用唯一TCP业务上下文，避免跨任务检查busy后再操作电源的竞争。
  * 只复用PREPARE_SLT的冷启动/Boot步骤，不建立SLT测试占用，也不等待RK心跳。
  */
@@ -953,7 +1000,7 @@ static void poll_console_power(void)
 {
     const char *error;
     if (s_console_power != LOG_CONSOLE_POWER_NONE) {
-        pc_power_action_t action = s_console_power == LOG_CONSOLE_POWER_START_RK ? PC_POWER_PREPARE_SLT : PC_POWER_OFF;
+        pc_power_action_t action = s_console_power == LOG_CONSOLE_POWER_END_RK ? PC_POWER_OFF : PC_POWER_PREPARE_SLT;
         if (pc_power_service_take(action, &error)) {
             log_console_complete_power_request(error);
             s_console_power = LOG_CONSOLE_POWER_NONE;
@@ -970,31 +1017,84 @@ static void poll_console_power(void)
         log_console_complete_power_request("busy");
         return;
     }
-    if (pc_test_service_busy() || pc_power_service_busy() || s_power_command) {
+    if (pc_test_service_busy() || pc_power_service_busy() || s_power_command || rk_task_set_pending()) {
         log_console_complete_power_request("busy");
         return;
     }
-    const pc_power_target_t target = {
-        .memory_type = DDR_MEMORY_LPDDR4X,
-        .mv = {1800U, 1100U, 600U},
+    pc_power_target_t target = {
+        .memory_type = request == LOG_CONSOLE_POWER_START_LPDDR4 ? DDR_MEMORY_LPDDR4 : DDR_MEMORY_LPDDR4X,
         .boot_mode = BOOT_MODE_FSPI_M1,
+        .manual_boot = 1U,
+        .manual_frequency = s_next_manual_frequency,
     };
-    pc_power_action_t action = request == LOG_CONSOLE_POWER_START_RK ? PC_POWER_PREPARE_SLT : PC_POWER_OFF;
-    error = pc_power_service_start(action, request == LOG_CONSOLE_POWER_START_RK ? &target : NULL, 1U);
+    int starting = request != LOG_CONSOLE_POWER_END_RK;
+    const int16_t nominal[DDR_RAIL_COUNT] = {0};
+    if (starting && ddr_power_build_step_targets(target.memory_type, nominal, target.mv) != IF_OK) {
+        log_console_complete_power_request("invalidArgument");
+        return;
+    }
+    error = pc_power_service_start(starting ? PC_POWER_PREPARE_SLT : PC_POWER_OFF, starting ? &target : NULL, 1U);
     if (error) log_console_complete_power_request(error);
-    else s_console_power = request;
+    else {
+        if (starting) s_next_manual_frequency = -1;
+        s_console_power = request;
+    }
+}
+#endif
+
+#if defined(B1_RK_UART)
+/* 调试文字命令在业务所属任务执行，回复直接送回原调试端。 */
+static void handle_console_debug(char *command, char *reply, size_t capacity)
+{
+    if (strcmp(command, "test status") == 0) {
+        pc_test_format_status(reply, capacity);
+        return;
+    }
+    char *name = command + 4U; /* 控制台只交付完整的set行或test status。 */
+    char *number = strchr(name, ' ');
+    int64_t value;
+    if (number) *number++ = '\0';
+    int frequency = strcmp(name, "freq") == 0 || strcmp(name, "Freq") == 0;
+    if (!number || !*name || !pc_timing_integer(number, frequency, &value) || value < -1) {
+        (void)snprintf(reply, capacity, "\r\n[RK TIMING] invalidArgument; use: set <timing|freq> <decimal>\r\n");
+        return;
+    }
+    const char *error = pc_dispatch_debug_set(name, value);
+    const char *status = error ? error : (frequency ? "next manual start" : "queued");
+    (void)snprintf(reply, capacity, "\r\n[RK TIMING] set %s %s %s\r\n", name, number, status);
 }
 #endif
 
 void pc_dispatch_poll(void)
 {
+#if defined(B1_RK_UART)
+    /* 先处理人工中止，避免本次轮询继续执行已经到期的上电步骤。 */
+    if (log_console_take_force_off()) {
+        const char *error = pc_test_service_stop_console();
+        if (error) log_console_complete_force_off(error);
+        else cancel_power_reply();
+    }
+#endif
     pc_power_service_poll();
     if (s_power_command && !s_power_owner_connected) {
         const char *error;
         if (pc_power_service_take(s_power_action, &error)) s_power_command = 0U;
     }
 #if defined(B1_RK_UART)
+    log_console_service_debug(handle_console_debug);
     poll_console_power();
+    char name[LOG_CONSOLE_FUNC_NAME_SIZE];
+    if (log_console_take_func(name)) {
+        const char *error = s_power_command || s_console_power != LOG_CONSOLE_POWER_NONE
+                                ? "busy" : pc_test_service_start_console_func(name);
+        if (error) {
+            char reply[128];
+            const char *hint = strcmp(error, "powerOff") == 0 ? "; use start rk <LPDDR4|LPDDR4X>" :
+                               strcmp(error, "notReady") == 0 ? "; check SPL ready" : "";
+            (void)snprintf(reply, sizeof(reply), "\r\n[func] %s failed: %s%s\r\n", name, error, hint);
+            log_console_complete_func(reply);
+        }
+    }
 #endif
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
     v2_power_sim_poll();
@@ -1026,6 +1126,12 @@ int pc_dispatch_next_response(uint32_t sequence, pc_dispatch_response_t *respons
 #else
     return pc_test_service_poll(sequence, response);
 #endif
+}
+
+void pc_dispatch_response_sent(uint16_t command)
+{
+    if (command == PC_COMMAND_CHIP_INFO) pc_test_chip_info_sent();
+    if (command == PC_COMMAND_SHMOO_RESULT) pc_test_shmoo_point_sent();
 }
 
 void pc_dispatch_disconnected(void)

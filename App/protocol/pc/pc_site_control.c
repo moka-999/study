@@ -2,6 +2,7 @@
 #include "pc_site_control.h"
 #include "pc_test_service.h"
 #include "b2_service.h"
+#include "board_network_config.h"
 #include "result_led.h"
 #include "log_console.h"
 
@@ -26,16 +27,26 @@ static void apply_site_outputs(uint8_t enabled, uint8_t mirror_mask)
 {
     _Static_assert(RESULT_LED_LPDDR0 == 0 && RESULT_LED_LPDDR1 == 1 && PC_SITE_MIRROR_COUNT == 2U,
                    "当前B1将两个LPDDR镜像的dut[0]映射到结果灯位0和1");
-    /* eMCP未列入本板的两个DUT组；开站时继续显示其原有整轮状态。 */
+    /* 010C屏蔽两颗DDR灯；保留开站时单独手动验eMCP灯的能力。 */
     uint32_t lights = enabled ? mirror_mask | (1U << RESULT_LED_EMCP) : 0U;
     log_console_set_site_enabled(enabled);
     result_led_set_site(enabled, lights);
 }
 
+/* B2 尚未分配时 assigned 为 0，此时启用校验的 ID 只检查物理范围。 */
+static int matches_target_id(uint16_t requested, uint8_t assigned, uint8_t maximum)
+{
+    return requested > 0U && requested <= maximum && (assigned == 0U || requested == assigned);
+}
+
 const char *pc_site_configure(const pc_site_config_t *config, int *deferred)
 {
     *deferred = 0;
-    if (!b2_service_matches_site(config->tester_id, config->site_id)) return "invalidArgument";
+    if ((B1_010C_CHECK_TESTER_ID &&
+         !matches_target_id(config->tester_id, b2_service_tester_id(), B2_TESTER_ID_MAX)) ||
+        (B1_010C_CHECK_SITE_ID &&
+         !matches_target_id(config->site_id, b2_service_site_id(), B2_SITE_ID_MAX)))
+        return "invalidArgument";
     int closing = s_state == SITE_CLOSING;
     int needs_stop = s_state == SITE_STOP_FAILED || (!config->enabled && s_state == SITE_OPEN);
     /* 先预留原连接应答位置；超出容量的请求没有被受理，不改变已提交的快照。 */

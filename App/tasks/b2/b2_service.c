@@ -1,4 +1,5 @@
 #include "b2_service.h"
+#include "b2_task.h"
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "pc_test_service.h"
@@ -15,6 +16,7 @@ static uint8_t s_tester_id;
 static uint8_t s_site_id;
 static uint8_t s_thermal_mask;
 static uint8_t s_thermal_modes[B2_MIRROR_COUNT];
+static uint32_t s_thermal_session;
 
 int b2_service_prepare(void)
 {
@@ -42,10 +44,27 @@ static int network_change_busy(int connected)
     return 0;
 }
 
-static b2_status_t apply_request(const b2_request_t *request, int connected)
+static int modes_current(const b2_link_diagnostics_t *link)
+{
+    return link->online && link->session == s_thermal_session;
+}
+
+static int clear_expired_modes(const b2_link_diagnostics_t *link)
+{
+    if (!s_thermal_mask || modes_current(link)) return 1;
+    const uint8_t off[B2_MIRROR_COUNT] = {0};
+    if (!pc_test_round_update_modes(s_thermal_mask, off)) return 0;
+    memset(s_thermal_modes, 0, sizeof(s_thermal_modes));
+    s_thermal_mask = 0U;
+    return 1;
+}
+
+static b2_status_t apply_request(const b2_request_t *request, int connected,
+                                 const b2_link_diagnostics_t *link)
 {
 
     if (request->status != B2_STATUS_OK) return request->status;
+    if (request->thermal_mask && !link->online) return B2_STATUS_BUSY;
     //获取当前板卡的槽位号和测试器ID，如果请求中没有提供测试器ID，则使用当前生效的ID
     uint8_t site = b2_board_site_id();
     uint8_t tester = request->has_tester_id ? request->tester_id : s_tester_id;
@@ -70,22 +89,25 @@ static b2_status_t apply_request(const b2_request_t *request, int connected)
             s_thermal_modes[i] = request->thermal_mode[i];
     }
     s_thermal_mask |= request->thermal_mask;
+    if (request->thermal_mask) s_thermal_session = link->session;
     //返回成功状态
     return B2_STATUS_OK;
 }
 //connect：0表示无PC连接，1表示已接受PC连接
 void b2_service_poll(int connected)
 {
-
     b2_request_t request;
-    // 仅在有请求时才调用apply_request，避免无请求时误改网络配置
-    if (!s_requests ||
-        xQueueReceive(s_requests, &request, 0U) != pdPASS)
-        return;
+    int received = s_requests && xQueueReceive(s_requests, &request, 0U) == pdPASS;
+    if (!received && !s_thermal_mask) return;
+
+    b2_link_diagnostics_t link;
+    b2_link_diagnostics(&link);
+    /* 空闲时也清除断线前的灯态；重连后按新会话逐个镜像接收通知。 */
+    int modes_ready = clear_expired_modes(&link);
+    if (!received) return;
 
     b2_service_reply_t reply = {0};
-
-    reply.status = apply_request(&request, connected);
+    reply.status = modes_ready ? apply_request(&request, connected, &link) : B2_STATUS_FAILED;
     reply.tester_id = s_tester_id;
     reply.site_id = s_tester_id ? s_site_id : b2_board_site_id();
 
@@ -95,7 +117,12 @@ void b2_service_poll(int connected)
 
 uint8_t b2_service_thermal_modes(uint8_t modes[B2_MIRROR_COUNT])
 {
-    //给tcp任务提供当前已知的热模式配置，返回热模式掩码
+    b2_link_diagnostics_t link;
+    b2_link_diagnostics(&link);
+    if (!modes_current(&link)) {
+        memset(modes, 0, sizeof(s_thermal_modes));
+        return 0U;
+    }
     memcpy(modes, s_thermal_modes, sizeof(s_thermal_modes));
     return s_thermal_mask;
 }
@@ -106,8 +133,7 @@ uint8_t b2_service_site_id(void)
     return s_tester_id ? s_site_id : 0U;
 }
 
-int b2_service_matches_site(uint16_t tester_id, uint16_t site_id)
+uint8_t b2_service_tester_id(void)
 {
-    if (!tester_id || tester_id > B2_TESTER_ID_MAX || !site_id || site_id > B2_SITE_ID_MAX) return 0;
-    return !s_tester_id || (tester_id == s_tester_id && site_id == s_site_id);
+    return s_tester_id;
 }

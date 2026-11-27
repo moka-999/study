@@ -22,6 +22,11 @@ typedef enum {
     PC_TEST_JSON_ERROR_POWER_RANGE,      /* 三轨目标不能用TPS寄存器准确表示。 */
 } pc_test_json_result_t;
 
+/* 必填键各出现一次，且对象内没有其它键。fields由调用方提供，列表内不重复。 */
+int pc_test_has_exact_fields(const cJSON *root, const char *const *fields, size_t count);
+/* 把uint64按十进制JSON数字追加到对象；返回1成功，避免double舍入。 */
+int pc_test_add_uint64(cJSON *object, const char *key, uint64_t value);
+
 /* 当前B1有两个LPDDR镜像，各只有dut[0]；ID只用于核对收件板，不修改B2配置。 */
 #define PC_SITE_MIRROR_COUNT 2U
 typedef struct {
@@ -44,6 +49,10 @@ typedef struct {
 } pc_timing_parameters_t;
 /* 0..14映射0x25、0x26、0x28..0x34；越界返回0，不使用未实现的0x27。 */
 uint16_t pc_timing_command(unsigned index);
+/* 按PC字段名精确查找；0..14对应普通时序，PC_TIMING_PARAMETER_COUNT为Freq，-1未知。 */
+int pc_timing_field_index(const char *name);
+/* 非空十进制文本；频率用int64，普通时序用u32。成功返回1并写入out。 */
+int pc_timing_integer(const char *text, int frequency, int64_t *out);
 
 /*
  * 字符串指针直接引用cJSON树，调用者必须在使用完view后再cJSON_Delete(root)。
@@ -156,6 +165,9 @@ typedef struct {
     uint8_t failed;          /* 0=PASS、1=FAIL；组包转换为PC testStatus的1/0。 */
 } pc_functional_die_result_t;
 
+/* 向010D的chipinfo数组添加一个镜像；无类型填空串，size_mib按uint64输出。 */
+int pc_chip_info_append(cJSON *array, unsigned mirror, const char *type, uint64_t size_mib);
+
 /**
  * @brief 为FUNC/PARA创建共享结果正文，两条RK结果按mirrorIndex=0、1排列。
  * @param[in] algorithm_type 仅允许functional或parametric，不决定PC帧头命令号。
@@ -173,6 +185,11 @@ typedef struct {
 cJSON *pc_algorithm_result_create(const char *algorithm_type, const char *algorithm_name,
     uint32_t algorithm_index, const char *site_id, uint64_t elapsed_ms,
     const pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT]);
+
+/* 冷启动等待RK心跳超时：两颗均报DdrTrainingFailed，地址为null，无采样时measurementData为{}。
+ * 参数及所有权同上；elapsed_ms在FUNC填0，在PARA填从受理到上报的实际毫秒数。 */
+cJSON *pc_ddr_training_failed_result_create(const char *algorithm_type, const char *algorithm_name,
+    uint32_t algorithm_index, const char *site_id, uint64_t elapsed_ms);
 
 /* 固定functional的兼容入口，其余输入、所有权及失败返回值与上面相同。 */
 cJSON *pc_functional_result_create(const char *algorithm_name,

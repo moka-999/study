@@ -14,6 +14,8 @@
 
 ## 2. 操作
 
+USART1 和 TCP 8889 共用 `test status`、`set <时序名> <数值>`、`set freq -1` 和 `end rk force`。[完整命令及手动冷启动顺序](network_debug_console_20261116.md)
+
 串口助手选**文本发送**，附加 CR、LF 或 CRLF。只在 USART1 发送，不是网络 JSON，也不是 RK TLV：
 
 | 文本命令 | 输出选择 | 确认文字 |
@@ -21,7 +23,10 @@
 | `log mcu` | MCU 自身日志 | `[log] source=mcu` |
 | `log rk` | USART2 收到的 RK 原始日志 | `[log] source=rk` |
 | `status` | MCU模式下输出一次板级状态 | `[log] status queued`；RK模式原样转发给RK |
-| `start rk` | MCU模式下以LPDDR4X标称1800/1100/600mV、fspiM1冷启动 | 先`[rk power] start rk queued`；完成后`power ON`，失败显示错误名 |
+| `check CASReadLatency` | MCU 模式下查询 CAS 读延迟，可替换为其他普通时序字段。RK 已上电且 SPL 协议串口可用时，等待启动心跳、自动回读或 FUNC/PARA 运行期间均可提交 | 受理后显示 `queued`。不同参数可连续提交，同一在途参数共用结果。`[RK TIMING]` 显示实际通道读数，发出后 500 ms 无有效应答显示 `unavailable=timeout` |
+| `check all` | 在同样条件下，一次读回 15 项普通时序 | 每项显示通道值或失败原因，最后用 `check all received=N/15` 汇总收到有效应答的项数。 |
+| `start rk [LPDDR4\|LPDDR4X]` | MCU 模式按芯片类型从 fspiM1 冷启动，默认 LPDDR4X | 完成后 `power ON` 显示所选类型及标称电压 |
+| `func <算法名>` | SPL 就绪并完成启动时序回读后，用当前配置运行一项 FUNC | 原请求端显示耗时和两颗结果，失败时带地址；如需中止，用 `end rk force` |
 | `end rk` | MCU模式下正常下电 | 先`[rk power] end rk queued`；完成后`power OFF`，失败显示错误名 |
 | `led 0 pass` | 单组验灯：组0显示PASS，其余两组灭 | `[led] states=1,0,0; ...` |
 | `led all off` | 关闭三组结果灯 | `[led] states=0,0,0; ...`；不改变PG6 |
@@ -40,7 +45,7 @@
   `status`的状态5仅表示此次调试双路常亮，不新增TCP测试状态。
 - RK模式：输入原样转发到USART2，包括回车、退格、Tab、方向键序列及Ctrl+C；`status`也交给RK。串口助手须发送实际控制字节，例如Ctrl+C为HEX `03`。
 - 退出RK模式：在行首输入完整`log mcu`加CR/LF/CRLF。该保留行不交给RK，尾随LF也不泄漏；命令区分大小写，不带前后空格。
-- 行首与`log mcu`相同的前缀暂存，失配时一起发出；因此输入开头的`l`等字符可能延迟显示。前缀内退格可编辑，Ctrl+C取消暂存前缀并发送中断字符。普通RK命令不受MCU本地15字符行长限制。
+- 行首与`log mcu`相同的前缀暂存，失配时一起发出；因此输入开头的`l`等字符可能延迟显示。前缀内退格可编辑，Ctrl+C取消暂存前缀并发送中断字符。MCU 本地命令最多 31 个字符，普通 RK 命令可更长。
 - USART2发送拥塞时缓存一块，暂缓取新输入，RK日志仍继续处理；接收断流会警告并丢弃到下个换行，不自动重发命令。已发到RK的前半行无法撤回，必要时由操作者发送Ctrl+C再重输。
 - 调试转发不是文件传输协议，不保证持续大流量无损；不能通过此通道发送保留的`log mcu`命令给RK。
 
@@ -64,8 +69,9 @@ MCU 自有日志使用 `log_console_write(text, length)`，普通任务中的 `p
 ## 4. 本轮改动与限制
 
 - 固定逻辑槽：0=UART4 协议，1=USART2 RK 日志，2=USART1 本地控制台；拒绝旧 `B1_RK_UART=2` 构建和 B1 首烧参数。
-- 三路独立 NORMAL RX DMA：DMA1 Stream0/1/2；IDLE/TC 入队，忽略 HT，DMA 位于 AXI SRAM，D-Cache 仍关闭。USART2为TX_RX，三路分别使用独立TX环；同步`b1.ioc`配置。
-- 复用默认任务处理控制台和日志，每轮各消费最多一个接收块；没有新增任务。协议 RX 队列保持 8 块，两路日志/控制台各 2 块，不占用协议队列。
+- 三路独立 RX DMA 位于 AXI SRAM。Stream0/UART4 协议口和 Stream1/USART2 日志口使用循环 DMA，由半满、满块、空闲事件推进。Stream2/USART1 控制台使用 NORMAL，空闲或满块时交付。三路各有独立 TX 环。
+- UART4 使用 AXI SRAM 中的 8 KiB 循环 DMA 和 32 KiB 软件接收环。按 4 Mbaud、8N1 连续接收，DMA 每 10.24 ms 触发一次半满或满圈通知，从空软件环到写满约 81.9 ms。消费者每次仍可用 1600 字节缓冲取数。切速前先交付旧速字节，断流标记隔开新速首帧。USART2 使用独立的 4 KiB 日志环，USART1 接收队列为 2 块。
+- 在 `status` 中用 UART4 的 `drop`、`rxFull`、`lastDropMs` 查运行中丢块、缓存满和最近一次已知丢块的 MCU 启动毫秒数。`err` 统计 HAL 硬件错误。`endRxBytes` 单独累计 RK 确认 OFF 后清理的旧会话字节。实板验收需覆盖频率查询、连续时序回读、4 Mbaud SLT 和重复上下电，同时核对双方帧序号和内容。
 - USART1 非阻塞 TX，每次临界区最多入队 128 字节；不等串口排空。拥塞允许丢日志，调试器可看 `s_dropped_bytes`（TX空间/取锁失败的丢弃尝试字节）；RX 丢块继续通过各路 `uart_rx_diagnostics_t` 观察。
 - 未选中来源不缓存、不补发；日志链路是诊断出口，不保证无损。RTOS 和 DMA 启动之前的 RK 日志不能捕获，网络初始化期间的缓冲也可能溢出。需要完整冷启动记录时仍应直接采集 RK 调试口。
 - 未增加PC JSON字段，未修改RK帧/Seq/心跳、上下电门禁或V2固件；RK调试输入直接经USART2转发，不参与UART4解析。

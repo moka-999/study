@@ -21,6 +21,9 @@ typedef struct {
     ddr_memory_type_t memory_type;
     uint16_t mv[DDR_RAIL_COUNT]; /* VDD1/VDD2/VDDQ训练目标mV，不是运行期拉偏。 */
     boot_mode_t boot_mode;
+    uint8_t timing_writes_pending; /* 本次冷启动有普通时序要写，回读须等最后一项发完。 */
+    uint8_t manual_boot;          /* 1为控制台start rk；其余启动均清除RK侧临时频率。 */
+    int64_t manual_frequency;     /* 仅manual_boot=1有效，-1或非负MHz。 */
 } pc_power_target_t;
 
 /* 均为板级显式配置，不从PC JSON接收；配置成功不等于时序已经硬件验收。
@@ -66,11 +69,12 @@ int pc_power_service_configure(const pc_power_config_t *config,
  * reboot须为0/1：FUNC/PARA为1强制冷启动，为0仍在配置变化或失效时冷启动；
  * SLT无论reboot值、配置是否相同，每次都冷启动，让RK重新走服务器下载流程。
  * 预检查不访问GPIO/I2C；实际驱动在poll推进。完成结果未消费前仍为busy。
+ * PREPARE_TEST等待本轮心跳超时后先下电，再交付训练失败；关电失败则交付电源错误。
  * SLT的DONE仅表示本地准备完成；其成功缓存不能当成FUNC初始化就绪。
  */
 const char *pc_power_service_start(pc_power_action_t action,
                                   const pc_power_target_t *target, uint8_t reboot);
-/* 0104专用：替换尚未完成的启动/重启为OFF，不等待RK；原操作的应答由调用方撤销。
+/* 停测、关站或整轮结束时将尚未完成的启动/重启替换为OFF，原操作应答由调用方撤销。
  * NULL表示受理，完成仍由poll/take(PC_POWER_OFF)确认；不修改板级轨间时序。 */
 const char *pc_power_service_stop(void);
 /** 周期推进一次，不睡眠；真实DAC/I2C仍使用已有有界同步驱动。无连接也须调用。 */

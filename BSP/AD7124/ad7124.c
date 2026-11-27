@@ -697,9 +697,7 @@ float ad7124_raw_to_voltage(int32_t raw, float vref, uint8_t pga, uint8_t bipola
 /* ═══════════════════════════════════════════════════════════════════
  * 原始值 → mV (int32_t, 整数, 协议上报用)
  *
- * vref 传实际基准电压（B1使用内部2.5V）；若前端有分压, 用 _div 系列传 divider:
- *   B1: AIN输入经100R+10K分压 → V_src = V_ADC × (100+10000)/10000
- *       = V_ADC × 1.01  → divider = AD7124_DIV_100R_10K
+ * vref 为所选基准电压，单位 V。返回 ADC 差分输入端的整数 mV。
  * ═══════════════════════════════════════════════════════════════════ */
 
 int32_t ad7124_raw_to_mv(int32_t raw, float vref, uint8_t pga, uint8_t bipolar)

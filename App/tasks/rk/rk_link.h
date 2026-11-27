@@ -106,14 +106,20 @@ typedef struct {
  * 不清计数、不打印、不发PC帧、不改变RK状态；不用于ISR或控制接收门禁。
  */
 int rk_link_get_rx_diagnostics(rk_rx_diagnostics_t *out);
+/* 按本次测试的令牌和算法号读取最近进度。0..100为RK上报值，-1为尚无匹配进度。 */
+int rk_link_progress_percent(uint32_t cookie, uint16_t command_id);
 /* 新命令/心跳独立u64序号，启动从0递增，临界区保护；失败允许序号间隙。 */
 uint64_t rk_link_next_sequence(void);
+/* RK任务在SPL帧整帧成功入队后调用，推进算法和时序查询的应答Seq上界。 */
+void rk_link_note_queued(uint64_t sequence);
 
 /* TCP在本轮启动前绑定频率；token非0，值按PC原数传递，负数由RK解释为默认。
  * RK任务只读快照及记录发送结果；64位值使用短临界区保护。没有绑定时回复-1。
  * status返回0未发送、1整帧已入UART、-1发送失败/令牌失效；不是频率生效应答。
  */
 void rk_link_frequency_begin(uint32_t token, int64_t value);
+/* 每次实际拉起电源前安装；手动启动可指定MHz，其他情况填-1。正式启动令牌优先。 */
+void rk_link_manual_frequency(int64_t value);
 int64_t rk_link_frequency_get(uint32_t *token);
 void rk_link_frequency_note_tx(uint32_t token, int success);
 int rk_link_frequency_status(uint32_t token);

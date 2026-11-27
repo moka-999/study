@@ -194,20 +194,24 @@ static int uart_start_receive(uart_if_t *port, uint8_t *buffer, uint16_t size)
         return IF_ERR;
     }
     UART_HandleTypeDef *uart = port->handle;
-    /* B1由Core绑定NORMAL RX DMA。缺失DMA时直接拒绝，不能进入HAL解引用。 */
-    if (uart->hdmarx == NULL || uart->hdmarx->Init.Mode != DMA_NORMAL) {
+    /* 两个RK端口连续接收；本地命令口按单次块交付。 */
+    uint32_t mode = uart == &huart1 ? DMA_NORMAL : DMA_CIRCULAR;
+    if (uart->hdmarx == NULL || uart->hdmarx->Init.Mode != mode) {
         return IF_ERR;
     }
     if (HAL_UARTEx_ReceiveToIdle_DMA(uart, buffer, size) != HAL_OK) {
         return IF_ERR;
     }
-    /*
-     * 本路由按“本轮接收的完整前缀”交付IDLE/TC数据，不维护循环DMA游标。
-     * HT只是半传输通知，DMA仍在收；关闭HT避免同一前缀被重复入队。
-     * 每次重启DMA后都要关闭，不能只在首次初始化时设置一次。
-     */
-    __HAL_DMA_DISABLE_IT(uart->hdmarx, DMA_IT_HT);
+    /* 循环DMA保留半满通知，使连续输入在回绕前得到消费。 */
+    if (mode == DMA_NORMAL) __HAL_DMA_DISABLE_IT(uart->hdmarx, DMA_IT_HT);
     return IF_OK;
+}
+
+uint16_t uart_hw_rx_position(uart_if_t *port, uint16_t size)
+{
+    UART_HandleTypeDef *uart = port->handle;
+    uint32_t left = __HAL_DMA_GET_COUNTER(uart->hdmarx);
+    return left && left <= size ? (uint16_t)(size - left) : 0U;
 }
 
 int uart_rx_abort(uart_if_t *port)
@@ -246,18 +250,23 @@ int uart_hw_tx_idle(uart_if_t *port)
 }
 
 /* 不阻塞等TX，也不在临界区调用HAL；保留协议端口的自定义TX中断钩子。 */
-int uart_hw_set_baud(uart_if_t *port, uint32_t baud)
+uart_baud_result_t uart_hw_set_baud(uart_if_t *port, uint32_t baud)
 {
     UART_HandleTypeDef *uart = port ? port->handle : NULL;
     uart_tx_ring_t *ring = uart ? find_tx_ring(uart) : NULL;
     if (!baud || !ring || !ring->mutex || xSemaphoreTake(ring->mutex, 0U) != pdTRUE)
-        return IF_ERR;
-    int result = IF_ERR;
+        return UART_BAUD_UNCHANGED;
+    uart_baud_result_t result = UART_BAUD_UNCHANGED;
     uint32_t previous = uart->Init.BaudRate;
-    if (uart_hw_tx_idle(port) && uart_rx_abort(port) == IF_OK) {
+    if (uart_hw_tx_idle(port)) {
+        if (uart_rx_abort(port) != IF_OK) {
+            xSemaphoreGive(ring->mutex);
+            return UART_BAUD_RX_FAULT;
+        }
         uart->Init.BaudRate = baud;
-        if (HAL_UART_Init(uart) == HAL_OK) result = IF_OK;
+        if (HAL_UART_Init(uart) == HAL_OK) result = UART_BAUD_CHANGED;
         else {
+            result = UART_BAUD_RX_STOPPED;
             uart->Init.BaudRate = previous;
             (void)HAL_UART_Init(uart);
         }

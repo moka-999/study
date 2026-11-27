@@ -28,21 +28,32 @@ else()
     message(FATAL_ERROR "B1_LOG_DEFAULT_SOURCE must be MCU or RK")
 endif()
 
-# 板级头是默认IP的唯一来源，改头文件时直接运行Ninja也会重新校验。
+# 修改板级头中的调试 IP 或产线网段时，直接运行 Ninja 也会重新校验。
 set(network_header "${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/board_network_config.h")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${network_header}")
-file(STRINGS "${network_header}" ip_definition REGEX "^[ \t]*#[ \t]*define[ \t]+B1_TEST_IP[ \t]+")
-list(LENGTH ip_definition ip_definition_count)
-if(NOT ip_definition_count EQUAL 1 OR NOT ip_definition MATCHES "^[ \t]*#[ \t]*define[ \t]+B1_TEST_IP[ \t]+\"([0-9]+[.][0-9]+[.][0-9]+[.][0-9]+)\"[ \t]*($|//|/[*])")
-    message(FATAL_ERROR "Invalid B1_TEST_IP in ${network_header}: define exactly one quoted IPv4 address")
-endif()
-set(b1_test_ip "${CMAKE_MATCH_1}")
-string(REPLACE "." ";" ip_octets "${b1_test_ip}")
-foreach(octet IN LISTS ip_octets)
-    if(NOT octet MATCHES "^(0|[1-9][0-9]?[0-9]?)$" OR octet GREATER 255)
-        message(FATAL_ERROR "Invalid B1_TEST_IP octet in ${b1_test_ip}: use decimal 0..255 without leading zeros")
+function(read_board_ipv4 macro_name output)
+    set(prefix "^[ \t]*#[ \t]*define[ \t]+${macro_name}[ \t]+")
+    file(STRINGS "${network_header}" definition REGEX "${prefix}")
+    list(LENGTH definition count)
+    if(NOT count EQUAL 1 OR NOT definition MATCHES "${prefix}\"([0-9]+[.][0-9]+[.][0-9]+[.][0-9]+)\"[ \t]*($|//|/[*])")
+        message(FATAL_ERROR "Invalid ${macro_name} in ${network_header}: expected one quoted IPv4 address")
     endif()
-endforeach()
+    set(address "${CMAKE_MATCH_1}")
+    string(REPLACE "." ";" octets "${address}")
+    foreach(octet IN LISTS octets)
+        if(NOT octet MATCHES "^(0|[1-9][0-9]?[0-9]?)$" OR octet GREATER 255)
+            message(FATAL_ERROR "Invalid ${macro_name} ${address}: use decimal 0..255 without leading zeros")
+        endif()
+    endforeach()
+    set(${output} "${address}" PARENT_SCOPE)
+endfunction()
+
+read_board_ipv4(B1_PRODUCTION_SUBNET production_subnet)
+if(NOT production_subnet MATCHES "[.]0$")
+    message(FATAL_ERROR "Invalid B1_PRODUCTION_SUBNET ${production_subnet}: a /24 subnet must end in .0")
+endif()
+read_board_ipv4(B1_TEST_IP b1_test_ip)
+string(REPLACE "." ";" ip_octets "${b1_test_ip}")
 list(GET ip_octets 3 host_octet)
 if(host_octet LESS 1 OR host_octet GREATER 254)
     message(FATAL_ERROR "Invalid B1_TEST_IP ${b1_test_ip}: host must be 1..254 for the local /24")
@@ -136,11 +147,13 @@ add_executable(b1
     App/diagnostics/protocol_trace.c
     App/diagnostics/pc_trace.c
     App/diagnostics/rk_trace.c
+    App/diagnostics/rk_ddr_capacity.c
     App/protocol/pc/pc_protocol.c
     App/protocol/pc/pc_state_machine.c
     App/protocol/pc/pc_dispatch.c
     App/protocol/pc/pc_tester_info.c
     App/protocol/pc/pc_test_message.c
+    App/protocol/pc/pc_shmoo.c
     App/protocol/pc/pc_site_control.c
     App/protocol/pc/pc_test_service.c
     App/protocol/pc/pc_power_service.c
@@ -155,6 +168,7 @@ add_executable(b1
     App/protocol/rk/state_machine.c
     App/tasks/pc/tcp_task.c
     App/tasks/rk/rk_task.c
+    App/tasks/rk/rk_timing_readback.c
     App/tasks/rk/rk_idd.c
     App/tasks/rk/rk_link.c
     App/tasks/common/monitor_task.c

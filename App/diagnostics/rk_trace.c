@@ -97,6 +97,31 @@ void rk_trace_ready(uint64_t sequence, int queried)
                queried < 0 ? "unbound" : queried ? "1" : "0");
 }
 
+void rk_trace_timing_values(uint8_t index, const rk_timing_readback_t *result)
+{
+    if (!log_console_mcu_selected()) return;
+    char channels[RK_TIMING_CHANNEL_COUNT * (sizeof(" CH3=4294967295") - 1U) + 1U] = "";
+    size_t used = 0;
+    for (unsigned ch = 0; ch < RK_TIMING_CHANNEL_COUNT; ++ch) {
+        if (!(result->present & (1U << ch))) continue;
+        size_t space = sizeof(channels) - used;
+        int n = snprintf(channels + used, space, " CH%u=%lu", ch, (unsigned long)result->values[ch]);
+        if (n < 0 || (size_t)n >= space) return;
+        used += (size_t)n;
+    }
+    trace_line("RK TIMING", "index=%u %s%s", index, rk_timing_index_name(index), channels);
+}
+
+void rk_trace_timing_unavailable(uint8_t index, const char *reason)
+{
+    trace_line("RK TIMING", "index=%u %s unavailable=%s", index, rk_timing_index_name(index), reason);
+}
+
+void rk_trace_timing_summary(unsigned received, unsigned total)
+{
+    trace_line("RK TIMING", "check all received=%u/%u", received, total);
+}
+
 void rk_trace_idd_result(const idd_session_result_t *result)
 {
     if (result == NULL) return;

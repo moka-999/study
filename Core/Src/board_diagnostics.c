@@ -1,8 +1,10 @@
 #include "board_diagnostics.h"
 #include "board_adc_config.h"
+#include "board_watchdog_config.h"
 #include "log_console.h"
 #include "net_console.h"
 #include "protocol_trace.h"
+#include "rk_ddr_capacity.h"
 #include "main.h"
 #include "board_identity.h"
 #include "monitor_task.h"
@@ -66,8 +68,8 @@ void board_diagnostics_boot_error(void)
 
 /* 报告缓冲为静态内存，不分配堆；96字节/10ms限速低于115200波特率的吞吐。
  * 出口忙最多等待2秒后丢弃报告，不阻塞采样/电源/RK任务，不影响故障处置。 */
-/* 为三类高频协议计数和串口丢弃统计保留快照空间。 */
-#define STATUS_CAPACITY 2560U
+/* 容纳任务栈水位以及长时间运行后的十位十进制计数。 */
+#define STATUS_CAPACITY 3072U
 #define STATUS_CHUNK_SIZE 96U
 #define STATUS_INTERVAL_MS 10U
 #define STATUS_DEADLINE_MS 2000U
@@ -98,6 +100,35 @@ static const char *power_name(pwr_ctrl_state_t state)
         "OFF", "WAIT_FIRST_RAIL", "WAIT_SECOND_RAIL", "ON", "WAIT_OFF", "FAULT"
     };
     return (unsigned int)state < sizeof(names) / sizeof(names[0]) ? names[state] : "UNKNOWN";
+}
+
+/* 仅在生成状态快照时扫描各任务的栈填充值，扫描和格式化期间保持调度开放。
+ * FreeRTOS 返回栈字数，乘以栈字宽输出字节；未创建的任务显示 n/a。 */
+static void report_memory(uint32_t now)
+{
+    static const char *const task_names[] = {
+        "defaultTask", "tcp", "rk", "monitor", "b2", TCPIP_THREAD_NAME, "EthIf", "EthLink",
+#if BOARD_IWDG_ENABLE
+        "watchdog",
+#endif
+    };
+    HeapStats_t heap;
+    vPortGetHeapStats(&heap);
+    report_append("\r\n[status] uptimeMs=%lu freeHeap=%lu minFreeHeap=%lu largestFreeBlock=%lu\r\n",
+                  (unsigned long)now, (unsigned long)heap.xAvailableHeapSpaceInBytes,
+                  (unsigned long)heap.xMinimumEverFreeBytesRemaining,
+                  (unsigned long)heap.xSizeOfLargestFreeBlockInBytes);
+    report_append("[stack minFreeBytes]");
+    for (size_t i = 0; i < sizeof(task_names) / sizeof(task_names[0]); ++i) {
+        TaskHandle_t task = xTaskGetHandle(task_names[i]);
+        if (task != NULL) {
+            size_t bytes = uxTaskGetStackHighWaterMark(task) * sizeof(StackType_t);
+            report_append(" %s=%lu", task_names[i], (unsigned long)bytes);
+        } else {
+            report_append(" %s=n/a", task_names[i]);
+        }
+    }
+    report_append("\r\n");
 }
 
 static void build_report(uint32_t now)
@@ -134,8 +165,7 @@ static void build_report(uint32_t now)
     led_modes = GPIOG->MODER & 0x3FFFU;
     taskEXIT_CRITICAL();
 
-    report_append("\r\n[status] uptimeMs=%lu freeHeap=%lu\r\n",
-                  (unsigned long)now, (unsigned long)xPortGetFreeHeapSize());
+    report_memory(now);
     report_append("[slot] code=%u candidateSite=%u assignedSite=%u (0=unassigned)\r\n",
                   (unsigned int)slot, (unsigned int)slot + 1U,
                   (unsigned int)b2_service_site_id());
@@ -146,6 +176,14 @@ static void build_report(uint32_t now)
                   power_name(pwr_ctrl_get_state()),
                   (outputs & B1_PWR_4V0_EN_PIN) != 0U,
                   (outputs & B1_PWR_3V3_EN_PIN) != 0U);
+    rk_ddr_capacity_t ddr = rk_ddr_capacity_snapshot();
+    if (ddr.round_active) {
+        if (ddr.current_mib) report_append("[RK DDR] currentMiB=%lu\r\n", (unsigned long)ddr.current_mib);
+        else report_append("[RK DDR] currentMiB=unknown\r\n");
+    }
+    if (ddr.last_completed_mib)
+        report_append("[RK DDR] lastCompletedMiB=%lu\r\n", (unsigned long)ddr.last_completed_mib);
+    else report_append("[RK DDR] lastCompletedMiB=%s\r\n", ddr.has_completed ? "unknown" : "none");
     if (led_status == HAL_OK) {
         report_append("[LED] states=%u,%u,%u PG0..6 ODR=0x%02lX IDR=0x%02lX MODER=0x%04lX\r\n",
                       (unsigned)led_states[0], (unsigned)led_states[1], (unsigned)led_states[2],
@@ -183,12 +221,19 @@ static void build_report(uint32_t now)
                           (long)snapshot.memory.voltage_mv[2]);
         } else report_append("[VDD1/2/Q mV] unavailable\r\n");
         if ((snapshot.memory.valid_mask & MEMORY_MONITOR_VALID_IDD) != 0U) {
+            /* PAC 的 VBUS 和电流来自同一组有效采样，按 VDD1、VDD2、VDDQ 排列。 */
+            report_append("[PAC VBUS 1/2/Q mV] %lu %lu %lu\r\n",
+                          (unsigned long)snapshot.memory.idd[0].vbus_mv,
+                          (unsigned long)snapshot.memory.idd[1].vbus_mv,
+                          (unsigned long)snapshot.memory.idd[2].vbus_mv);
             /* PAC在B1的20mOhm量程内最大电流远小于UINT32_MAX uA。 */
             report_append("[IDD1/2/Q uA] %lu %lu %lu\r\n",
                           (unsigned long)snapshot.memory.idd[0].current_ua,
                           (unsigned long)snapshot.memory.idd[1].current_ua,
                           (unsigned long)snapshot.memory.idd[2].current_ua);
-        } else report_append("[IDD1/2/Q uA] unavailable\r\n");
+        } else {
+            report_append("[PAC VBUS 1/2/Q mV] unavailable\r\n[IDD1/2/Q uA] unavailable\r\n");
+        }
         if ((snapshot.memory.valid_mask & MEMORY_MONITOR_VALID_TPS_STATUS) != 0U) {
             report_append("[TPS status 1/2/Q] 0x%02X 0x%02X 0x%02X\r\n",
                           snapshot.memory.tps_status[0], snapshot.memory.tps_status[1],
@@ -200,10 +245,16 @@ static void build_report(uint32_t now)
     for (int port = 0; port < UART_PORT_COUNT; ++port) {
         uart_rx_diagnostics_t uart = {0};
         if (uart_get_rx_diagnostics(port, &uart)) {
-            report_append("[%s] err=%lu HAL=0x%lX drop=%lu restartFail=%lu recoveryPending=%u\r\n",
+            report_append("[%s] err=%lu HAL=0x%lX drop=%lu restartFail=%lu recoveryPending=%u rxFull=%lu\r\n",
                           uart_names[port], (unsigned long)uart.errors,
                           (unsigned long)uart.last_hal_error, (unsigned long)uart.dropped_blocks,
-                          (unsigned long)uart.restart_failures, uart.recovery_pending);
+                          (unsigned long)uart.restart_failures, uart.recovery_pending,
+                          (unsigned long)uart.queue_overflows);
+            if (port == UART_PORT_RK_PROTOCOL) {
+                report_append("[UART4-RK RX] lastDropMs=%lu endRxBytes=%lu invalid=%lu recoveries=%lu\r\n",
+                              (unsigned long)uart.last_drop_ms, (unsigned long)uart.session_end_bytes,
+                              (unsigned long)uart.invalid_events, (unsigned long)uart.recoveries);
+            }
         }
     }
     b2_spi_diagnostics(&spi);
@@ -217,8 +268,14 @@ static void build_report(uint32_t now)
                   (unsigned long)rk.rejected_total, (unsigned int)rk.last_reason,
                   (unsigned long)rk.last_tick);
     trace_report(report_append);
-    report_append("[net console] connected=%u droppedBytes=%lu\r\n",
-                  net_console_session() != 0U, (unsigned long)net_console_dropped_bytes());
+    unsigned int connected = 0U;
+    for (unsigned int slot = 0U; slot < NET_CONSOLE_CLIENT_COUNT; ++slot) {
+        if (net_console_session(slot) != 0U) ++connected;
+    }
+    report_append("[net console] connected=%u droppedBytes=%lu slotDrops=%lu/%lu\r\n",
+                  connected, (unsigned long)net_console_dropped_bytes(),
+                  (unsigned long)net_console_client_dropped_bytes(0U),
+                  (unsigned long)net_console_client_dropped_bytes(1U));
     report_append("[status] end; snapshot only, OFF means sensors may be uninitialized\r\n");
 }
 

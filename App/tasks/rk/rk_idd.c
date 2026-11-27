@@ -90,6 +90,7 @@ static int send_frame(uint64_t sequence)
     s_tx_sequence = sequence;
     s_tx_started_ms = HAL_GetTick();
 #if defined(B1_RK_UART)
+    if (queued) rk_link_note_queued(sequence);
     rk_trace_sent(s_session.result.command, wire, length, queued);
 #endif
     return queued;

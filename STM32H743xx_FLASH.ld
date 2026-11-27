@@ -268,13 +268,21 @@ SECTIONS
     . = ALIGN(4);
   } >RAM
 
-  /* FreeRTOS 128KiB 动态堆放 AXI SRAM，避免耗尽 DTCM 任务栈空间。 */
+  /* FreeRTOS 192 KiB 动态堆放在 AXI SRAM。 */
   .heap (NOLOAD) :
   {
     . = ALIGN(8);
     *(.heap)
     *(.heap*)
     . = ALIGN(8);
+  } >RAM
+
+  /* UART4协议软件环使用AXI SRAM，串口注册时清零。 */
+  .uart_rx_ring (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.uart_rx_ring)
+    . = ALIGN(4);
   } >RAM
 
   /* B2 SPI DMA缓冲放AXI SRAM，由链路启动函数显式初始化。 */

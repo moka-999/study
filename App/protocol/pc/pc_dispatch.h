@@ -51,10 +51,16 @@ pc_dispatch_result_t pc_dispatch_handle(
 
 /** TCP有界等待后调用；无连接也推进电源编排和业务超时，不读写socket或推进Seq。 */
 void pc_dispatch_poll(void);
+#if defined(B1_RK_UART)
+/* TCP任务处理调试set。Freq/freq接受-1或非负MHz，其他时序接受uint32。NULL表示受理。 */
+const char *pc_dispatch_debug_set(const char *name, int64_t value);
+#endif
 /* 由唯一TCP任务周期调用，领取异步完整PDU；1就绪、0无、-1失败须关闭连接。
  * 使用传入的MCU发送序号，不回显PC/RK序号。成功发送后TCP任务才递增计数。
  */
 int pc_dispatch_next_response(uint32_t sequence, pc_dispatch_response_t *response);
+/* 仅当整个PDU都成功提交给本连接的TCP发送缓冲时调用。 */
+void pc_dispatch_response_sent(uint16_t command);
 /** 当前连接结束时调用，清理连接拥有的未提交业务；不取消已发送给RK的算法。 */
 void pc_dispatch_disconnected(void);
 

@@ -69,7 +69,7 @@ extern uint32_t SystemCoreClock;
 #define configUSE_SB_COMPLETED_CALLBACK          ( 0 )
 #define configUSE_MINI_LIST_ITEM                ( 1 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
-#define configTOTAL_HEAP_SIZE                    ((size_t)131072)
+#define configTOTAL_HEAP_SIZE                    ((size_t)196608)
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configHEAP_CLEAR_MEMORY_ON_FREE          0
 #define configUSE_TRACE_FACILITY                 1
@@ -165,6 +165,7 @@ standard names. */
 #define USE_CUSTOM_SYSTICK_HANDLER_IMPLEMENTATION 0
 
 /* USER CODE BEGIN Defines */
+#define INCLUDE_xTaskGetHandle                  1
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
 #define configCHECK_FOR_STACK_OVERFLOW          2  /* ★ 启用栈溢出检测 method 2 ★ */
 /* USER CODE END Defines */

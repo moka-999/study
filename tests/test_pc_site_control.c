@@ -3,11 +3,15 @@
 #include "../../test/tests/test_pc_rk_service.c"
 #undef test_main
 #include "pc_site_control.h"
+#include "board_network_config.h"
+#include "rk_ddr_capacity.h"
 
-#define SITE_BODY(enabled, groups) \
-    "{\"testerId\":2,\"siteId\":3,\"siteEnabled\":" enabled ",\"dutEnabled\":" groups "}"
+#define SITE_TARGET(tester, site, enabled, groups) \
+    "{\"testerId\":" tester ",\"siteId\":" site ",\"siteEnabled\":" enabled ",\"dutEnabled\":" groups "}"
+#define SITE_BODY(enabled, groups) SITE_TARGET("2", "3", enabled, groups)
 #define GROUP(index, dut) "{\"mirrorIndex\":" index ",\"dut\":" dut "}"
 #define ONLY_FIRST "[" GROUP("1","[false]") "," GROUP("0","[true]") "]"
+#define OPEN_TARGET(tester, site) SITE_TARGET(tester, site, "true", ONLY_FIRST)
 #define CLOSE_SITE SITE_BODY("false", "null")
 #define OPEN_FIRST SITE_BODY("true", ONLY_FIRST)
 #define OPEN_NEITHER SITE_BODY("true", "[" GROUP("0","[false]") "," GROUP("1","[false]") "]")
@@ -59,15 +63,40 @@ static void check_format(void)
         SITE_BODY("true", "[" GROUP("0","[true]") "," GROUP("2","[false]") "]"),
         SITE_BODY("true", "[" GROUP("0","[1]") "," GROUP("1","[true]") "]"),
         SITE_BODY("true", "[" GROUP("0","[true,false]") "," GROUP("1","[true]") "]"),
-        "{\"testerId\":1.5,\"siteId\":3,\"siteEnabled\":false,\"dutEnabled\":[]}",
-        "{\"testerId\":65536,\"siteId\":3,\"siteEnabled\":false,\"dutEnabled\":[]}",
-        "{\"testerId\":2,\"siteId\":4,\"siteEnabled\":false,\"dutEnabled\":[]}",
-        "{\"testerId\":1,\"siteId\":3,\"siteEnabled\":false,\"dutEnabled\":[]}",
+        "{\"siteId\":3,\"siteEnabled\":false,\"dutEnabled\":[]}",
+        "{\"testerId\":2,\"siteEnabled\":false,\"dutEnabled\":[]}",
+        SITE_TARGET("1.5", "3", "false", "[]"), SITE_TARGET("2", "-1", "false", "[]"),
+        SITE_TARGET("65536", "3", "false", "[]"), SITE_TARGET("2", "65536", "false", "[]"),
+        SITE_TARGET("\"2\"", "3", "false", "[]"), SITE_TARGET("2", "null", "false", "[]"),
     };
-    b2_site = 3U;
     for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
         site_request(invalid[i], "failed", "invalidArgument");
     CHECK(pc_site_enabled() && !stop_requested && visible_leds == 7U);
+}
+
+static void check_target(const char *json, int rejected)
+{
+    site_request(json, rejected ? "failed" : "completed", rejected ? "invalidArgument" : NULL);
+}
+
+static void check_target_switches(void)
+{
+    /* 单板直连时验证零值、物理上下界和 uint16 最大值。 */
+    b2_site = 0U;
+    check_target(OPEN_TARGET("1", "1"), 0);
+    check_target(OPEN_TARGET("21", "8"), 0);
+    check_target(OPEN_TARGET("0", "3"), B1_010C_CHECK_TESTER_ID);
+    check_target(OPEN_TARGET("2", "0"), B1_010C_CHECK_SITE_ID);
+    check_target(OPEN_TARGET("22", "3"), B1_010C_CHECK_TESTER_ID);
+    check_target(OPEN_TARGET("2", "9"), B1_010C_CHECK_SITE_ID);
+    check_target(OPEN_TARGET("65535", "65535"), B1_010C_CHECK_TESTER_ID || B1_010C_CHECK_SITE_ID);
+
+    /* B2 分配为 2/3 后，分别让一个合法编号与本机不符。 */
+    b2_site = 3U;
+    check_target(OPEN_TARGET("1", "3"), B1_010C_CHECK_TESTER_ID);
+    check_target(OPEN_TARGET("2", "4"), B1_010C_CHECK_SITE_ID);
+    check_target(OPEN_TARGET("2", "3"), 0);
+    CHECK(pc_site_enabled() && !stop_requested);
 }
 
 static void check_disabled_commands(void)
@@ -96,13 +125,16 @@ void test_main(void)
     power_fixture = 1;
     configure_power();
     check_format();
+    check_target_switches();
     /* DUT1灯被屏蔽时，FUNC仍产生含DUT1失败地址的两颗结果。 */
-    round_begin();
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+    deliver_round_chip_info(2048U);
     mock_power_state = PWR_CTRL_STATE_ON;
     round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
     unsigned queued = queue_calls;
     site_request(OPEN_FIRST, "completed", NULL);
     CHECK(pc_test_service_busy() && !stop_requested && visible_leds == 5U && site_ready_led);
+    CHECK(rk_ddr_capacity_snapshot().current_mib == 8192U);
     CHECK(queue_calls == queued && power_off_calls == 0U);
     inject_mask(RK_RESPONSE_COMPLETE, 2U, 0U, 0x42U);
     CHECK(pc_dispatch_next_response(90U, &response) == 1);
@@ -119,7 +151,15 @@ void test_main(void)
     cJSON_free(para);
     queued_response = (rk_response_t){.cookie = queued_request.cookie, .status = RK_RESPONSE_COMPLETE};
     response_ready = 1;
-    site_request(SITE_BODY("false", "[{}]"), "accepted", NULL);
+    const char *close_zero = SITE_TARGET("0", "0", "false", "[{}]");
+    if (B1_010C_CHECK_TESTER_ID || B1_010C_CHECK_SITE_ID) {
+        site_request(close_zero, "failed", "invalidArgument");
+        CHECK(pc_site_enabled() && pc_test_service_busy() && !stop_requested);
+        site_request(SITE_BODY("false", "[{}]"), "accepted", NULL);
+    } else {
+        site_request(close_zero, "accepted", NULL);
+    }
+    CHECK(!rk_ddr_capacity_snapshot().round_active && !rk_ddr_capacity_snapshot().has_completed);
     site_request(OPEN_FIRST, "accepted", NULL);
     check_disabled_commands();
     confirm_shutdown();

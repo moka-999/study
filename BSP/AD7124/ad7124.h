@@ -511,7 +511,7 @@ int32_t ad7124_raw_to_mv(int32_t raw, float vref, uint8_t pga, uint8_t bipolar);
  * @param[in] vref 实际基准电压，单位V，须有限且大于0。
  * @param[in] pga 增益编码0..7，实现按低3位索引。
  * @param[in] bipolar 0单极性，非0双极性。
- * @param[in] divider 前端分压还原倍率，须有限且大于0；1为无分压，B1为1.01。
+ * @param[in] divider 前端分压还原倍率，须有限且大于0；传1得到输入端电压。
  * @return 电压，单位V。
  * @note 纯计算，不检查输入范围；调用方保证换算结果在返回类型可表示范围内。
  */
@@ -524,14 +524,14 @@ float  ad7124_raw_to_voltage_div(int32_t raw, float vref, uint8_t pga,
  * @param[in] vref 实际基准电压，单位V，须有限且大于0。
  * @param[in] pga 增益编码0..7，实现按低3位索引。
  * @param[in] bipolar 0单极性，非0双极性。
- * @param[in] divider 前端分压还原倍率，须有限且大于0；1为无分压，B1为1.01。
+ * @param[in] divider 前端分压还原倍率，须有限且大于0；传1得到输入端电压。
  * @return 电压，单位mV；浮点到整数向零截断。
  * @note 纯计算，不检查输入范围；调用方保证换算结果在返回类型可表示范围内。
  */
 int32_t ad7124_raw_to_mv_div(int32_t raw, float vref, uint8_t pga,
                              uint8_t bipolar, float divider);
 
-/* B1三轨前端分压（VDD1/VDD2/VDDQ均为100R+10K） */
+/* 100Ω 串联、10kΩ 对地时的理论分压还原倍率，供显式调用分压接口时使用。 */
 #define AD7124_DIV_100R_10K   1.01f
 
 #endif

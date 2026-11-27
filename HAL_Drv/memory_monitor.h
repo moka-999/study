@@ -27,7 +27,7 @@ typedef struct {
 
 typedef struct {
     uint8_t valid_mask; /* 某器件失败时，仍保留其他有效数据。 */
-    int32_t voltage_mv[MEMORY_MONITOR_RAIL_COUNT];
+    int32_t voltage_mv[MEMORY_MONITOR_RAIL_COUNT]; /* VDD1/VDD2/VDDQ 的 AD7124 输入端电压，单位 mV。 */
     pac1934_measurement_t idd[MEMORY_MONITOR_RAIL_COUNT];
     uint8_t tps_status[MEMORY_MONITOR_RAIL_COUNT];
 } memory_monitor_sample_t;

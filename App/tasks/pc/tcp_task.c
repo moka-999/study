@@ -50,6 +50,7 @@ static int pc_send_all(int socket_fd, const pc_dispatch_response_t *response, ui
         sent += (size_t)result;
     }
     pc_trace_tx(response, sequence, sent, 0);
+    pc_dispatch_response_sent(response->command_id);
     return 0;
 }
 
@@ -104,22 +105,19 @@ void StartTcpServerTask(void *argument)
     (void)argument;
     TCP_DIAG(0, 0xBEEF0001);
 
-    /*
-     * 阶段1：等待defaultTask完成MX_LWIP_Init并写入本机IP。
-     * 最长约20秒（100次*200ms），失败后删除本任务，避免无IP时反复建socket。
-     */
-    int retry = 0;
+    /* 启动时等本机IP；超过20秒留下诊断码，地址稍后就绪仍可开始监听。 */
+    const TickType_t wait_start = xTaskGetTickCount();
     while (gnetif.ip_addr.addr == 0) {
-        vTaskDelay(pdMS_TO_TICKS(200));
-        if (++retry > 100) {
-            TCP_DIAG(1, 0xBEEF00E1);   /* LWIP 超时 */
-            vTaskDelete(NULL);
-            return;
+        if (xTaskGetTickCount() - wait_start >= pdMS_TO_TICKS(20000U)) {
+            TCP_DIAG(1, 0xBEEF00E1);
         }
+        task_watchdog_progress(TASK_WATCHDOG_TCP);
+        vTaskDelay(pdMS_TO_TICKS(200U));
     }
     TCP_DIAG(1, 0xBEEF0002);
 
     int listenfd = -1;
+    TickType_t last_select_error = xTaskGetTickCount() - pdMS_TO_TICKS(1000U);
 
     /*
      * 阶段3：只在无客户端时监听；accept后关闭监听并释放尚未接手的连接。
@@ -148,9 +146,21 @@ void StartTcpServerTask(void *argument)
         FD_ZERO(&readers); FD_SET(listenfd, &readers);
         struct timeval accept_wait = {0, 20000};
         int available = select(listenfd + 1, &readers, NULL, NULL, &accept_wait);
+        int select_error = available < 0 ? errno : 0;
         task_watchdog_progress(TASK_WATCHDOG_TCP);
         pc_dispatch_poll();
-        if (available < 0) { close(listenfd); vTaskDelete(NULL); return; }
+        if (available < 0) {
+            /* 每秒最多记录一次。关闭失败且描述符仍有效时保留所有权，避免泄漏。 */
+            TickType_t now = xTaskGetTickCount();
+            if (now - last_select_error >= pdMS_TO_TICKS(1000U)) {
+                last_select_error = now;
+                pc_trace_listen_error(select_error);
+            }
+            if (close(listenfd) == 0 || errno == EBADF) listenfd = -1;
+            b2_service_poll(0);
+            vTaskDelay(pdMS_TO_TICKS(20U));
+            continue;
+        }
         if (available == 0) {
             b2_service_poll(0);
             continue;

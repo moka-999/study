@@ -9,11 +9,16 @@
 
 /*
  * 接收块容量1600字节，覆盖RK最大帧1040字节和SerialNet最大COBS线帧1540字节。
- * SerialNet停止等待，一帧结束后才回复；容量须大于最大线帧，避免帧中NORMAL DMA满块停收。
- * 状态机仍支持分片；此容量不承诺无间隔任意长字节流可靠传输。
+ * UART4使用循环DMA；半满、满圈及IDLE均可分片，协议解析不依赖回调边界。
  * DMA RX缓冲位于.uart_dma段，不能放DTCM。容量不代表一次回调必为完整帧。
  */
 #define UART_RX_BUF_SIZE 1600U
+/* UART4独立循环DMA，4 Mbaud、8N1连续接收时每10.24 ms产生半满或满圈中断。 */
+#define UART_RK_PROTOCOL_DMA_SIZE (8U * 1024U)
+/* 软件环由RK任务消费，满速时32 KiB可暂存约82 ms的字节。 */
+#define UART_RK_PROTOCOL_RX_CAPACITY (32U * 1024U)
+/* USART2调试日志按字节缓存；IDLE只发布新字节，不占一个独立的大块队列槽。 */
+#define UART_RK_LOG_RX_CAPACITY 4096U
 
 /* 已丢失字节连续性；消费者必须先重置半帧状态，再继续poll，不能按字节数使用。 */
 #define UART_RX_GAP (-1)
@@ -26,8 +31,10 @@ enum {
 };
 
 typedef struct {
-    uint32_t queue_overflows;  /* ISR投队列失败次数。 */
-    uint32_t dropped_blocks;   /* 已知丢弃块数，含断流后清队列；不是物理丢失字节数。 */
+    uint32_t queue_overflows;  /* UART4/USART2字节环或USART1接收队列满的次数。 */
+    uint32_t dropped_blocks;   /* 已知有字节丢失的接收块次数；不等价于物理丢失字节数。 */
+    uint32_t last_drop_ms;     /* UART4最近一次确认丢块的MCU启动毫秒数。 */
+    uint32_t session_end_bytes; /* UART4已OFF会话结束时明确清理的字节数。 */
     uint32_t errors;           /* HAL错误回调次数。 */
     uint32_t last_hal_error;   /* 最近一次HAL UART错误位图。 */
     uint32_t invalid_events;   /* 非HT事件的长度非法次数。 */
@@ -58,9 +65,11 @@ void uart_start_all(void);
  * @param[in] id 已注册的UART_PORT_*槽编号。
  * @param[out] buffer 非NULL调用方缓冲，至少UART_RX_BUF_SIZE字节。
  * @param[in] capacity 缓冲实际字节容量；小于要求时不出队。
- * @return >0实际字节数；0无数据/参数无效；UART_RX_GAP表示断流且已丢弃旧队列。
+ * @return >0实际字节数；0无数据/参数无效；UART_RX_GAP表示断流。
+ *         UART4和USART2先交付断点前已缓存的字节；本地命令口清空旧队列。
  *         返回<=0时输出不变；GAP时必须重置组帧状态并继续poll。
- * @note 每槽只允许一个任务消费，须周期调用以驱动100ms间隔的RX恢复。
+ * @note 每槽只允许一个任务消费。两路RK串口在下一次轮询尝试恢复，失败后间隔100ms再试。
+ *       USART1本地控制台维持100ms的恢复间隔。
  *       出队不等待，但恢复可等待HAL Abort自身超时；不得ISR调用。
  *       一个接收块不保证是一帧，队列满/异常时不保证可靠传输。
  */
@@ -94,7 +103,11 @@ int uart_tx_status(int id, uint32_t ticket, uint32_t *completed_ms);
 
 /* 只读发送空闲证明：TX环空且最后停止位已发出。 */
 int uart_tx_idle(int id);
-/* 唯一RK消费任务在已协商的静默窗口调用；清旧RX，返回IF_OK/IF_ERR。 */
+/* RK任务在确认OFF且发送已完成后截断旧会话RX；同速保留DMA。成功返回IF_OK。 */
+int uart_rk_end_rx_session(void);
+/* 成功改速后，old_rx_bytes 可选返回仍等待读取的旧速字节数；其后有序交付 GAP。 */
+int uart_rk_set_baud(uint32_t baud, uint16_t *old_rx_bytes);
+/* 唯一RK消费任务在双方静默窗口改速；保留已收字节，以GAP隔开新旧速率，返回IF_OK/IF_ERR。 */
 int uart_set_baud(int id, uint32_t baud);
 
 #endif /* UART_ROUTER_H */

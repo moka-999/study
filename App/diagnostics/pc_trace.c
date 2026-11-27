@@ -46,6 +46,11 @@ void pc_trace_rx_error(int socket_error)
                (unsigned long)s_connection, socket_error, s_peer_ip, s_peer_port);
 }
 
+void pc_trace_listen_error(int socket_error)
+{
+    trace_line("PC", "listener selectFailed errno=%d retrying", socket_error);
+}
+
 void pc_trace_rx(const pc_protocol_frame_t *frame)
 {
     trace_group_t group = periodic_request(frame->command_id);
@@ -81,6 +86,11 @@ void pc_trace_tx(const pc_dispatch_response_t *r, uint32_t seq, size_t queued, i
         trace_line("PC TX", "conn=%lu cmd=%04X seq=%lu len=%lu req=%04X %.*s",
                    (unsigned long)s_connection, cmd, (unsigned long)seq, (unsigned long)r->length, r->request_command,
                    (int)(r->length - PC_PROTOCOL_HEADER_SIZE), (const char *)r->data + PC_PROTOCOL_HEADER_SIZE);
+    } else if (cmd == PC_COMMAND_CHIP_INFO) {
+        /* 010D 每轮一包，直接记录已入队的正文，现场可对照 PC 显示的两颗容量。 */
+        trace_line("PC TX", "conn=%lu cmd=%04X seq=%lu tcpQueued=%lu %.*s",
+                   (unsigned long)s_connection, cmd, (unsigned long)seq, (unsigned long)queued,
+                   (int)(r->length - PC_PROTOCOL_HEADER_SIZE), (const char *)r->data + PC_PROTOCOL_HEADER_SIZE);
     } else {
         trace_line("PC TX", "conn=%lu cmd=%04X seq=%lu tcpQueued=%lu", (unsigned long)s_connection,
                    cmd, (unsigned long)seq, (unsigned long)queued);
@@ -107,9 +117,8 @@ void pc_trace_start(uint16_t cmd, const pc_test_start_view_t *start, const char 
                    start->target_mv[DDR_RAIL_VDDQ]);
 }
 
-void pc_trace_result(const char *name, uint32_t index, const rk_final_result_t *result)
+void pc_trace_format_result(const rk_final_result_t *result, char *text, size_t capacity)
 {
-    if (!log_console_mcu_selected()) return;
     char dies[RK_RESULT_DIE_COUNT][sizeof("FAIL@0xFFFFFFFFFFFFFFFF")] = {"PASS", "PASS"};
     for (unsigned i = 0; i < result->failure_count; ++i) {
         const rk_failure_detail_t *f = &result->failures[i];
@@ -117,8 +126,16 @@ void pc_trace_result(const char *name, uint32_t index, const rk_final_result_t *
                  (unsigned long)(f->error_address >> 32), (unsigned long)(uint32_t)f->error_address);
     }
     char ms[TRACE_U64_TEXT_SIZE];
-    trace_line("RESULT", "%s idx=%lu time=%sms die0=%s die1=%s", name, (unsigned long)index,
-               trace_u64(result->elapsed_ms, ms), dies[0], dies[1]);
+    (void)snprintf(text, capacity, "time=%sms die0=%s die1=%s",
+                   trace_u64(result->elapsed_ms, ms), dies[0], dies[1]);
+}
+
+void pc_trace_result(const char *name, uint32_t index, const rk_final_result_t *result)
+{
+    if (!log_console_mcu_selected()) return;
+    char summary[96];
+    pc_trace_format_result(result, summary, sizeof(summary));
+    trace_line("RESULT", "%s idx=%lu %s", name, (unsigned long)index, summary);
 }
 
 void pc_trace_discard(uint32_t cookie, const char *reason)

@@ -4,6 +4,7 @@
 #include <string.h>
 #if defined(B1_RK_UART)
 #include "pc_trace.h"
+#include "rk_task_control.h"
 #endif
 
 static pc_power_config_t s_config;
@@ -185,7 +186,10 @@ static void wait_off(void)
     pwr_ctrl_state_t state = pwr_ctrl_get_state();
     if (state == PWR_CTRL_STATE_FAULT) complete("executionFailed");
     else if (state == PWR_CTRL_STATE_OFF) {
-        if (s_diag.action == PC_POWER_OFF) complete(NULL);
+        if (s_diag.failed_phase == PC_POWER_WAIT_RK_READY) {
+            /* 冷启动训练已超时，到达OFF才交付原测试失败；不再用该点配置上电。 */
+            enter(PC_POWER_DONE);
+        } else if (s_diag.action == PC_POWER_OFF) complete(NULL);
         else enter(PC_POWER_OFF_HOLD);
     } else if (elapsed(s_config.transition_timeout_ms)) complete("timeout");
 }
@@ -211,10 +215,19 @@ static void boot_settle(void)
     if (needs_rk_ready() && !arm_rk()) {
         complete("notReady"); return;
     }
+#if defined(B1_RK_UART)
+    rk_link_manual_frequency(s_target.manual_boot ? s_target.manual_frequency : -1);
+#endif
     const char *error = power_error(monitor_request_training_power_on(
         s_target.memory_type, s_target.mv, HAL_GetTick()));
     if (error) complete(error);
-    else enter(PC_POWER_WAIT_ON);
+    else {
+#if defined(B1_RK_UART)
+        /* 只对实际新上电的RK布防一次，复用已运行的配置不会经过这里。 */
+        rk_timing_readback_arm(s_target.timing_writes_pending);
+#endif
+        enter(PC_POWER_WAIT_ON);
+    }
 }
 
 static void wait_on(void)
@@ -234,7 +247,14 @@ static void wait_on(void)
 static void wait_ready(void)
 {
     if (pwr_ctrl_get_state() != PWR_CTRL_STATE_ON) { complete("powerOff"); return; }
-    if (elapsed(s_config.ready_timeout_ms)) { complete("timeout"); return; }
+    if (elapsed(s_config.ready_timeout_ms)) {
+        if (s_diag.action == PC_POWER_PREPARE_TEST) {
+            s_diag.failed_phase = PC_POWER_WAIT_RK_READY;
+            s_diag.error = "timeout";
+            enter(PC_POWER_REQUEST_OFF);
+        } else complete("timeout");
+        return;
+    }
     int result = s_rk.poll(s_diag.rk_token);
     if (result == 1) {
         if (s_diag.action == PC_POWER_PREPARE_TEST) {

@@ -57,7 +57,7 @@ pc_test_json_result_t pc_test_start_read_index(const cJSON *root, uint32_t *inde
 }
 
 /* 总数相同且每个必填键都出现一次，才允许继续取值；重复键不能隐式取第一项。 */
-static int has_exact_fields(const cJSON *root, const char *const *fields, size_t count)
+int pc_test_has_exact_fields(const cJSON *root, const char *const *fields, size_t count)
 {
     size_t actual = 0U;
     if (!cJSON_IsObject(root)) return 0;
@@ -74,7 +74,7 @@ pc_test_json_result_t pc_site_config_parse(const cJSON *root, pc_site_config_t *
     static const char *const fields[] = {"testerId", "siteId", "siteEnabled", "dutEnabled"};
     static const char *const group_fields[] = {"mirrorIndex", "dut"};
     uint32_t tester, site;
-    if (!config || !has_exact_fields(root, fields, sizeof(fields) / sizeof(fields[0])))
+    if (!config || !pc_test_has_exact_fields(root, fields, sizeof(fields) / sizeof(fields[0])))
         return PC_TEST_JSON_ERROR_FIELDS;
     const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(root, "siteEnabled");
     if (!cJSON_IsBool(enabled) || read_required_u32(root, "testerId", &tester) != PC_TEST_JSON_OK ||
@@ -92,7 +92,7 @@ pc_test_json_result_t pc_site_config_parse(const cJSON *root, pc_site_config_t *
         const cJSON *group;
         cJSON_ArrayForEach(group, groups) {
             uint32_t mirror;
-            if (!has_exact_fields(group, group_fields, sizeof(group_fields) / sizeof(group_fields[0])) ||
+            if (!pc_test_has_exact_fields(group, group_fields, sizeof(group_fields) / sizeof(group_fields[0])) ||
                 read_required_u32(group, "mirrorIndex", &mirror) != PC_TEST_JSON_OK ||
                 mirror >= PC_SITE_MIRROR_COUNT || (seen & (1U << mirror)))
                 return PC_TEST_JSON_ERROR_FIELDS;
@@ -145,7 +145,7 @@ pc_test_json_result_t pc_power_parse(const cJSON *root, const char **memory_type
     static const uint16_t step_mv[] = {DDR_VDD1_STEP_MV, DDR_VDDX_STEP_MV, DDR_VDDX_STEP_MV};
     if (!root || !memory_type || !steps || !target_mv)
         return PC_TEST_JSON_ERROR_ARGUMENT;
-    if (!has_exact_fields(root, fields, sizeof(fields) / sizeof(fields[0])))
+    if (!pc_test_has_exact_fields(root, fields, sizeof(fields) / sizeof(fields[0])))
         return PC_TEST_JSON_ERROR_FIELDS;
     const char *name = read_name(root, "memoryType", types, sizeof(types) / sizeof(types[0]));
     if (!name) return PC_TEST_JSON_ERROR_FIELDS;
@@ -177,13 +177,23 @@ static const char *const s_timing_fields[] = {
     "tRASmin", "tRASmax", "tWTR", "tRFCmin", "tFAW", "tCCD", "tRRD", "BL", "Freq"
 };
 
+int pc_timing_field_index(const char *name)
+{
+    if (name) {
+        for (size_t i = 0U; i < sizeof(s_timing_fields) / sizeof(s_timing_fields[0]); ++i) {
+            if (strcmp(name, s_timing_fields[i]) == 0) return (int)i;
+        }
+    }
+    return -1;
+}
+
 uint16_t pc_timing_command(unsigned index)
 {
     return index < PC_TIMING_PARAMETER_COUNT ? (uint16_t)(index + (index < 2U ? 0x25U : 0x26U)) : 0U;
 }
 
 /* 逐位累积避免double舍入；只限制线上整数位宽，不替PC判断时序数值是否适用。 */
-static int timing_integer(const char *text, int frequency, int64_t *out)
+int pc_timing_integer(const char *text, int frequency, int64_t *out)
 {
     int negative = frequency && *text == '-';
     if (negative) ++text;
@@ -208,17 +218,14 @@ static pc_test_json_result_t parse_timing_parameters(const cJSON *timing, pc_tim
     pc_timing_parameters_t parsed = {.frequency = -1};
     uint32_t seen = 0U;
     for (const cJSON *item = timing->child; item; item = item->next) {
-        size_t field;
-        for (field = 0U; field < sizeof(s_timing_fields) / sizeof(s_timing_fields[0]); ++field) {
-            if (item->string && strcmp(item->string, s_timing_fields[field]) == 0) break;
-        }
-        if (field == sizeof(s_timing_fields) / sizeof(s_timing_fields[0]) || (seen & (1U << field)))
+        int field = pc_timing_field_index(item->string);
+        if (field < 0 || (seen & (1U << field)))
             return PC_TEST_JSON_ERROR_FIELDS;
         if (!cJSON_IsString(item) || !item->valuestring) return PC_TEST_JSON_ERROR_FIELD_TYPE;
         seen |= 1U << field;
         if (!item->valuestring[0]) continue;
         int64_t value;
-        if (!timing_integer(item->valuestring, field == PC_TIMING_PARAMETER_COUNT, &value))
+        if (!pc_timing_integer(item->valuestring, field == PC_TIMING_PARAMETER_COUNT, &value))
             return PC_TEST_JSON_ERROR_INTEGER_RANGE;
         if (field == PC_TIMING_PARAMETER_COUNT) parsed.frequency = value;
         else {
@@ -248,7 +255,7 @@ static pc_test_json_result_t parse_start(const cJSON *root,
     if (slt && timeout) return PC_TEST_JSON_ERROR_FIELDS;
     size_t field_count = 7U;
     if (timeout) fields[field_count++] = "timeoutMs";
-    if (!has_exact_fields(root, fields, field_count))
+    if (!pc_test_has_exact_fields(root, fields, field_count))
         return PC_TEST_JSON_ERROR_FIELDS;
 
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "algorithmName");
@@ -315,14 +322,14 @@ pc_test_json_result_t pc_round_end_parse(const cJSON *root, uint8_t mirror_count
     static const char *const chip_fields[] = {"physicalAddr", "mirrorIndex"};
     if (!failed_mask || mirror_count == 0U || mirror_count > 32U)
         return PC_TEST_JSON_ERROR_ARGUMENT;
-    if (!has_exact_fields(root, fields, 1U)) return PC_TEST_JSON_ERROR_FIELDS;
+    if (!pc_test_has_exact_fields(root, fields, 1U)) return PC_TEST_JSON_ERROR_FIELDS;
     const cJSON *chips = cJSON_GetObjectItemCaseSensitive(root, "failChips");
     if (!cJSON_IsArray(chips)) return PC_TEST_JSON_ERROR_FIELD_TYPE;
     uint32_t mask = 0U;
     const cJSON *chip;
     cJSON_ArrayForEach(chip, chips) {
         uint32_t mirror;
-        if (!has_exact_fields(chip, chip_fields, 2U) ||
+        if (!pc_test_has_exact_fields(chip, chip_fields, 2U) ||
             read_required_u32(chip, "mirrorIndex", &mirror) != PC_TEST_JSON_OK ||
             mirror >= mirror_count ||
             !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(chip, "physicalAddr")))
@@ -382,33 +389,56 @@ cJSON *pc_test_result_create(const char *algorithm_name,
     return root;
 }
 
-cJSON *pc_algorithm_result_create(const char *algorithm_type, const char *algorithm_name,
-                                    uint32_t algorithm_index,
-                                    const char *site_id,
-                                    uint64_t elapsed_ms,
-                                    const pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT])
+/* 只由无符号整数生成最多20位的JSON数字；避免经double丢失低位。 */
+int pc_test_add_uint64(cJSON *object, const char *key, uint64_t value)
 {
-    if (!algorithm_type || !algorithm_name || !site_id || !dies ||
+    char text[sizeof("18446744073709551615")];
+    char *digits = text + sizeof(text) - 1U;
+    *digits = '\0';
+    do {
+        *--digits = (char)('0' + value % 10U);
+        value /= 10U;
+    } while (value);
+    return cJSON_AddRawToObject(object, key, digits) != NULL;
+}
+
+int pc_chip_info_append(cJSON *array, unsigned mirror, const char *type, uint64_t size_mib)
+{
+    cJSON *chip = cJSON_CreateObject();
+    if (chip && cJSON_AddNumberToObject(chip, "mirrorIndex", mirror) &&
+        cJSON_AddStringToObject(chip, "MemoryType", type ? type : "") &&
+        pc_test_add_uint64(chip, "MemorySize", size_mib) && cJSON_AddItemToArray(array, chip))
+        return 1;
+    cJSON_Delete(chip);
+    return 0;
+}
+
+/* 只有RK实报首错地址才输出16位十六进制字符串；数值0也是有效地址。 */
+static int add_error_address(cJSON *desc, const uint64_t *address)
+{
+    if (!address) return cJSON_AddNullToObject(desc, "firstErrorAddress") != NULL;
+    static const char digits[] = "0123456789ABCDEF";
+    char hex[] = "0x0000000000000000";
+    for (size_t i = 0U; i < 16U; ++i)
+        hex[2U + i] = digits[(*address >> ((15U - i) * 4U)) & 0xFU];
+    return cJSON_AddStringToObject(desc, "firstErrorAddress", hex) != NULL;
+}
+
+/* 训练失败时算法尚未执行，内部以dies为空区分这条路径。 */
+static cJSON *create_algorithm_report(const char *algorithm_type, const char *algorithm_name,
+    uint32_t algorithm_index, const char *site_id, uint64_t elapsed_ms,
+    const pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT])
+{
+    if (!algorithm_type || !algorithm_name || !site_id ||
         (strcmp(algorithm_type, "functional") != 0 && strcmp(algorithm_type, "parametric") != 0))
         return NULL;
     int idd = strcmp(algorithm_type, "parametric") == 0;
-    for (size_t die = 0U; die < PC_FUNCTIONAL_DIE_COUNT; ++die) {
-        if (!dies[die].error_type || dies[die].failed > 1U) return NULL;
-    }
-    /* uint64最多20位十进制数；只由整数生成Raw数字，避免double丢低位，禁止外部文本进入。 */
-    char elapsed_text[21];
-    char *elapsed_digits = elapsed_text + sizeof(elapsed_text) - 1U;
-    *elapsed_digits = '\0';
-    do {
-        *--elapsed_digits = (char)('0' + elapsed_ms % 10U);
-        elapsed_ms /= 10U;
-    } while (elapsed_ms != 0U);
     cJSON *root = cJSON_CreateObject();
     if (!root || !cJSON_AddStringToObject(root, "siteId", site_id) ||
         !cJSON_AddStringToObject(root, "algorithmType", algorithm_type) ||
         !cJSON_AddStringToObject(root, "algorithmName", algorithm_name) ||
         !cJSON_AddNumberToObject(root, "algorithmIndex", algorithm_index) ||
-        !cJSON_AddRawToObject(root, "testTimeMs", elapsed_digits)) {
+        !pc_test_add_uint64(root, "testTimeMs", elapsed_ms)) {
         cJSON_Delete(root);
         return NULL;
     }
@@ -424,42 +454,58 @@ cJSON *pc_algorithm_result_create(const char *algorithm_type, const char *algori
             cJSON_Delete(root);
             return NULL;
         }
-        /* 子节点已归root所有；失败删除整棵树，不交付单颗或半截结果。 */
+        int passed = 1;
+        const char *error_type = "";
+        const uint64_t *error_address = NULL;
+        if (!dies) {
+            passed = 0;
+            error_type = "DdrTrainingFailed";
+        } else if (idd) {
+            error_type = NULL;  /* IDD已采集完成，正常结果沿用resultDesc=null。 */
+        } else if (dies[die].failed) {
+            passed = 0;
+            error_type = dies[die].error_type;
+            error_address = &dies[die].error_address;
+        }
         if (!cJSON_AddNumberToObject(entry, "mirrorIndex", die) ||
-            !cJSON_AddNumberToObject(entry, "testStatus", !idd && dies[die].failed ? 0 : 1)) {
+            !cJSON_AddNumberToObject(entry, "testStatus", passed)) {
             cJSON_Delete(root);
             return NULL;
         }
-        /* IDD当前仅表示采集完成，用户约定两颗默认PASS；判限尚未接入。 */
-        if (idd) {
-            if (!cJSON_AddNullToObject(entry, "resultDesc") ||
-                !cJSON_AddStringToObject(entry, "physicalAddr", "")) {
-                cJSON_Delete(root);
-                return NULL;
-            }
-            continue;
-        }
-        cJSON *desc = cJSON_AddObjectToObject(entry, "resultDesc");
-        /* 手动输出u64十六进制，避免double及精简printf损失首错地址精度。 */
-        static const char digits[] = "0123456789ABCDEF";
-        char address[] = "0x0000000000000000";
-        for (size_t i = 0U; i < 16U; ++i) {
-            address[2U + i] = digits[(dies[die].error_address >> ((15U - i) * 4U)) & 0xFU];
-        }
-        if (!desc ||
-            !(dies[die].failed ? cJSON_AddStringToObject(desc, "firstErrorAddress", address)
-                              : cJSON_AddNullToObject(desc, "firstErrorAddress")) ||
-            !cJSON_AddStringToObject(desc, "errorType", dies[die].failed ? dies[die].error_type : "") ||
+        cJSON *desc = error_type ? cJSON_AddObjectToObject(entry, "resultDesc")
+                                 : cJSON_AddNullToObject(entry, "resultDesc");
+        if (!desc || (error_type && (!add_error_address(desc, error_address) ||
+            !cJSON_AddStringToObject(desc, "errorType", error_type))) ||
             !cJSON_AddStringToObject(entry, "physicalAddr", "")) {
             cJSON_Delete(root);
             return NULL;
         }
     }
-    if (!cJSON_AddNullToObject(root, "measurementData")) {
+    cJSON *measurement = dies ? cJSON_AddNullToObject(root, "measurementData")
+                              : cJSON_AddObjectToObject(root, "measurementData");
+    if (!measurement) {
         cJSON_Delete(root);
         return NULL;
     }
     return root;
+}
+
+cJSON *pc_algorithm_result_create(const char *algorithm_type, const char *algorithm_name,
+    uint32_t algorithm_index, const char *site_id, uint64_t elapsed_ms,
+    const pc_functional_die_result_t dies[PC_FUNCTIONAL_DIE_COUNT])
+{
+    if (!dies) return NULL;
+    for (size_t die = 0U; die < PC_FUNCTIONAL_DIE_COUNT; ++die)
+        if (!dies[die].error_type || dies[die].failed > 1U) return NULL;
+    return create_algorithm_report(algorithm_type, algorithm_name, algorithm_index,
+                                   site_id, elapsed_ms, dies);
+}
+
+cJSON *pc_ddr_training_failed_result_create(const char *algorithm_type, const char *algorithm_name,
+    uint32_t algorithm_index, const char *site_id, uint64_t elapsed_ms)
+{
+    return create_algorithm_report(algorithm_type, algorithm_name, algorithm_index,
+                                   site_id, elapsed_ms, NULL);
 }
 
 cJSON *pc_functional_result_create(const char *algorithm_name, uint32_t algorithm_index,

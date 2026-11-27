@@ -130,6 +130,14 @@ static struct {
     int64_t value;
     int status;
 } s_frequency;
+static int64_t s_manual_frequency = -1;
+
+void rk_link_manual_frequency(int64_t value)
+{
+    taskENTER_CRITICAL();
+    s_manual_frequency = value;
+    taskEXIT_CRITICAL();
+}
 
 void rk_link_ready_note_rx(const tlv_frame_t *frame)
 {
@@ -141,6 +149,7 @@ void rk_link_ready_note_rx(const tlv_frame_t *frame)
         (uint64_t)(frame->sequence - s_ready.first_tx) <=
         (uint64_t)(s_ready.last_tx - s_ready.first_tx);
     int queried = s_frequency.token ? s_frequency.status != 0 : -1;
+    s_manual_frequency = -1; /* SPL 已进入运行阶段，本次手动启动的频率到此为止。 */
     if (first) s_ready.ready = 1U;
     taskEXIT_CRITICAL();
     if (first) rk_trace_ready(frame->sequence, queried);
@@ -179,7 +188,7 @@ void rk_link_frequency_begin(uint32_t token, int64_t value)
 int64_t rk_link_frequency_get(uint32_t *token)
 {
     taskENTER_CRITICAL();
-    int64_t value = s_frequency.token ? s_frequency.value : -1;
+    int64_t value = s_frequency.token ? s_frequency.value : s_manual_frequency;
     if (token) *token = s_frequency.token;
     taskEXIT_CRITICAL();
     return value;

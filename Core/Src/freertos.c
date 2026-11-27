@@ -33,13 +33,12 @@ QueueHandle_t rkRequestQueue;
 QueueHandle_t rkResponseQueue;
 
 /*
- * 网络初始化会创建 tcpip、收包和链路监测线程，512B 的 CubeMX 默认栈
- * 不够使用。这里沿用 V2 实测稳定的 8KiB，并将 LwIP 初始化放在线程
- * 上下文中，禁止在调度器启动前调用任何依赖 RTOS 的接口。
+ * 默认任务在线程上下文中初始化网络，随后处理串口、两个网络调试窗口和状态快照。
+ * CMSIS 的 stack_size 以字节为单位。
  */
 static const osThreadAttr_t s_default_task_attributes = {
     .name = "defaultTask",
-    .stack_size = 8U * 1024U,
+    .stack_size = 12U * 1024U,
     .priority = osPriorityNormal,
 };
 
@@ -114,10 +113,10 @@ void MX_FREERTOS_Init(void)
     if (osThreadNew(StartDefaultTask, NULL, &s_default_task_attributes) == NULL) {
         Error_Handler();
     }
-    /* 栈单位为StackType_t，TCP/RK/监测分别16/32/2KiB；RK只处理自己的串口链路。 */
-    if (xTaskCreate(StartTcpServerTask, "tcp", 4096, NULL, 5, NULL) != pdPASS ||
+    /* xTaskCreate 按 32 位字分配栈，TCP、RK、监测任务分别使用 24、32、4 KiB。 */
+    if (xTaskCreate(StartTcpServerTask, "tcp", 6144, NULL, 5, NULL) != pdPASS ||
         xTaskCreate(StartRkTask, "rk", 8192, NULL, 3, NULL) != pdPASS ||
-        xTaskCreate(StartMonitorTask, "monitor", 512, NULL, 2, NULL) != pdPASS) {
+        xTaskCreate(StartMonitorTask, "monitor", 1024, NULL, 2, NULL) != pdPASS) {
         Error_Handler();
     }
     /* B2独立SPI任务使用4KiB栈，不进入RK的队列、流水号或结果处理。 */

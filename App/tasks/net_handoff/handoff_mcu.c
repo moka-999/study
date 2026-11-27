@@ -23,6 +23,7 @@
 #include "task_watchdog.h"
 #include "log_console.h"
 #include "rk_link.h"
+#include "rk_task_control.h"
 #include "rk_trace.h"
 #include "state_machine.h"
 #include <string.h>
@@ -55,7 +56,6 @@ static volatile handoff_command_t s_command;
 static volatile uint8_t s_reset_stream, s_active;
 static volatile uint8_t s_stopping;
 static volatile handoff_boot_phase_t s_boot_phase;
-static tlv_sm_t s_spl_parser;
 static QueueHandle_t s_rx_queue;
 static SemaphoreHandle_t s_tx_done;
 static struct netif *s_netif;
@@ -75,6 +75,7 @@ static uint32_t s_last_byte;
 /* 低速应答TC后再切换；首个高速合法请求确认前保留有界回退窗口。 */
 static uint32_t s_uart_baud = SN_BOOT_BAUD, s_rate_started, s_requested_baud;
 static uint8_t s_rate_pending, s_rate_trial;
+static uint16_t s_old_rate_bytes;
 static volatile uint8_t s_baud_unknown;
 /* 自动SLT的业务归属由TCP上下文设置；RK只推进串口状态和最终恢复标记。
  * ON时预约先等本轮真实OFF，不能把旧运行电源记成新会话已启动。 */
@@ -165,6 +166,16 @@ int handoff_mcu_console_request(handoff_command_t command)
 int handoff_mcu_busy(void)
 {
     return s_stopping || s_state.phase != HANDOFF_NORMAL || s_reset_stream || slt_reserved();
+}
+
+int handoff_mcu_tlv_allowed(void)
+{
+    taskENTER_CRITICAL();
+    int allowed = !s_stopping && !s_reset_stream && !s_baud_unknown &&
+        s_boot_phase == HANDOFF_BOOT_PROBE &&
+        (s_state.phase == HANDOFF_NORMAL || s_state.phase == HANDOFF_ARMED);
+    taskEXIT_CRITICAL();
+    return allowed;
 }
 
 void handoff_mcu_stop(void)
@@ -473,6 +484,7 @@ static void execute(void *unused, const sn_frame_t *q, sn_frame_t *r)
         uint32_t baud = (uint32_t)q->data[0] | (uint32_t)q->data[1] << 8 |
                         (uint32_t)q->data[2] << 16 | (uint32_t)q->data[3] << 24;
         if ((baud != SN_DATA_BAUD && baud != SN_LEGACY_DATA_BAUD) || s_uart_baud != SN_BOOT_BAUD ||
+            (s_rate_pending && baud != s_requested_baud) ||
             !s_state.authorized || s_state.phase != HANDOFF_OWNED ||
             s_state.session != q->session) return;
         memcpy(r->data, q->data, SN_RATE_REQUEST_SIZE);
@@ -539,9 +551,13 @@ static void respond_serial(void)
         if (slt_reserved()) s_slt.started = 1U;
         s_boot_phase = HANDOFF_BOOT_EDK;
         taskEXIT_CRITICAL();
-        tlv_sm_reset(&s_spl_parser);
+        /* 前级自行跳转时立即结束SPL回读，SerialNet已接管同一个UART。 */
+        rk_timing_readback_cancel();
+        tlv_sm_reset(rk_task_spl_stream());
     }
     int handled = sn_server_handle(&s_server, &s_request, &s_response, execute, NULL);
+    /* 旧速完整帧仍按序处理并缓存；对端在新速重试时才答复，避免以错误速率确认。 */
+    if (s_old_rate_bytes) return;
     if (s_rate_trial && handled >= 0 && s_response.status == SN_OK &&
         s_request.op == SN_HELLO && s_request.length == 0U) {
         s_rate_trial = 0U;
@@ -584,14 +600,14 @@ static void continue_spl_boot(void)
     int automatic = slt_reserved();
     if (s_state.phase != HANDOFF_ARMED || s_boot_phase != HANDOFF_BOOT_PROBE ||
         pwr_ctrl_get_state() != PWR_CTRL_STATE_ON || pc_power_service_busy() ||
-        (automatic ? !s_slt.prepared : pc_test_service_busy()) || !rk_task_handoff_idle() ||
+        (automatic ? !s_slt.prepared : pc_test_service_busy()) ||
         rk_link_ready_poll(automatic ? s_slt.cookie : HANDOFF_SPL_READY_TOKEN) != 1 ||
         !uart_tx_idle(UART_PORT_RK_PROTOCOL)) return;
     uint8_t wire[TLV_CMD_FRAME_SIZE];
     taskENTER_CRITICAL();
-    /* TCP可能刚撤销尚未执行的预约；发送前再次确认，并先标记可能进入EDK。 */
-    if (s_state.phase != HANDOFF_ARMED || s_boot_phase != HANDOFF_BOOT_PROBE ||
-        (automatic && (!slt_reserved() || !s_slt.prepared))) {
+    /* 和控制台登记查询互斥：已受理的查询先收尾，确定跳转后才拒绝新的查询。 */
+    if (s_state.phase != HANDOFF_ARMED || !handoff_mcu_tlv_allowed() ||
+        (automatic && (!slt_reserved() || !s_slt.prepared)) || !rk_task_handoff_idle()) {
         taskEXIT_CRITICAL();
         return;
     }
@@ -620,19 +636,26 @@ void handoff_mcu_rk_wait(void)
 
 int handoff_mcu_rk_poll(void)
 {
+    tlv_sm_t *spl = rk_task_spl_stream();
     if (s_reset_stream) {
-        /* 确定OFF后的新一轮必须先恢复115200，再允许读取SPL协议。 */
-        if (s_uart_baud != SN_BOOT_BAUD || s_baud_unknown || s_stopping) {
-            if (!uart_tx_idle(UART_PORT_RK_PROTOCOL) ||
-                uart_set_baud(UART_PORT_RK_PROTOCOL, SN_BOOT_BAUD) != IF_OK) return 1;
+        /* 仅在网络已归还且电源 OFF 时结束旧会话；下一次上电的字节仍留给 SPL。 */
+        int off = pwr_ctrl_get_state() == PWR_CTRL_STATE_OFF;
+        int end_session = off && s_state.phase == HANDOFF_NORMAL;
+        int restore_baud = s_uart_baud != SN_BOOT_BAUD || s_baud_unknown;
+        if (s_stopping && !off) return 1;
+        if ((end_session || restore_baud) && !uart_tx_idle(UART_PORT_RK_PROTOCOL)) return 1;
+        if (restore_baud) {
+            if (uart_set_baud(UART_PORT_RK_PROTOCOL, SN_BOOT_BAUD) != IF_OK) return 1;
             s_uart_baud = SN_BOOT_BAUD;
             s_baud_unknown = 0U;
         }
+        if (end_session && uart_rk_end_rx_session() != IF_OK) return 1;
+        s_old_rate_bytes = 0U;
         s_rate_pending = s_rate_trial = 0U;
         /* server/parser仅RK任务拥有，TCP只发复位标记，不并发改缓存。 */
         memset(&s_server, 0, sizeof(s_server));
         sn_parser_reset(&s_parser);
-        tlv_sm_reset(&s_spl_parser);
+        if (off || s_boot_phase != HANDOFF_BOOT_PROBE) tlv_sm_reset(spl);
         s_boot_phase = HANDOFF_BOOT_PROBE;
         if (s_state.phase == HANDOFF_ARMED)
             (void)rk_link_ready_begin(slt_reserved() ? s_slt.cookie : HANDOFF_SPL_READY_TOKEN);
@@ -645,14 +668,17 @@ int handoff_mcu_rk_poll(void)
     }
     if (s_stopping) return 1;
     if (!handoff_mcu_busy()) return 0;
-    if (slt_start_expired()) s_boot_phase = HANDOFF_BOOT_FAILED;
+    if (s_boot_phase != HANDOFF_BOOT_FAILED && slt_start_expired()) {
+        s_boot_phase = HANDOFF_BOOT_FAILED;
+        rk_timing_readback_cancel();
+    }
     /* 预留不抢走原RK消费路径；实际识别EDK才停止向后级发送SPL时序/心跳。 */
     if (slt_reserved() && (s_slt.waiting_off ||
         (!s_slt.prepared && s_boot_phase == HANDOFF_BOOT_PROBE))) return 0;
     if (s_rate_pending) {
         if (!uart_tx_idle(UART_PORT_RK_PROTOCOL)) return 1;
         s_rate_pending = 0U;
-        if (uart_set_baud(UART_PORT_RK_PROTOCOL, s_requested_baud) != IF_OK) {
+        if (uart_rk_set_baud(s_requested_baud, &s_old_rate_bytes) != IF_OK) {
             s_baud_unknown = 1U; /* HAL或RX重启失败时不能假设硬件还在旧速率。 */
             s_boot_phase = HANDOFF_BOOT_FAILED;
             report_baud("switch failed; power cycle RK to retry");
@@ -661,12 +687,11 @@ int handoff_mcu_rk_poll(void)
         s_uart_baud = s_requested_baud;
         s_rate_started = HAL_GetTick();
         s_rate_trial = 1U;
-        sn_parser_reset(&s_parser);
         report_baud("trial");
     }
     if (s_rate_trial && (uint32_t)(HAL_GetTick() - s_rate_started) >= SN_RATE_TRIAL_MS &&
         uart_tx_idle(UART_PORT_RK_PROTOCOL)) {
-        if (uart_set_baud(UART_PORT_RK_PROTOCOL, SN_BOOT_BAUD) != IF_OK) {
+        if (uart_rk_set_baud(SN_BOOT_BAUD, &s_old_rate_bytes) != IF_OK) {
             s_baud_unknown = 1U;
             s_boot_phase = HANDOFF_BOOT_FAILED;
             report_baud("fallback failed; power cycle RK to retry");
@@ -674,7 +699,6 @@ int handoff_mcu_rk_poll(void)
         }
         s_uart_baud = SN_BOOT_BAUD;
         s_rate_trial = 0U;
-        sn_parser_reset(&s_parser);
         report_baud("fallback: no fast HELLO");
         /* 保留低速速率请求缓存；ACK丢失后同序号重试可重新协商。 */
     }
@@ -683,6 +707,7 @@ int handoff_mcu_rk_poll(void)
         /* 先证明最后停止位已经发出；不等待尚未约定的RK ACK，不据此宣布EDK就绪。 */
         if (!uart_tx_idle(UART_PORT_RK_PROTOCOL)) return 1;
         s_boot_phase = HANDOFF_BOOT_EDK;
+        tlv_sm_reset(spl);
         sn_parser_reset(&s_parser);
         static const char sent[] = "[handoff] SPL cmd=003E tx=complete; waiting EDK HELLO\r\n";
         (void)log_console_write(sent, sizeof(sent) - 1U);
@@ -694,15 +719,15 @@ int handoff_mcu_rk_poll(void)
         if (count == 0) break;
         if (count < 0) {
             sn_parser_reset(&s_parser);
-            tlv_sm_reset(&s_spl_parser);
+            tlv_sm_reset(spl);
             continue;
         }
         s_last_byte = now;
         for (int i = 0; i < count; ++i) {
             if (s_state.phase == HANDOFF_ARMED && s_boot_phase == HANDOFF_BOOT_PROBE &&
-                tlv_sm_feed(&s_spl_parser, s_uart_rx[i]) == 1) {
+                tlv_sm_feed(spl, s_uart_rx[i]) == 1) {
                 tlv_frame_t frame;
-                if (tlv_sm_get_frame(&s_spl_parser, &frame) >= 0) {
+                if (tlv_sm_get_frame(spl, &frame) >= 0) {
                     rk_task_handoff_receive(&frame);
                     sn_parser_reset(&s_parser);
                     continue;
@@ -710,10 +735,13 @@ int handoff_mcu_rk_poll(void)
             }
             if (sn_feed(&s_parser, s_uart_rx[i], &s_request) != 1) continue;
             respond_serial();
-            if (s_rate_pending) return 1;
         }
+        /* 路由在每个 GAP 处分批，同一批不会同时包含新旧速字节。 */
+        if (s_old_rate_bytes) s_old_rate_bytes -= (uint16_t)count;
+        /* 同批还可能有低速重试；先处理已经取出的所有字节，再等应答 TC 改速。 */
+        if (s_rate_pending) return 1;
     }
-    (void)tlv_sm_check_timeout(&s_spl_parser, RK_BYTE_TIMEOUT_MS);
+    (void)tlv_sm_check_timeout(spl, RK_BYTE_TIMEOUT_MS);
     continue_spl_boot();
     if (s_state.phase == HANDOFF_ARMED && s_boot_phase == HANDOFF_BOOT_PROBE)
         rk_task_handoff_heartbeat();

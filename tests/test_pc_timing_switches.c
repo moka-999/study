@@ -36,6 +36,9 @@ static void switch_execute(uint16_t command, const char *frequency, int external
     pc_dispatch_response_t response;
     char *json = switch_request(command, frequency, external);
     unsigned observed = queue_calls, settings = 0U, algorithms = 0U;
+    unsigned previous_on = power_on_calls, previous_arms = readback_arms;
+    unsigned previous_done = readback_settings_done;
+    unsigned previous_waits = readback_waits;
     trace_capture_begin();
     round_command(command, json, "accepted", NULL);
     CHECK(strstr(trace_capture_text(), "timingEnable=" S(B1_RK_TIMING_ENABLE)
@@ -57,6 +60,8 @@ static void switch_execute(uint16_t command, const char *frequency, int external
             CHECK(queue_calls == observed + 1U);
             observed = queue_calls;
             if (rk_is_timing_command(queued_request.command_id)) {
+                /* 每次 SENT 事件都晚于入队；最后一项尚未返回时不能放行回读。 */
+                CHECK(readback_settings_done == previous_done);
                 CHECK(B1_RK_TIMING_ENABLE && settings < PC_TIMING_PARAMETER_COUNT);
                 CHECK(queued_request.command_id == pc_timing_command(settings));
                 CHECK(queued_request.parameter_value == settings + 1U);
@@ -72,11 +77,14 @@ static void switch_execute(uint16_t command, const char *frequency, int external
         if (prepared && (command == PC_COMMAND_SLT_START || algorithms == 1U)) break;
         if (mock_power_state == PWR_CTRL_STATE_WAIT_FIRST_RAIL) mock_power_state = PWR_CTRL_STATE_ON;
         if (mock_power_state == PWR_CTRL_STATE_WAIT_SECOND_RAIL_OFF) mock_power_state = PWR_CTRL_STATE_OFF;
+        /* 让冷启动后的回读跨过一次 PC 轮询；此时不能开始算法或把网络交给 EDK。 */
+        readback_held = readback_arms != previous_arms && readback_waits == previous_waits;
         /* SLT关闭普通时序后不需要额外SPL心跳；FUNC/PARA原有ready门禁仍生效。 */
         if (mock_power_state == PWR_CTRL_STATE_ON && (command != PC_COMMAND_SLT_START || B1_RK_TIMING_ENABLE))
             confirm_power(1);
         step_power(20U);
         if (pc_dispatch_next_response(91U, &response)) {
+            CHECK(!readback_held);
             CHECK(!external && !prepared);
             cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 91U);
             number_is(body, "requestCommandId", command);
@@ -84,8 +92,18 @@ static void switch_execute(uint16_t command, const char *frequency, int external
             cJSON_Delete(body);
             prepared = 1;
         }
+        if (readback_held) {
+            CHECK(!algorithms && !handoff_test.prepared);
+            CHECK(queue_calls == observed || rk_is_timing_command(queued_request.command_id));
+        }
     }
     CHECK(prepared && settings == (B1_RK_TIMING_ENABLE ? PC_TIMING_PARAMETER_COUNT : 0U));
+    CHECK(readback_arms - previous_arms == power_on_calls - previous_on);
+    if (power_on_calls != previous_on) {
+        CHECK(readback_deferred == (settings != 0U));
+        if (settings) CHECK(readback_settings_done == previous_done + 1U);
+        CHECK(readback_waits > previous_waits);
+    }
     CHECK(algorithms == (command == PC_COMMAND_SLT_START ? 0U : 1U));
     string_is(pc_test_service_timing_parameters(), "Freq", frequency);
     if (command == PC_COMMAND_SLT_START) {
@@ -116,11 +134,24 @@ void test_main(void)
     configure_power();
     switch_execute(PC_COMMAND_START_TEST, "2133", 0);
     unsigned on = power_on_calls, off = power_off_calls;
+    switch_execute(PC_COMMAND_START_TEST, "2133", 0);
+    CHECK(power_on_calls == on && power_off_calls == off);
     switch_execute(PC_COMMAND_START_TEST, "1600", 0);
     CHECK(power_on_calls == on + B1_RK_FREQ_ENABLE);
     CHECK(power_off_calls == off + B1_RK_FREQ_ENABLE);
     configure_power();
     switch_execute(PC_COMMAND_START_TEST, "-123", 0);
+
+    /* 外部已上电的首项可能正赶上启动回读。立即受理，释放后只投递一次。 */
+    unsigned previous_queue = queue_calls, previous_arms = readback_arms;
+    readback_held = 1;
+    round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
+    pc_dispatch_response_t response;
+    CHECK(pc_dispatch_next_response(92U, &response) == 0 && queue_calls == previous_queue);
+    readback_held = 0;
+    CHECK(pc_dispatch_next_response(92U, &response) == 0 && queue_calls == previous_queue + 1U);
+    CHECK(readback_arms == previous_arms && queued_request.command_id == 17U);
+    result_is(0U, NULL, site_label);
 
     char *external = switch_request(PC_COMMAND_START_TEST, "2133", 1);
     if (B1_RK_FREQ_ENABLE) {
