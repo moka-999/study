@@ -98,7 +98,7 @@ class McuOverlayTests(unittest.TestCase):
             str(snapshot / 'App/tasks/net_handoff/handoff_state.c'), str(Path(__file__).with_name('test_mcu_handoff.c')),
             str(snapshot / 'App/protocol/rk/frame.c'), str(snapshot / 'App/protocol/rk/state_machine.c'),
             str(snapshot / 'App/protocol/common/crc.c'), str(snapshot / 'App/tasks/rk/rk_link.c'),
-            str(snapshot / 'App/tasks/rk/rk_task.c'),
+            str(snapshot / 'App/tasks/rk/rk_task.c'), str(snapshot / 'App/tasks/rk/rk_timing_readback.c'),
             str(REPO / 'tests/support/qemu_start.s'), '-nostartfiles', '--specs=nosys.specs',
             '-T' + str(REPO / 'tests/support/qemu_test.ld'), '-o', str(OUTPUT / 'test.elf')]
         for mode, source in ((0, 'test_mcu_handoff.c'), (1, 'test_mcu_coexist.c')):

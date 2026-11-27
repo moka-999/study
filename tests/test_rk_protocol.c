@@ -25,7 +25,7 @@ int uart_tx_idle(int id) { (void)id; return uart_idle; }
 #endif
 /* 仅测试桩使用：记录发送尝试，包含未入队的失败帧；不修改生产任务的接口。 */
 static unsigned tx_attempts;
-static struct { uint64_t sequence, value; uint32_t tick; uint16_t type, command; } tx_log[16];
+static struct { uint64_t sequence, value; uint32_t tick; uint16_t type, command; } tx_log[32];
 static jmp_buf task_exit;
 static unsigned task_iterations, delay_calls, health_calls, rx_calls, rx_batch_calls;
 static unsigned resume_power_after;
@@ -90,9 +90,13 @@ int uart_send(int id, uint8_t *buffer, uint16_t length)
     CHECK(id == 0 && (length == 22U || length == 16U || length == 30U || length == 34U || length == 27U));
     tlv_frame_t frame;
     CHECK(tlv_unpack(buffer, length, &frame) == (length == 16U ? 0 : length == 22U ? 1 : 2));
+    int action_or_query = length == 27U && frame.units[1].type == TLV_TYPE_PARAM_ACTION;
+#if defined(TEST_B1_PROTOCOL_TRACE)
+    action_or_query |= length == TLV_TIMING_QUERY_FRAME_SIZE && frame.units[1].type == TLV_TYPE_TIMING_INDEX;
+#endif
     CHECK((length == 22U && frame.units[0].type == TLV_TYPE_CMD) ||
           (length == 16U && frame.count == 0U) ||
-          (length == 27U && frame.units[1].type == TLV_TYPE_PARAM_ACTION) ||
+          action_or_query ||
           (length == 30U && frame.units[1].type == TLV_TYPE_TIMING_VALUE) ||
           (length == 34U && frame.units[1].type == TLV_TYPE_FREQUENCY_VALUE));
     CHECK(tx_attempts < sizeof(tx_log) / sizeof(tx_log[0]));
@@ -1690,6 +1694,95 @@ static void test_reply_only_heartbeat(void)
     reset_task_test();
 }
 
+#if defined(TEST_B1_PROTOCOL_TRACE)
+/* 倒序写入实际返回的通道，检查解码和日志均按标签编号归位。 */
+static tlv_frame_t timing_readback_reply(uint8_t index, uint64_t seq, uint8_t present)
+{
+    tlv_frame_t frame;
+    frame_init(&frame);
+    const uint8_t command[] = {RK_CMD_QUERY_TIMING, 0U};
+    CHECK(tlv_pack(&frame, TLV_TYPE_RESULT_CMD, command, sizeof(command)) == 0);
+    CHECK(tlv_pack(&frame, TLV_TYPE_TIMING_INDEX, &index, sizeof(index)) == 0);
+    for (int ch = RK_TIMING_CHANNEL_COUNT - 1U; ch >= 0; --ch) {
+        if (!(present & (1U << ch))) continue;
+        const uint8_t value[] = {(uint8_t)(index + ch), 0U, 0U, 0U};
+        CHECK(tlv_pack(&frame, TLV_TYPE_TIMING_CH0 + ch, value, sizeof(value)) == 0);
+    }
+    frame.sequence = seq;
+    return frame;
+}
+
+/* 来自RK的实测tRRD查询与应答；保留四路等值的原帧，再交换标签验证通道归属。 */
+static void test_timing_readback_wire(void)
+{
+    static const uint8_t tx[] = {
+        0x5A,0,0x0B,0x10,0x14, 0,0,0,0,0,0,0,2, 0x50,0,0,2,0x43,0,
+        0x30,0x21,0,1,0x0E, 0xE5,0x93,0xA5
+    };
+    static const uint8_t rx[] = {
+        0x5A,0,0x2B,0x11,0xCC, 0,0,0,0,0,0,0,2, 0x50,1,0,2,0x43,0,
+        0x30,0x21,0,1,0x0E, 0x70,0x22,0,4,0x16,0,0,0, 0x70,0x23,0,4,0x16,0,0,0,
+        0x70,0x24,0,4,0x16,0,0,0, 0x70,0x25,0,4,0x16,0,0,0, 0xE8,0x0C,0xA5
+    };
+    const uint8_t index = 14U;
+    uint8_t wire[TLV_TIMING_QUERY_FRAME_SIZE];
+    CHECK(tlv_pack_timing_query(index, 2U, wire, sizeof(wire)) == sizeof(tx));
+    CHECK(memcmp(wire, tx, sizeof(tx)) == 0 && strcmp(rk_timing_index_name(index), "tRRD") == 0);
+    /* 离线取 Seq=1 独立复算读延迟的两个 CRC，完整帧应包含小端 0x1410 和 0x93A1。 */
+    static const uint8_t cas_read[] = {
+        0x5A,0,0x0B,0x10,0x14, 0,0,0,0,0,0,0,1, 0x50,0,0,2,0x43,0,
+        0x30,0x21,0,1,1, 0xA1,0x93,0xA5
+    };
+    CHECK(tlv_pack_timing_query(1U, 1U, wire, sizeof(wire)) == sizeof(cas_read));
+    CHECK(memcmp(wire, cas_read, sizeof(cas_read)) == 0);
+    CHECK(tlv_pack_timing_query(2U, 2U, wire, sizeof(wire)) == 0);
+    CHECK(tlv_pack_timing_query(RK_TIMING_INDEX_COUNT, 2U, wire, sizeof(wire)) == 0);
+    tlv_frame_t frame;
+    rk_timing_readback_t reading;
+    /* 本次抓包在二进制应答前带ASCII打印，同一个串口流只能发布后面的一帧。 */
+    static const uint8_t prefix[] = "param_index=14\r\n";
+    tlv_sm_t stream;
+    tlv_sm_init(&stream);
+    CHECK(feed(&stream, prefix, sizeof(prefix) - 1U) == 0U);
+    CHECK(feed(&stream, rx, sizeof(rx)) == 1U);
+    CHECK(tlv_sm_get_frame(&stream, &frame) == 6 && frame.sequence == 2U);
+    CHECK(rk_timing_readback_decode(&frame, index, &reading) == 0 && reading.present == 0x0FU);
+    for (unsigned ch = 0; ch < RK_TIMING_CHANNEL_COUNT; ++ch) CHECK(reading.values[ch] == 22U);
+
+    frame.units[2].type = TLV_TYPE_TIMING_CH3;
+    frame.units[5].type = TLV_TYPE_TIMING_CH0;
+    const uint8_t distinct[] = {0x78, 0x56, 0x34, 0x12};
+    memcpy(frame.payload + frame.units[2].data_off, distinct, sizeof(distinct));
+    CHECK(rk_timing_readback_decode(&frame, index, &reading) == 0);
+    CHECK(reading.values[3] == UINT32_C(0x12345678) && reading.values[0] == 22U);
+    CHECK(rk_timing_readback_decode(&frame, index - 1U, &reading) == -1);
+    frame.units[5].type = TLV_TYPE_TIMING_CH1;
+    CHECK(rk_timing_readback_decode(&frame, index, &reading) == -1);
+    CHECK(reading.present == 0x0FU && reading.values[0] == 22U && reading.values[3] == UINT32_C(0x12345678));
+
+    for (uint8_t mask = 1U; mask < (1U << RK_TIMING_CHANNEL_COUNT); ++mask) {
+        frame = timing_readback_reply(0U, 2U, mask);
+        CHECK(rk_timing_readback_decode(&frame, 0U, &reading) == 0 && reading.present == mask);
+        for (unsigned ch = 0; ch < RK_TIMING_CHANNEL_COUNT; ++ch)
+            if (mask & (1U << ch)) CHECK(reading.values[ch] == ch);
+    }
+    frame = timing_readback_reply(index, 2U, 0U);
+    CHECK(rk_timing_readback_decode(&frame, index, &reading) == -1);
+    frame = timing_readback_reply(index, 2U, 1U);
+    frame.units[2].data_len = 2U;
+    CHECK(rk_timing_readback_decode(&frame, index, &reading) == -1);
+    frame = timing_readback_reply(index, 2U, 1U);
+    frame.units[0] = frame.units[2];
+    frame.count = 2U; /* 仅有 CH0 和索引，缺少命令。 */
+    CHECK(rk_timing_readback_decode(&frame, index, &reading) == -1);
+    frame = timing_readback_reply(index, 2U, 1U);
+    frame.units[1] = frame.units[2];
+    frame.count = 2U; /* 仅有命令和 CH0，缺少索引。 */
+    CHECK(rk_timing_readback_decode(&frame, index, &reading) == -1);
+    message("PASS: RK 0x43 capture, every non-empty channel subset and malformed replies\n");
+}
+#endif
+
 /* 真实编码/任务覆盖：无回应时序不会占算法结果窗口，频率可在ON之前应答。 */
 static void test_timing_and_frequency(void)
 {
@@ -1821,6 +1914,8 @@ static void test_protocol_trace(void)
         CHECK(strstr(trace_capture_text(), "5000[2]=0500 uart=queued"));
         frame = progress_frame(s_pending.sequence, 5U, 3U); accept_frame(&frame);
         frame = progress_frame(s_pending.sequence, 5U, 4U); accept_frame(&frame);
+        CHECK(rk_link_progress_percent(2U, 5U) == 4);
+        CHECK(rk_link_progress_percent(1U, 5U) == -1 && rk_link_progress_percent(2U, 7U) == -1);
         frame = progress_frame(s_pending.sequence, 5U, 25U); accept_frame(&frame);
         CHECK(strstr(trace_capture_text(), "3016[1]=03") && !strstr(trace_capture_text(), "3016[1]=04"));
         CHECK(strstr(trace_capture_text(), "3016[1]=19"));
@@ -1849,6 +1944,538 @@ static void test_protocol_trace(void)
 #endif
 
 #if defined(TEST_B1_PROTOCOL_TRACE)
+static void test_timing_readback_transactions(void)
+{
+    reset_task_test();
+    trace_capture_begin();
+    rk_timing_readback_arm(1);
+    TickType_t last_tick = 0U;
+    tick = pdMS_TO_TICKS(RK_HEARTBEAT_INTERVAL_MS);
+    process_heartbeat(&last_tick);
+    tlv_frame_t heartbeat = {.sequence = tx_log[0].sequence - 1U};
+    accept_frame(&heartbeat);
+    process_request();
+    CHECK(tx_attempts == 1U);
+    heartbeat.sequence = tx_log[0].sequence;
+    accept_frame(&heartbeat);
+    process_request();
+    CHECK(tx_attempts == 1U);
+
+    rk_request_t write = {0x2BU, 1U, 0U, 38U};
+    rk_response_t event;
+    CHECK(rk_link_request(&write) == 0);
+    process_request(); deliver_result();
+    CHECK(rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_SENT);
+    rk_timing_readback_settings_done();
+    CHECK(rk_timing_readback_busy());
+    rk_request_t algorithm = {2U, 2U, 0U, 0U};
+    CHECK(rk_link_request(&algorithm) == 0);
+    tick += pdMS_TO_TICKS(RK_TIMING_GAP_MS) - 1U;
+    process_request(); CHECK(tx_attempts == 2U);
+    ++tick;
+    for (uint8_t index = 0U; index < RK_TIMING_INDEX_COUNT; ++index) {
+        if (index == 2U) continue;
+        unsigned n = tx_attempts;
+        process_request();
+        CHECK(tx_attempts == n + 1U && tx_log[n].command == RK_CMD_QUERY_TIMING && tx_log[n].value == index);
+        tlv_frame_t reply = timing_readback_reply(index, tx_log[n].sequence, index == 14U ? 0x0AU : 0x0FU);
+        if (index == 0U) {
+            reply.sequence--;
+            accept_frame(&reply);
+            reply.sequence++;
+            reply.payload[2] = 1U;
+            accept_frame(&reply);
+            process_request(); CHECK(tx_attempts == n + 1U);
+            reply.payload[2] = index;
+        }
+        if (index == 1U) {
+            tick += pdMS_TO_TICKS(RK_TIMING_READBACK_TIMEOUT_MS);
+            process_request();
+            CHECK(strstr(trace_capture_text(), "CASReadLatency unavailable=timeout"));
+        }
+        accept_frame(&reply);
+    }
+    CHECK(strstr(trace_capture_text(), "tRRD CH1=15 CH3=17\r\n"));
+    CHECK(!strstr(trace_capture_text(), "CASReadLatency CH0="));
+    CHECK(!rk_timing_readback_busy() && requests.count == 1U);
+    process_request();
+    CHECK(tx_attempts == 18U && tx_log[17].command == algorithm.command_id);
+    tlv_frame_t result = task_result_frame(tx_log[17].sequence, algorithm.command_id, 0U);
+    accept_frame(&result); process_request();
+    CHECK(rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_COMPLETE);
+    tick += pdMS_TO_TICKS(RK_HEARTBEAT_INTERVAL_MS);
+    process_heartbeat(&last_tick);
+    heartbeat.sequence = tx_log[18].sequence;
+    accept_frame(&heartbeat); process_request();
+    CHECK(tx_attempts == 19U && !rk_timing_readback_busy());
+    trace_capture_stop();
+    reset_task_test();
+    message("PASS: one ordered 0x43 scan after writes, timeout, stale replies and subsequent algorithm\n");
+}
+
+/* 人工写入后，只接收间隔结束后新查询的应答；验证超时、发送失败及关电撤销。 */
+static void test_console_timing_write(void)
+{
+    reset_task_test();
+    trace_capture_begin();
+    rk_timing_readback_arm(1);
+    CHECK(strcmp(rk_task_set_timing(0x26U, 36U), "notReady") == 0);
+    rk_timing_readback_heartbeat_tx(8U);
+    rk_timing_readback_heartbeat_rx(8U);
+    CHECK(rk_task_set_timing(0x26U, UINT32_MAX) == NULL && rk_task_set_pending());
+    CHECK(strcmp(rk_task_set_timing(0x26U, 32U), "busy") == 0);
+    process_request();
+    CHECK(tx_attempts == 1U && tx_log[0].command == 0x26U && tx_log[0].value == UINT32_MAX);
+    tick += RK_TIMING_GAP_MS - 1U; process_request();
+    CHECK(tx_attempts == 1U);
+    ++tick; process_request();
+    CHECK(tx_attempts == 2U && tx_log[1].command == 0x43U && tx_log[1].value == 1U);
+    tlv_frame_t reply = timing_readback_reply(1U, tx_log[0].sequence, 0x0FU);
+    accept_frame(&reply); CHECK(rk_task_set_pending());
+    reply.sequence = tx_log[1].sequence; accept_frame(&reply);
+    CHECK(!rk_task_set_pending() && strstr(trace_capture_text(), "CASReadLatency CH0=1 CH1=2 CH2=3 CH3=4"));
+    CHECK(rk_task_set_timing(0x25U, 0U) == NULL);
+    process_request(); tick += RK_TIMING_GAP_MS; process_request();
+    tick += RK_TIMING_READBACK_TIMEOUT_MS; process_request();
+    CHECK(!rk_task_set_pending() && strstr(trace_capture_text(), "CASWriteLatency unavailable=timeout"));
+    tx_failure = 1;
+    CHECK(rk_task_set_timing(0x34U, 16U) == NULL);
+    process_request();
+    CHECK(!rk_task_set_pending() && strstr(trace_capture_text(), "BL unavailable=txFailed"));
+    CHECK(rk_task_set_timing(0x34U, 16U) == NULL);
+    rk_timing_readback_cancel();
+    CHECK(!rk_task_set_pending() && strstr(trace_capture_text(), "BL unavailable=cancelled"));
+    trace_capture_stop();
+    reset_task_test();
+    message("PASS: manual timing write, gap, matched four-channel readback, timeout and cancellation\n");
+}
+
+/* 单项人工查询复用实际发送和应答入口；超时、发送失败均允许操作者再次查询。 */
+static void test_console_timing_check(void)
+{
+    reset_task_test();
+    handoff_test_reset();
+    trace_capture_begin();
+    const char *error = rk_task_check_timing("caswritelatency");
+    CHECK(error && strcmp(error, "invalidTiming") == 0);
+    error = rk_task_check_timing("Freq");
+    CHECK(error && strcmp(error, "invalidTiming") == 0);
+    CHECK(rk_task_check_timing("CASWriteLatency") == NULL);
+    CHECK(rk_task_check_timing("CASWriteLatency") == NULL);
+    process_request();
+    CHECK(tx_attempts == 1U && tx_log[0].command == RK_CMD_QUERY_TIMING && tx_log[0].value == 0U);
+    tlv_frame_t reply = timing_readback_reply(0U, tx_log[0].sequence, 1U);
+    accept_frame(&reply);
+    process_request();
+    CHECK(tx_attempts == 1U && strstr(trace_capture_text(), "CASWriteLatency CH0=0\r\n"));
+
+    CHECK(rk_task_check_timing("CASReadLatency") == NULL);
+    process_request();
+    CHECK(tx_attempts == 2U && tx_log[1].command == RK_CMD_QUERY_TIMING && tx_log[1].value == 1U);
+    tick += pdMS_TO_TICKS(RK_TIMING_READBACK_TIMEOUT_MS);
+    process_request(); process_request();
+    CHECK(tx_attempts == 2U && strstr(trace_capture_text(), "CASReadLatency unavailable=timeout"));
+    CHECK(rk_task_check_timing("CASReadLatency") == NULL);
+    process_request();
+    reply = timing_readback_reply(0U, tx_log[2].sequence, 0x0FU);
+    accept_frame(&reply); /* 同流水号的其他参数也不能充当本项应答。 */
+    CHECK(rk_timing_readback_manual_pending());
+    reply = timing_readback_reply(1U, tx_log[1].sequence, 0x0FU);
+    accept_frame(&reply); /* 上一次同索引的迟到应答不可结束这次查询。 */
+    CHECK(rk_timing_readback_manual_pending() && !strstr(trace_capture_text(), "CASReadLatency CH0="));
+    reply.sequence = tx_log[2].sequence;
+    accept_frame(&reply);
+    CHECK(!rk_timing_readback_manual_pending() && strstr(trace_capture_text(), "CASReadLatency CH0=1 CH1=2 CH2=3 CH3=4"));
+
+    tx_failure = 1;
+    CHECK(rk_task_check_timing("tRRD") == NULL);
+    process_request();
+    CHECK(strstr(trace_capture_text(), "tRRD unavailable=txFailed"));
+    tx_failure = 0;
+    CHECK(rk_task_check_timing("tRRD") == NULL);
+    process_request();
+    CHECK(tx_log[4].command == RK_CMD_QUERY_TIMING && tx_log[4].value == 14U);
+    power_on = PWR_CTRL_STATE_OFF;
+    process_power_off();
+    error = rk_task_check_timing("tRRD");
+    CHECK(error && strcmp(error, "powerOff") == 0);
+    power_on = PWR_CTRL_STATE_ON;
+
+    handoff_test.reserved = 1;
+    CHECK(rk_task_check_timing("BL") == NULL);
+    process_request();
+    CHECK(tx_attempts == 6U && tx_log[5].value == 15U);
+    rk_timing_readback_cancel();
+    CHECK(!rk_timing_readback_manual_pending() && strstr(trace_capture_text(), "BL unavailable=cancelled"));
+    handoff_test.uart_handoff = 1;
+    error = rk_task_check_timing("BL");
+    CHECK(error && strcmp(error, "uartHandoff") == 0);
+    handoff_test_reset();
+    trace_capture_stop();
+    reset_task_test();
+    message("PASS: console timing selector, response, timeout, retry and UART ownership\n");
+}
+
+/* 每轮发 15 个 0x43，索引 2 留给启动频率；超时、重复输入和单查交错不重复计数。 */
+static void test_console_check_all(void)
+{
+    for (unsigned miss = 0U; miss <= 1U; ++miss) {
+        reset_task_test();
+        trace_capture_begin();
+        /* 第一项已经被单查发出；全查可以共用这一帧。 */
+        CHECK(rk_task_check_timing("CASWriteLatency") == NULL);
+        process_request();
+        CHECK(rk_task_check_timing("all") == NULL);
+        unsigned n = 0U;
+        for (uint8_t index = 0U; index < RK_TIMING_INDEX_COUNT; ++index) {
+            if (index == 2U) continue;
+            process_request();
+            CHECK(tx_attempts == n + 1U && tx_log[n].command == RK_CMD_QUERY_TIMING && tx_log[n].value == index);
+            if (index == 9U) {
+                CHECK(rk_task_check_timing("all") == NULL);
+                CHECK(rk_task_check_timing("tRASmax") == NULL);
+            }
+            process_request();
+            CHECK(tx_attempts == n + 1U && !strstr(trace_capture_text(), "check all received="));
+            tlv_frame_t reply = timing_readback_reply(index, tx_log[n].sequence, index == 15U ? 1U : 15U);
+            if (miss && index == 1U) {
+                tick += pdMS_TO_TICKS(RK_TIMING_READBACK_TIMEOUT_MS);
+                process_request();
+                CHECK(strstr(trace_capture_text(), "CASReadLatency unavailable=timeout"));
+            }
+            accept_frame(&reply);
+            ++n;
+        }
+        process_request();
+        CHECK(tx_attempts == 15U && !rk_timing_readback_manual_pending());
+        const char *summary = strstr(trace_capture_text(), miss ? "check all received=14/15" : "check all received=15/15");
+        CHECK(summary && !strstr(summary + 1, "check all received="));
+    }
+
+    /* 新一轮读到 1 项时断电，剩下项目的失败不会沿用至下次上电。 */
+    reset_task_test();
+    trace_capture_begin();
+    CHECK(rk_task_check_timing("all") == NULL);
+    process_request();
+    tlv_frame_t first = timing_readback_reply(0U, tx_log[0].sequence, 1U);
+    accept_frame(&first);
+    process_request();
+    CHECK(tx_attempts == 2U && tx_log[1].value == 1U);
+    power_on = PWR_CTRL_STATE_OFF;
+    process_power_off();
+    CHECK(!rk_timing_readback_manual_pending() && strstr(trace_capture_text(), "check all received=1/15"));
+    const char *error = rk_task_check_timing("all");
+    CHECK(error && strcmp(error, "powerOff") == 0);
+    power_on = PWR_CTRL_STATE_ON;
+    trace_capture_begin();
+    CHECK(rk_task_check_timing("all") == NULL);
+    process_request();
+    CHECK(tx_attempts == 3U && tx_log[2].value == 0U);
+    accept_frame(&first);
+    rk_timing_readback_cancel();
+    CHECK(!rk_timing_readback_manual_pending() && strstr(trace_capture_text(), "check all received=0/15"));
+    trace_capture_stop();
+    reset_task_test();
+    message("PASS: check all, 15 ordered timing queries, shared replies, timeout and power-off summaries\n");
+}
+
+/* 使用实际发送的 Seq 检查同参数连续查询；边界帧先到接收入口，再推进超时轮询。 */
+static void test_console_timing_reply_deadline(void)
+{
+    static const struct {
+        uint32_t age_ms;
+        int accepted;
+    } cases[] = {
+        { RK_TIMING_READBACK_TIMEOUT_MS * 3U / 5U, 1 },
+        { RK_TIMING_READBACK_TIMEOUT_MS, 0 },
+        { RK_TIMING_READBACK_TIMEOUT_MS + 1U, 0 },
+        { RK_TIMING_READBACK_TIMEOUT_MS - 1U, 1 }
+    };
+    reset_task_test();
+    for (unsigned i = 0U; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        trace_capture_begin();
+        CHECK(rk_task_check_timing("CASReadLatency") == NULL);
+        process_request();
+        CHECK(tx_attempts == i + 1U && tx_log[i].command == RK_CMD_QUERY_TIMING && tx_log[i].value == 1U);
+        tlv_frame_t reply = timing_readback_reply(1U, tx_log[i].sequence, 1U);
+        if (i > 0U) {
+            CHECK(tx_log[i].sequence == tx_log[i - 1U].sequence + 1U);
+            reply.sequence = tx_log[i - 1U].sequence;
+            accept_frame(&reply);
+            CHECK(rk_timing_readback_manual_pending() && !strstr(trace_capture_text(), "CASReadLatency CH0="));
+            reply.sequence = tx_log[i].sequence;
+        }
+        tick += pdMS_TO_TICKS(cases[i].age_ms);
+        accept_frame(&reply);
+        process_request();
+        CHECK(!rk_timing_readback_manual_pending() && tx_attempts == i + 1U);
+        CHECK((strstr(trace_capture_text(), "CASReadLatency CH0=1") != NULL) == cases[i].accepted);
+        CHECK((strstr(trace_capture_text(), "CASReadLatency unavailable=timeout") != NULL) == !cases[i].accepted);
+    }
+    trace_capture_stop();
+    reset_task_test();
+    message("PASS: timing readback response deadline and stale sequence rejection\n");
+}
+
+/* 等心跳和等待PC写完时都可查询；自动与手动同时查同一项只发一帧。 */
+static void test_console_check_during_startup(void)
+{
+    reset_task_test();
+    trace_capture_begin();
+    rk_timing_readback_arm(1);
+    CHECK(rk_task_check_timing("CASReadLatency") == NULL);
+    process_request();
+    CHECK(tx_attempts == 1U && tx_log[0].command == RK_CMD_QUERY_TIMING && tx_log[0].value == 1U);
+    tick += pdMS_TO_TICKS(RK_TIMING_READBACK_TIMEOUT_MS);
+    process_request();
+    CHECK(strstr(trace_capture_text(), "CASReadLatency unavailable=timeout"));
+    TickType_t last = 0U;
+    tick = pdMS_TO_TICKS(RK_HEARTBEAT_INTERVAL_MS);
+    process_heartbeat(&last);
+    CHECK(tx_attempts == 2U && tx_log[1].type == TLV_TYPE_HEARTBEAT);
+    tlv_frame_t heartbeat = {.sequence = tx_log[1].sequence};
+    accept_frame(&heartbeat);
+    CHECK(rk_task_check_timing("BL") == NULL);
+    process_request();
+    CHECK(tx_attempts == 3U && tx_log[2].value == 15U && !rk_timing_readback_busy());
+    tlv_frame_t reply = timing_readback_reply(15U, tx_log[2].sequence, 1U);
+    accept_frame(&reply);
+    rk_timing_readback_settings_done();
+    process_request();
+    CHECK(tx_attempts == 4U && tx_log[3].value == 0U && rk_timing_readback_busy());
+
+    CHECK(rk_task_check_timing("CASWriteLatency") == NULL);
+    CHECK(rk_task_check_timing("CASReadLatency") == NULL);
+    process_request(); process_request();
+    CHECK(tx_attempts == 5U && tx_log[4].command == RK_CMD_QUERY_TIMING && tx_log[4].value == 1U);
+    CHECK(rk_task_check_timing("CASReadLatency") == NULL);
+    process_request();
+    CHECK(tx_attempts == 5U);
+    /* 两项都可能回最近的Seq，按索引分发。先交付自动项，再进入已在途的手动项。 */
+    reply = timing_readback_reply(0U, tx_log[4].sequence, 1U);
+    accept_frame(&reply); process_request();
+    CHECK(tx_attempts == 5U && strstr(trace_capture_text(), "CASWriteLatency CH0=0"));
+    reply = timing_readback_reply(1U, tx_log[4].sequence, 1U);
+    accept_frame(&reply); process_request();
+    CHECK(tx_attempts == 6U && tx_log[5].value == 3U && strstr(trace_capture_text(), "CASReadLatency CH0=1"));
+    rk_timing_readback_cancel();
+    trace_capture_stop();
+    reset_task_test();
+    message("PASS: manual timing queries before SPL heartbeat, during deferred settings and startup scan\n");
+}
+
+/* 连续登记两个索引，无需前一项先回复；每项从实际发送计时，允许逆序返回。 */
+static void test_console_check_multiple(void)
+{
+    reset_task_test();
+    trace_capture_begin();
+    CHECK(rk_task_check_timing("CASWriteLatency") == NULL);
+    CHECK(rk_task_check_timing("CASReadLatency") == NULL);
+    process_request(); process_request();
+    CHECK(tx_attempts == 2U && tx_log[0].command == RK_CMD_QUERY_TIMING &&
+          tx_log[1].command == RK_CMD_QUERY_TIMING && tx_log[0].value != tx_log[1].value);
+    CHECK(tx_log[0].value <= 1U && tx_log[1].value <= 1U);
+    tlv_frame_t reply = timing_readback_reply((uint8_t)tx_log[1].value, tx_log[1].sequence, 1U);
+    accept_frame(&reply);
+    CHECK(rk_timing_readback_manual_pending());
+    reply = timing_readback_reply((uint8_t)tx_log[0].value, tx_log[1].sequence, 1U);
+    accept_frame(&reply);
+    CHECK(!rk_timing_readback_manual_pending() && strstr(trace_capture_text(), "CASWriteLatency CH0=0") &&
+          strstr(trace_capture_text(), "CASReadLatency CH0=1"));
+    trace_capture_stop();
+    reset_task_test();
+}
+
+/* 查写延迟后又写了新值，启动扫描必须另读一次；两个同索引应答不能混用。 */
+static void test_console_check_before_timing_write(void)
+{
+    reset_task_test();
+    rk_timing_readback_arm(1);
+    CHECK(rk_task_check_timing("CASWriteLatency") == NULL);
+    process_request();
+    CHECK(tx_attempts == 1U && tx_log[0].command == RK_CMD_QUERY_TIMING && tx_log[0].value == 0U);
+    rk_request_t write = {0x26U, 1U, 0U, 38U};
+    CHECK(rk_link_request(&write) == 0);
+    process_request(); deliver_result();
+    rk_response_t event;
+    CHECK(rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_SENT);
+    CHECK(tx_attempts == 2U && tx_log[1].command == write.command_id);
+    /* 在原手动查询期限内发出并收到启动心跳。 */
+    TickType_t last = tick - pdMS_TO_TICKS(RK_HEARTBEAT_INTERVAL_MS);
+    tick += pdMS_TO_TICKS(RK_TIMING_GAP_MS);
+    process_heartbeat(&last);
+    CHECK(tx_attempts == 3U && tx_log[2].type == TLV_TYPE_HEARTBEAT);
+    tlv_frame_t heartbeat = {.sequence = tx_log[2].sequence};
+    accept_frame(&heartbeat);
+    rk_timing_readback_settings_done();
+    process_request();
+    CHECK(tx_attempts == 3U && rk_timing_readback_busy());
+    tlv_frame_t reply = timing_readback_reply(0U, tx_log[0].sequence, 1U);
+    accept_frame(&reply); process_request();
+    CHECK(tx_attempts == 4U && tx_log[3].command == RK_CMD_QUERY_TIMING && tx_log[3].value == 0U);
+    accept_frame(&reply); process_request();
+    CHECK(tx_attempts == 4U);
+    reply.sequence = tx_log[3].sequence;
+    accept_frame(&reply); process_request();
+    CHECK(tx_attempts == 5U && tx_log[4].value == 1U);
+    rk_timing_readback_cancel();
+    reset_task_test();
+}
+
+/* RK可能按最新收到的查询Seq回进度或最终结果；两种完成次序都要分别交付。 */
+static void test_console_check_during_algorithm(void)
+{
+    const rk_request_t algorithm = {2U, 5U, 0U, 0U};
+    for (unsigned result_first = 0U; result_first <= 1U; ++result_first) {
+        reset_task_test();
+        trace_capture_begin();
+        CHECK(rk_link_request(&algorithm) == 0);
+        process_request();
+        CHECK(tx_attempts == 1U && tx_log[0].command == algorithm.command_id);
+        CHECK(rk_task_check_timing("tRRD") == NULL);
+        process_request();
+        CHECK(tx_attempts == 2U && tx_log[1].command == RK_CMD_QUERY_TIMING && tx_log[1].value == 14U);
+        uint64_t sequence = tx_log[1].sequence;
+        tlv_frame_t progress = progress_frame(sequence, algorithm.command_id, 35U);
+        accept_frame(&progress);
+        CHECK(s_pending.progress_valid && s_pending.progress_percent == 35U);
+        tlv_frame_t reply = timing_readback_reply(14U, sequence, 1U);
+        tlv_frame_t result = task_result_frame(sequence, algorithm.command_id, 0U);
+        if (!result_first) {
+            accept_frame(&reply);
+            CHECK(s_pending.waiting && strstr(trace_capture_text(), "tRRD CH0=14\r\n"));
+        }
+        accept_frame(&result);
+        process_request();
+        rk_response_t event;
+        CHECK(rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_COMPLETE);
+        CHECK(event.cookie == algorithm.cookie && event.result.command_id == algorithm.command_id);
+        if (result_first) accept_frame(&reply);
+        CHECK(strstr(trace_capture_text(), "tRRD CH0=14\r\n"));
+        CHECK(rk_link_receive(&event) == 0 && tx_attempts == 2U);
+        trace_capture_stop();
+    }
+}
+
+/* 队列已有算法时允许人工查询；查询应答可携带较新的算法Seq，后续查询超时仅打印。 */
+static void test_console_check_with_queued_algorithm(void)
+{
+    reset_task_test();
+    trace_capture_begin();
+    const rk_request_t algorithm = {2U, 6U, 0U, 0U};
+    CHECK(rk_link_request(&algorithm) == 0);
+    CHECK(rk_task_check_timing("BL") == NULL && !rk_timing_readback_busy());
+    process_request();
+    process_request();
+    CHECK(tx_attempts == 2U && tx_log[0].command == RK_CMD_QUERY_TIMING);
+    CHECK(tx_log[1].command == algorithm.command_id && s_pending.waiting);
+    tlv_frame_t reply = timing_readback_reply(15U, tx_log[1].sequence, 1U);
+    accept_frame(&reply);
+    CHECK(strstr(trace_capture_text(), "BL CH0=15\r\n") && s_pending.waiting);
+
+    CHECK(rk_task_check_timing("tRRD") == NULL);
+    process_request();
+    CHECK(tx_attempts == 3U && tx_log[2].command == RK_CMD_QUERY_TIMING);
+    tick += pdMS_TO_TICKS(RK_TIMING_READBACK_TIMEOUT_MS);
+    process_request();
+    rk_response_t event;
+    CHECK(strstr(trace_capture_text(), "tRRD unavailable=timeout"));
+    CHECK(s_pending.waiting && rk_link_receive(&event) == 0);
+    reply = timing_readback_reply(14U, tx_log[2].sequence, 1U);
+    accept_frame(&reply);
+    CHECK(!strstr(trace_capture_text(), "tRRD CH0="));
+    tlv_frame_t result = task_result_frame(tx_log[2].sequence, algorithm.command_id, 0U);
+    accept_frame(&result); process_request();
+    CHECK(rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_COMPLETE && event.cookie == algorithm.cookie);
+    CHECK(tx_attempts == 3U && rk_link_receive(&event) == 0);
+    trace_capture_stop();
+}
+
+/* IDD采样中插入人工查询，前后样本仍计入同一窗口，退出TC后才交付结果。 */
+static void test_console_check_during_idd(void)
+{
+    reset_task_test();
+    trace_capture_begin();
+    const rk_request_t idd = {25U, 7U, 0U, 0U};
+    CHECK(rk_link_request(&idd) == 0);
+    process_request();
+    CHECK(tx_attempts == 1U && tx_log[0].command == idd.command_id && tx_log[0].value == 1U);
+    complete_tx(100U);
+    sample_at(105U, 105U, 1000U, MEMORY_MONITOR_VALID_ALL);
+    CHECK(rk_task_check_timing("tRRD") == NULL);
+    process_request();
+    CHECK(tx_attempts == 2U && tx_log[1].command == RK_CMD_QUERY_TIMING);
+    tlv_frame_t reply = timing_readback_reply(14U, tx_log[1].sequence, 1U);
+    accept_frame(&reply);
+    CHECK(strstr(trace_capture_text(), "tRRD CH0=14\r\n") && s_pending.idd && s_pending.waiting);
+    for (uint32_t now = 1105U; now < 5105U; now += 1000U) pump_samples(now);
+    sample_at(5103U, 5104U, 3000U, MEMORY_MONITOR_VALID_ALL);
+    pump_samples(5105U);
+    process_request();
+    CHECK(tx_attempts == 3U && tx_log[2].command == idd.command_id && tx_log[2].value == 0U);
+    rk_response_t event;
+    CHECK(rk_link_receive(&event) == 0);
+    complete_tx(5112U); tick = 5113U;
+    process_request(); process_request();
+    CHECK(rk_link_receive(&event) == 1 && event.status == RK_RESPONSE_COMPLETE && event.cookie == idd.cookie);
+    CHECK(event.measurement.current[0].valid_count == 2U && event.measurement.current[0].sum == 4000);
+    trace_capture_stop();
+    reset_task_test();
+    message("PASS: console timing queries during queued/running FUNC and IDD sampling\n");
+}
+
+/* 手动接管通过同一套回读；未匹配的旧心跳不放行，本次掉电清除未完成的扫描。 */
+static void test_timing_readback_manual(void)
+{
+    reset_task_test();
+    rk_timing_readback_arm(0);
+    power_on = PWR_CTRL_STATE_OFF;
+    process_power_off();
+    power_on = PWR_CTRL_STATE_ON;
+    tick = pdMS_TO_TICKS(3U * RK_HEARTBEAT_INTERVAL_MS);
+    rk_task_handoff_heartbeat();
+    CHECK(tx_attempts == 1U && tx_log[0].type == TLV_TYPE_HEARTBEAT);
+    tlv_frame_t heartbeat = {.sequence = tx_log[0].sequence - 1U};
+    rk_task_handoff_receive(&heartbeat);
+    CHECK(!rk_timing_startup_ready());
+    rk_task_handoff_heartbeat(); CHECK(tx_attempts == 1U);
+    heartbeat.sequence++;
+    rk_task_handoff_receive(&heartbeat);
+    CHECK(rk_timing_startup_ready());
+    CHECK(!rk_task_handoff_idle());
+    rk_task_handoff_heartbeat();
+    CHECK(tx_attempts == 2U && tx_log[1].command == RK_CMD_QUERY_TIMING);
+    tlv_frame_t reply = timing_readback_reply(0U, tx_log[1].sequence, 0x0FU);
+    rk_task_handoff_receive(&reply);
+    rk_task_handoff_heartbeat();
+    CHECK(tx_attempts == 3U && tx_log[2].value == 1U);
+    power_on = PWR_CTRL_STATE_OFF;
+    process_power_off();
+    CHECK(!rk_timing_readback_busy() && !rk_timing_startup_ready());
+    power_on = PWR_CTRL_STATE_ON;
+    process_request(); CHECK(tx_attempts == 3U);
+    reset_task_test();
+
+    /* 上电与测试分两步时，心跳可能在两条设置之间到达，不能读到半组新值。 */
+    rk_timing_readback_arm(0);
+    TickType_t last = 0U;
+    tick = pdMS_TO_TICKS(RK_HEARTBEAT_INTERVAL_MS);
+    process_heartbeat(&last);
+    heartbeat.sequence = tx_log[0].sequence;
+    rk_request_t write = {0x2BU, 1U, 0U, 38U};
+    CHECK(rk_link_request(&write) == 0);
+    process_request();
+    accept_frame(&heartbeat);
+    tick += pdMS_TO_TICKS(RK_TIMING_GAP_MS);
+    process_request();
+    CHECK(!rk_timing_readback_busy() && tx_attempts == 2U);
+    rk_timing_readback_settings_done();
+    process_request();
+    CHECK(rk_timing_readback_busy() && tx_log[2].command == RK_CMD_QUERY_TIMING);
+    rk_timing_readback_cancel();
+    reset_task_test();
+}
+
 /* 接管前仍遵守最后时序的20ms间隔；SENT已领取且UART没有新发送也不能提前放行。 */
 static void test_handoff_timing_gap(void)
 {
@@ -1940,6 +2567,8 @@ static void test_stop_transaction(void)
         }
         unsigned transmissions = sent;
         rk_task_stop_begin();
+        const char *timing_error = rk_task_check_timing("CASReadLatency");
+        CHECK(timing_error && strcmp(timing_error, "stopping") == 0);
         CHECK(process_stop(&parser) == 1 && !rk_task_stop_ready());
         process_request();
         CHECK(sent == transmissions);
@@ -1978,6 +2607,19 @@ void test_main(void)
     finish(0U);
 #endif
 #if defined(TEST_B1_PROTOCOL_TRACE)
+    test_timing_readback_wire();
+    test_timing_readback_transactions();
+    test_console_timing_write();
+    test_console_timing_check();
+    test_console_check_all();
+    test_console_timing_reply_deadline();
+    test_console_check_during_startup();
+    test_console_check_multiple();
+    test_console_check_before_timing_write();
+    test_console_check_during_algorithm();
+    test_console_check_with_queued_algorithm();
+    test_console_check_during_idd();
+    test_timing_readback_manual();
     test_handoff_timing_gap();
     test_handoff_unsent_timing();
 #endif

@@ -1,5 +1,6 @@
 /* 实际TCP任务的离线连接生命周期回归；socket为契约桩，不代替lwIP/PHY实板验收。 */
 #include "port.h"
+#include "pc_command.h"
 #include "pc_dispatch.h"
 #include <setjmp.h>
 #include <string.h>
@@ -8,12 +9,16 @@
 #define STR1(x) #x
 #define STR(x) STR1(x)
 #define CHECK(x) do { if (!(x)) fail("FAIL " STR(__LINE__) ": " #x "\n"); } while (0)
-enum { NORMAL, RECV_ERROR, SEND_ERROR, PARTIAL_TIMEOUT, DISPATCH_ERROR, HANDOFF };
-enum { LISTENER = 3, CLIENT = 4, FRAME_SIZE = 20 };
+enum { NORMAL, RECV_ERROR, SEND_ERROR, PARTIAL_TIMEOUT, DISPATCH_ERROR, HANDOFF, LISTEN_RECOVERY };
+enum { LISTENER = 3, CLIENT = 4, FRAME_SIZE = 20, FAILED_SELECTS = 52 };
 static int scenario, listening, connected, pending, step, accepted, closed, dispatched, sent;
 static int listener_closes, listener_opens, poll_active, disconnect_calls, trace_connections;
+static int select_failures, recovery_closes, idle_polls, listen_error_logs;
 static uint32_t tick;
 static size_t send_offset;
+#if defined(PC_COMMAND_CHIP_INFO)
+static unsigned send_notifications;
+#endif
 static jmp_buf exit_task;
 static const uint8_t request[FRAME_SIZE] = {0,0,0,20,0,1,0,8,0,0,6,1,0,0,0,9,0,0,'{','}'};
 int test_errno;
@@ -36,7 +41,14 @@ static _Noreturn void finish(uint32_t code)
 static _Noreturn void fail(const char *text) { message(text); finish(1U); }
 void test_abort(void) { fail("FAIL CPU exception\n"); }
 uint32_t xTaskGetTickCount(void) { return tick; }
-void vTaskDelay(uint32_t ms) { tick += ms; }
+void vTaskDelay(uint32_t ms)
+{
+    tick += ms;
+    if (scenario == LISTEN_RECOVERY && !gnetif.ip_addr.addr && tick >= 21000U) {
+        CHECK(tcp_diag[1] == 0xBEEF00E1U && !listener_opens);
+        gnetif.ip_addr.addr = 1U;
+    }
+}
 void vTaskDelete(void *task) { (void)task; fail("FAIL unexpected task deletion\n"); }
 void task_watchdog_progress(int task) { CHECK(task == TASK_WATCHDOG_TCP); }
 void led_on(int led) { CHECK(led == LED_CONNECT); }
@@ -44,6 +56,7 @@ void led_off(int led) { CHECK(led == LED_CONNECT); }
 void b2_service_poll(int active)
 {
     CHECK(active == connected);
+    if (!active) ++idle_polls;
     if (scenario == HANDOFF && closed == 1 && !active) {
         CHECK(!listening && listener_opens == 1);
         longjmp(exit_task, 1);
@@ -83,6 +96,11 @@ int select(int n, fd_set *readers, fd_set *writers, fd_set *errors, struct timev
 {
     CHECK(listening && !connected && n == LISTENER + 1 && readers->bits == (1U << LISTENER));
     CHECK(!writers && !errors && wait);
+    if (scenario == LISTEN_RECOVERY && select_failures < FAILED_SELECTS) {
+        ++select_failures;
+        test_errno = ENOMEM;
+        return -1;
+    }
     if (closed == (scenario == NORMAL ? 2 : 1)) longjmp(exit_task, 1);
     return 1;
 }
@@ -103,7 +121,13 @@ int accept(int fd, struct sockaddr *peer, socklen_t *size)
 int close(int fd)
 {
     if (fd == LISTENER) {
-        CHECK(listening && connected); listening = 0; pending = 0; ++listener_closes;
+        CHECK(listening);
+        if (!connected) {
+            CHECK(scenario == LISTEN_RECOVERY);
+            if (select_failures == 1) { test_errno = ENOMEM; return -1; }
+            ++recovery_closes;
+        }
+        listening = 0; pending = 0; ++listener_closes;
     } else {
         CHECK(fd == CLIENT && connected && !listening && !pending);
         CHECK(disconnect_calls == accepted); connected = 0; ++closed;
@@ -128,7 +152,7 @@ int recv(int fd, void *buffer, size_t capacity, int flags)
 int send(int fd, const void *data, size_t length, int flags)
 {
     CHECK(fd == CLIENT && connected && !listening && !pending && flags == 0);
-    if (scenario == SEND_ERROR) { test_errno = ECONNRESET; return -1; }
+    if (scenario == SEND_ERROR && send_offset) { test_errno = ECONNRESET; return -1; }
     const uint8_t *bytes = data;
     CHECK(length == FRAME_SIZE - send_offset);
     if (!send_offset) CHECK(bytes[11] == 2 && bytes[15] == (uint8_t)(sent % 2 + 1));
@@ -138,7 +162,14 @@ int send(int fd, const void *data, size_t length, int flags)
     if (send_offset == FRAME_SIZE) { send_offset = 0; ++sent; }
     return (int)written;
 }
-void pc_dispatch_poll(void) {}
+void pc_dispatch_poll(void) { test_errno = 0; }
+#if defined(PC_COMMAND_CHIP_INFO)
+void pc_dispatch_response_sent(uint16_t command)
+{
+    ++send_notifications;
+    CHECK(command == 0x0602U && !send_offset && sent == (int)send_notifications);
+}
+#endif
 int pc_dispatch_next_response(uint32_t sequence, pc_dispatch_response_t *response)
 { (void)sequence; (void)response; return 0; }
 pc_dispatch_result_t pc_dispatch_handle(const pc_protocol_frame_t *frame, uint32_t sequence,
@@ -156,6 +187,11 @@ pc_dispatch_result_t pc_dispatch_handle(const pc_protocol_frame_t *frame, uint32
 }
 void pc_dispatch_disconnected(void) { ++disconnect_calls; }
 #if defined(TEST_B1_TRACE)
+void pc_trace_listen_error(int socket_error)
+{
+    CHECK(scenario == LISTEN_RECOVERY && socket_error == ENOMEM);
+    ++listen_error_logs;
+}
 void pc_trace_connected(const uint8_t peer_ip[4], uint16_t port)
 {
     const uint8_t address[4] = {192,168,1,111};
@@ -176,22 +212,34 @@ void pc_trace_rx(const pc_protocol_frame_t *frame) { CHECK(frame->command_id == 
 void pc_trace_tx(const pc_dispatch_response_t *response, uint32_t sequence, size_t queued, int error)
 {
     CHECK(sequence > 0 && response->command_id == 0x0602);
-    CHECK(scenario == SEND_ERROR ? queued == 0 && error == ECONNRESET : queued == FRAME_SIZE && error == 0);
+    CHECK(scenario == SEND_ERROR ? queued == 7U && error == ECONNRESET : queued == FRAME_SIZE && error == 0);
 }
 #endif
 static void run(int mode)
 {
     scenario = mode; listening = connected = pending = step = accepted = closed = dispatched = sent = 0;
     listener_closes = listener_opens = poll_active = disconnect_calls = trace_connections = 0;
+    select_failures = recovery_closes = idle_polls = listen_error_logs = 0;
+    gnetif.ip_addr.addr = mode == LISTEN_RECOVERY ? 0U : 1U;
     tick = 0; send_offset = 0;
+#if defined(PC_COMMAND_CHIP_INFO)
+    send_notifications = 0U;
+#endif
     if (setjmp(exit_task) == 0) StartTcpServerTask(NULL);
-    CHECK(!connected && !pending && closed == accepted && listener_closes == accepted);
+    CHECK(!connected && !pending && closed == accepted && listener_closes == accepted + recovery_closes);
     CHECK(accepted == (mode == NORMAL ? 2 : 1));
     if (mode == NORMAL) CHECK(dispatched == 4 && sent == 4);
     if (mode == RECV_ERROR || mode == PARTIAL_TIMEOUT) CHECK(dispatched == 0 && sent == 0);
     if (mode == SEND_ERROR || mode == DISPATCH_ERROR) CHECK(dispatched == 1 && sent == 0);
+#if defined(PC_COMMAND_CHIP_INFO)
+    CHECK(send_notifications == (unsigned)sent);
+#endif
 #if defined(TEST_B1_TRACE)
     CHECK(trace_connections == accepted && poll_active > 0);
+    if (mode == LISTEN_RECOVERY) {
+        CHECK(recovery_closes == FAILED_SELECTS - 1 && idle_polls >= FAILED_SELECTS);
+        CHECK(listen_error_logs == 2 && dispatched == 1 && sent == 1);
+    }
 #endif
 }
 int test_main(void)
@@ -199,6 +247,7 @@ int test_main(void)
     for (int mode = NORMAL; mode <= DISPATCH_ERROR; ++mode) run(mode);
 #if defined(TEST_B1_TRACE)
     run(HANDOFF);
+    run(LISTEN_RECOVERY);
 #endif
     message("PASS: TCP single-client task, listener lifecycle, peer, short send and error paths\n");
     finish(0U);

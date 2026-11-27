@@ -11,7 +11,12 @@ void handoff_test_reset(void)
 void handoff_test_set_status(handoff_slt_status_t status)
 {
     handoff_test.status = status;
-    if (status == HANDOFF_SLT_OFF_READY) handoff_test.reserved = 0;
+    if (status == HANDOFF_SLT_OFF_READY) {
+        handoff_test.reserved = 0;
+        handoff_test.uart_handoff = 0;
+    } else if (status == HANDOFF_SLT_EARLY_EDK || status == HANDOFF_SLT_RELEASED) {
+        handoff_test.uart_handoff = 1;
+    }
 }
 
 int handoff_slt_begin(uint32_t cookie)
@@ -49,7 +54,8 @@ int handoff_slt_cancel(uint32_t cookie)
 }
 
 int handoff_mcu_busy(void) { return handoff_test.reserved; }
-void handoff_mcu_stop(void) { handoff_test.reserved = 1; }
+int handoff_mcu_tlv_allowed(void) { return !handoff_test.uart_handoff; }
+void handoff_mcu_stop(void) { handoff_test.reserved = 1; handoff_test.uart_handoff = 1; }
 int handoff_mcu_power_allowed(int off_command) { return off_command || !handoff_test.reserved; }
 int handoff_mcu_rk_poll(void) { return 0; }
 int handoff_mcu_rk_observe(uint8_t byte) { (void)byte; return 0; }

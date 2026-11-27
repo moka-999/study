@@ -9,6 +9,7 @@ typedef struct {
     handoff_slt_status_t status;
     unsigned begin_calls, prepared_calls, cancel_calls;
     int reserved, prepared, cancelled;
+    int uart_handoff; /* 1 表示串口已离开 SPL；仅预约时仍可发送时序查询。 */
     int begin_failure, prepared_failure, cancel_allowed;
 } handoff_test_state_t;
 

@@ -1,5 +1,11 @@
 # PC–MCU JSON业务合同
 
+### B1 FUNC/PARA 冷启动心跳超时
+
+`0103` 或 `0108` 受理后，若从 RK 电源到达 ON 起等待 `B1_RK_STARTUP_HEARTBEAT_TIMEOUT_MS` 仍未收到本次启动的协议心跳，MCU 关闭 RK/DDR，确认 OFF 后上报一次 `0105` 或 `0109`。两个镜像均填 `testStatus: 0`、`resultDesc: {"firstErrorAddress":null,"errorType":"DdrTrainingFailed"}`、`physicalAddr: ""`。该项尚未执行算法或电流采集，`measurementData` 填 `{}`。FUNC 的 `testTimeMs` 为 0，PARA 从受理计到结果组包。下电失败时回命令错误。
+
+PC 收到上述最终结果后，可以在同一轮发送带完整电源和启动配置的下一项。MCU 按新配置从 OFF 启动。没有下一项时，PC 发送 `0107`；B1 更新结果灯并确认电源 OFF 后回复 `0006 completed`。生成 `0107.failChips` 时按各镜像的 `testStatus` 汇总，首错地址为空的 FAIL 也须包含在内。例如 `{"failChips":[{"mirrorIndex":0,"physicalAddr":""},{"mirrorIndex":1,"physicalAddr":""}]}`。
+
 2026-11-16：按PC源码`UserMakePacket.MakePlanEndTestPacket`及实抓0107对齐，整轮失败数组改用`failChips`，每项仍为`physicalAddr`字符串及`mirrorIndex`整数；空数组表示全部PASS，同镜像多条合并为FAIL。旧`errorchip`及两个名称同时出现均回`invalidArgument`。该字段覆盖下方历史名称，不改变0105/0109的`testResults`。B1/V2/手动TLV同步；结果及0602统计共用组包逻辑，电流平均值四舍五入至1µA再换算mA，JSON数字最多3位小数，无样本仍为null，原始采样统计不变。实际C/QEMU已验证PC截图中的重复镜像、空数组、非法字段、舍入边界及查询/结果一致性，三工程构建通过；未烧录、未做本轮实板验收。Word本轮仅同步0107字段与测量精度，其余已记录的历史差异仍以当前Markdown为准。
 
 2026-11-13：B1正式SLT取消010B依赖。010A字段及accepted/completed的启动准备含义不变；EDK RELEASE最终应答发完后，MCU自动关电、恢复串口并解除占用，不等PC解析结果，也不新增测试完成通知。同一0106内可继续任意FUNC/PARA/SLT，早到下一项回busy；PC收齐并解析三类结果后，用0107.errorchip提交最终灯态。B1的010B编号保留，合法JSON对象回notSupported且无业务副作用。断线不取消SLT，后续RELEASE仍自动收尾；RELEASE不代表上传成功或PASS。V2仍保留原010A/010B基线。本条覆盖下方旧SLT描述，详情及验证见[正式接入](pc_slt_auto_integration_20261112.md)；本轮未修改Word。
@@ -31,8 +37,28 @@
 | MCU → PC | `PC_COMMAND_TEST_RESULT_REPORT = 0x0105` | 上报该FUNC算法的双颗粒测试结果 |
 | PC → MCU | `PC_COMMAND_PARA_START = 0x0108` | 同格式提交PARA名称、计划index、训练目标及重启/启动模式 |
 | MCU → PC | `PC_COMMAND_PARA_RESULT = 0x0109` | 上报该PARA算法的双颗粒结果及共享统计 |
+| PC → B1 | `PC_COMMAND_SHMOO_START = 0x010E` | 提交 FUNC 算法和二维或三维扫描计划 |
+| B1 → PC | `PC_COMMAND_SHMOO_RESULT = 0x010F` | 每个冷启动坐标一包，包含两颗的结果 |
 
 `ServiceID`固定填0，不参与分发。PC和MCU在每条连接中分别维护自己的发送Seq，每发送一个应用帧本端加1；收到对方报文不改变本端发送计数，不回显对方Seq，与MCU–RK的u64 Seq无关。两个方向允许数值相同且可以同时发送。Seq不用于匹配业务请求；首值1、重连归1、u32回绕及发送失败规则见协议框架第2节。新开始测试按4.7节串行提交，不靠算法名称或Seq区分并发请求。
+
+### B1 Shmoo 扫描
+
+PC 在 8888 连接上直接发 `010E`，与 `0106/0107` 整轮互斥。请求受理后返回一次 `0006 accepted`。以下二维示例包含两个坐标，增加同结构的 `z` 即为三维。各轴对应不同参数，X 最先递增，其次是 Y，最后是 Z。每轴从 `min` 开始按正整数 `step` 递增，直到下一档超过 `max`。
+
+每点从 `fspiM1` 启动，`memoryType` 可填 `LPDDR4X` 或 `LPDDR4`，省略时按 LPDDR4X。基准 VDD1/VDD2/VDDQ 分别为 1800/1100/600 mV 或 1800/1100/1100 mV，扫描轴覆盖对应值。电压轴接受 `vdd1/vdd2/vddq` 及示例里的大写首字母写法。VDD1 可编码 800～3350 mV、步进 10 mV，VDD2/VDDQ 可编码 400～1675 mV、步进 5 mV。PC 按颗粒规格选取实际测试范围，MCU 对越界计划返回 `0006 failed/invalidArgument`。
+
+```json
+{"algorithmType":"functional","algorithmName":"gtest-rand","memoryType":"LPDDR4X","shmoo":{"x":{"type":"vddq","min":600,"max":605,"step":5},"y":{"type":"vdd2","min":1100,"max":1100,"step":5}}}
+```
+
+扫 `Freq` 时由 DDRbin 查询启动频率，扫普通时序时在 SPL 就绪后逐项发送。对应固件开关须启用。等待本次启动心跳超时时，MCU 先关闭 RK/DDR，确认 OFF 后将本点两颗均报 0。还有下一点时，MCU 按下一坐标的电压和时序重新启动。Shmoo、FUNC 和 PARA 冷启动共用 `board_power_config.h` 的 `B1_RK_STARTUP_HEARTBEAT_TIMEOUT_MS`，从电源状态到达 ON 开始计时。算法开始后等待 RK 最终帧，PC 可发 `0104 {}` 停止扫描并关电。
+
+若 SPL 已就绪但扫频点没有收到本次 DDRbin 的 `0x35` 查询，MCU 以 `0006 failed/notSupported` 结束扫描。每个 `010F` 包内两颗的坐标相同，`testStatus` 为 1 表示通过、0 表示失败。中间点使用 `running`。最后一个点无论 PASS 或 FAIL，MCU 都在 RK/DDR 确认 OFF 后发送 `010F completed`。末点下电失败时，MCU 改回 `0006 failed`（`requestCommandId=270`）。下例是第二个点结束时的上报。
+
+```json
+{"algorithmType":"functional","algorithmName":"gtest-rand","shmooprogress":"completed","testResults":[{"mirrorIndex":0,"shmoopoint":{"x":605,"y":1100},"testStatus":1},{"mirrorIndex":1,"shmoopoint":{"x":605,"y":1100},"testStatus":0}]}
+```
 
 ## 心跳
 

@@ -87,7 +87,7 @@
 | 0x0101 查询测试仪 | 0x0102 测试仪信息 | 0x0006 failed |
 | 0x0103 FUNC开始 | 0x0006 accepted；完整启动准备另回completed；最终结果0x0105 | 0x0006 failed |
 | 0x0106 整轮开始 | 0x0006 completed，本轮已开始 | 0x0006 failed |
-| 0x0107 整轮结束 | 0x0006 completed，仅表示收尾及灯状态更新完成 | 0x0006 failed |
+| 0x0107 整轮结束 | 0x0006 completed，收尾及灯状态更新完成；B1 还已确认 RK/DDR 下电 | 0x0006 failed |
 | 0x0108 PARA开始 | 0x0006 accepted；完整启动准备另回completed；最终结果0x0109 | 0x0006 failed |
 | 0x010A SLT开始 | 0x0006 accepted；电源/Boot准备完成另回completed，MCU不上传SLT最终结果 | 0x0006 failed |
 | 0x010B SLT结果回送 | 仅V2：0x0006 completed，确认接收PC汇总结果 | B1：合法JSON对象回0x0006 failed/notSupported；V2：0x0006 failed |
@@ -356,7 +356,7 @@ PC→MCU。开始一轮测试，不携带加热属性或灯状态。
 
 - 应答：0006 completed，requestCommandId=262；已有整轮或测试占用时回busy。
 - 是否加热和测试期间灯态由B1通过B2通信获取，实际加热仍由PC控制B2。
-- 默认常温仅为显示初值，不代表已确认B2未加热、已冷却或可触碰。
+- B1整轮内，在线B2已通知高温的镜像闪烁，其余镜像熄灭。B2失联时高温灯熄灭，恢复通信后按重新收到的镜像模式显示。
 - 顺序：0106 → 串行FUNC/SLT/PARA → 0107，算法顺序任意且允许重复。FUNC等待0105，PARA等待0109；B1的SLT在EDK RELEASE及本地收尾完成后自动解除占用，不等待010B，下一项早到回busy，PC等待后重试。PC可并行解析上一份SLT报告；V2仍须回送010B并等待确认。
 - 未先完成0106时，FUNC/PARA/SLT开始返回0006 failed/invalidState。
 - FUNC/PARA的algorithmIndex在本轮内区分算法项；SLT的algorithmIndex固定null。
@@ -388,11 +388,11 @@ PC→MCU。提交本轮失败芯片清单并结束本轮；只列失败芯片，
 | ↳ mirrorIndex | integer | 所属镜像索引，沿用整数；同一镜像多颗失败时可重复该索引，由physicalAddr区分 |
 
 - 应答：0006 completed，requestCommandId=263。字段名区分大小写，使用failChips；旧errorchip不再接收。
-- 每个镜像对应一盏结果灯；清单中出现的镜像置FAIL，其余镜像置PASS。`{"failChips":[]}`表示全部镜像置PASS。
+- 清单中出现的参与镜像置 FAIL，其余参与镜像置 PASS。B1 的 DDR 整轮仅使用镜像 0 和 1，`{"failChips":[]}` 时两组 DDR 灯显示 PASS，eMCP 从开始到结束保持熄灭。已屏蔽的 DUT 灯保持熄灭。
 - 当前映射：0→第一组LPDDR灯、1→第二组LPDDR灯、2→eMCP灯；其他编号整包回invalidArgument。
 - PC须在本轮全部测试及报告解析完成后，提交FUNC/PARA/SLT三类结果的完整失败清单；MCU只按该清单统一更新结果灯，报文错误不部分更新。
-- 未完成项的后续结果作废，不覆盖汇总灯；不取消正在执行的RK测试，不自动断电或停止B2加热。
-- RK仍运行或SLT收尾未完成时，新测试及电源改动仍可回busy。B1不使用010B；提前0107不影响后续RELEASE自动收尾，也不允许跨整轮认领旧测试。V2的SLT实际结束后仍须回送010B。
+- B1 收到合法 0107 后废弃未交付结果并关闭 RK/DDR。若 0104 正在停止本轮，0107 共用这次下电，两条命令分别应答。B2 加热仍由 PC 与 B2 控制。
+- V2 在提前 0107 时废弃未完成项的后续结果，保持原电源状态和在途占用，SLT 实际结束后仍须回送 010B。
 
 ### 4.12 PARA开始测试（0x0108）
 

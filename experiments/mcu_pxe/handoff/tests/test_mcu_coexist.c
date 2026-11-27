@@ -214,6 +214,31 @@ static void auto_grant(sn_frame_t *hello)
     CHECK(s_response.status == SN_OK && s_active);
 }
 
+/* 普通 SPL 路径先读到 0x43 应答的一半；prepared 之后再将同一帧的尾部交给接管路径。 */
+static void prepare_partial_timing_reply(void)
+{
+    CHECK(rk_task_check_timing("tRRD") == NULL);
+    CHECK(rk_timing_readback_poll(RK_READBACK_MANUAL));
+    tlv_frame_t query, reply;
+    CHECK(tlv_unpack(last_tlv, last_tlv_length, &query) == 2 && query.payload[0] == RK_CMD_QUERY_TIMING);
+    frame_init(&reply);
+    const uint8_t command[] = {RK_CMD_QUERY_TIMING, 0U};
+    const uint8_t value[] = {22U, 0U, 0U, 0U};
+    CHECK(tlv_pack(&reply, TLV_TYPE_RESULT_CMD, command, sizeof(command)) == 0);
+    CHECK(tlv_pack(&reply, TLV_TYPE_TIMING_INDEX, &query.payload[2], 1U) == 0);
+    CHECK(tlv_pack(&reply, TLV_TYPE_TIMING_CH0, value, sizeof(value)) == 0);
+    uint8_t wire[TLV_FRAME_MAX];
+    int length = tlv_pack_frame(&reply, query.sequence, wire, sizeof(wire));
+    int prefix = length / 2;
+    CHECK(prefix > 0 && uart_input_length == 0U);
+    for (int i = 0; i < prefix; ++i) {
+        CHECK(!handoff_mcu_rk_observe(wire[i]));
+        CHECK(tlv_sm_feed(rk_task_spl_stream(), wire[i]) == 0);
+    }
+    memcpy(uart_input, wire + prefix, length - prefix);
+    uart_input_length = (uint16_t)(length - prefix);
+}
+
 static void test_automatic_slt(void)
 {
     enum { AUTO_COOKIE = 101U, AUTO_NEXT_COOKIE = 102U, AUTO_SESSION = 1001U };
@@ -223,6 +248,7 @@ static void test_automatic_slt(void)
     CHECK(handoff_slt_begin(AUTO_COOKIE));
     test_busy = 1;
     CHECK(handoff_mcu_busy() && s_state.phase == HANDOFF_NORMAL && s_slt.waiting_off);
+    CHECK(handoff_mcu_tlv_allowed()); /* 只是业务预约，当前仍使用 SPL 协议。 */
     CHECK(handoff_mcu_rk_poll() == 0 && !handoff_slt_prepared(AUTO_COOKIE));
     poll_connected();
     CHECK(s_state.phase == HANDOFF_NORMAL && !s_state.seen_on && !pending_callback);
@@ -260,14 +286,18 @@ static void test_automatic_slt(void)
     CHECK(rk_link_ready_poll(AUTO_COOKIE) == 1 && jump_attempts == jumps);
     CHECK(handoff_mcu_rk_poll() == 0);
     CHECK(!handoff_slt_prepared(AUTO_NEXT_COOKIE));
+    prepare_partial_timing_reply();
+    CHECK(rk_timing_readback_manual_pending());
     CHECK(handoff_slt_prepared(AUTO_COOKIE));
     rk_idle = 0;
     CHECK(handoff_mcu_rk_poll() == 1 && jump_attempts == jumps);
+    CHECK(!rk_timing_readback_manual_pending());
     rk_idle = 1; uart_idle = 0;
     CHECK(handoff_mcu_rk_poll() == 1 && jump_attempts == jumps);
     uart_idle = 1;
     CHECK(handoff_mcu_rk_poll() == 1 && jump_attempts == jumps + 1);
     CHECK(s_boot_phase == HANDOFF_BOOT_WAIT_TX && !handoff_slt_cancel(AUTO_COOKIE));
+    CHECK(!handoff_mcu_tlv_allowed());
     sn_frame_t hello = {.op = SN_HELLO, .session = AUTO_SESSION, .sequence = 1U};
     auto_grant(&hello);
     CHECK(handoff_slt_status(AUTO_COOKIE) == HANDOFF_SLT_WAITING);
@@ -301,13 +331,23 @@ static void test_automatic_slt(void)
     test_busy = 1;
     CHECK(s_state.phase == HANDOFF_ARMED);
     CHECK(handoff_mcu_rk_poll() == 0);
+    rk_timing_readback_arm(0);
     power_state = PWR_CTRL_STATE_ON;
     poll_connected();
+    now += 1000U;
+    rk_task_handoff_heartbeat();
+    ready.sequence = heartbeat_sequence;
+    rk_task_handoff_receive(&ready);
+    rk_task_handoff_heartbeat();
+    CHECK(rk_timing_readback_busy() && !rk_task_handoff_idle() && jump_attempts == jumps + 1);
+    CHECK(rk_task_check_timing("CASReadLatency") == NULL);
+    CHECK(rk_timing_readback_manual_pending());
     hello.session = AUTO_SESSION + 1U; hello.sequence = 1U;
     length = sn_pack(&hello, wire, sizeof(wire));
     CHECK(length > 0);
     for (int i = 0; i < length; ++i) (void)handoff_mcu_rk_observe(wire[i]);
-    CHECK(handoff_slt_status(AUTO_NEXT_COOKIE) == HANDOFF_SLT_EARLY_EDK);
+    CHECK(handoff_slt_status(AUTO_NEXT_COOKIE) == HANDOFF_SLT_EARLY_EDK && !rk_timing_readback_busy());
+    CHECK(!handoff_mcu_tlv_allowed() && !rk_timing_readback_manual_pending());
     CHECK(s_response.status == SN_NOT_READY && !s_active);
     poll_connected();
     CHECK(!pending_callback && !handoff_slt_cancel(AUTO_NEXT_COOKIE));
@@ -370,7 +410,16 @@ static void test_explicit_stop(void)
     CHECK(s_state.phase == HANDOFF_RELEASING && pending_callback);
     run_callback(); poll_connected();
     CHECK(s_state.phase == HANDOFF_NORMAL && s_reset_stream);
+    /* 同速停机必须先等 TX 最后一个停止位，再清理旧 RX；即使不能重配 UART 也可完成。 */
+    uint32_t changes = baud_changes;
+    uart_input[0] = TLV_SYNC_HEADER;
+    uart_input_length = 1U;
+    uart_idle = 0;
+    CHECK(handoff_mcu_rk_poll() == 1 && handoff_mcu_busy() && uart_input_length == 1U);
+    uart_idle = 1; baud_fail = 1;
     CHECK(handoff_mcu_rk_poll() == 0 && !handoff_mcu_busy());
+    CHECK(!uart_input_length && baud_changes == changes);
+    baud_fail = 0;
     CHECK(handoff_slt_status(901U) == HANDOFF_SLT_OFF_READY);
 
     grant_connected(902U);
@@ -390,8 +439,10 @@ static void test_explicit_stop(void)
     uart_idle = 1; baud_fail = 1;
     CHECK(handoff_mcu_rk_poll() == 1 && handoff_mcu_busy());
     baud_fail = 0;
+    uart_input[0] = TLV_SYNC_HEADER;
+    uart_input_length = 1U;
     CHECK(handoff_mcu_rk_poll() == 0 && !handoff_mcu_busy());
-    CHECK(actual_baud == SN_BOOT_BAUD && !s_parser.used && !s_server.valid);
+    CHECK(actual_baud == SN_BOOT_BAUD && !uart_input_length && !s_parser.used && !s_server.valid);
     check_pc_network();
     message("PASS: explicit stop cancels unstarted reservation and EDK data without RELEASE, drains TX and restores UART\n");
 }

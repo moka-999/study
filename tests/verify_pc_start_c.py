@@ -69,6 +69,19 @@ const char *pc_site_configure(const pc_site_config_t *config, int *deferred)
 int pc_site_take_reply(const char **error) { (void)error; return 0; }
 void pc_site_disconnected(void) { }
 '''
+    if (root / 'App/protocol/pc/pc_shmoo.h').is_file():
+        service_stub += '''/* 此套件只验证普通启动解析；扫描由真实业务回归覆盖。 */
+pc_dispatch_result_t pc_test_shmoo_start(const cJSON *root, uint32_t seq, pc_dispatch_response_t *out)
+{ (void)root; (void)seq; (void)out; __builtin_trap(); }
+void pc_test_shmoo_point_sent(void) { __builtin_trap(); }
+'''
+    if (root / "b1.ioc").exists():
+        service_stub += '''#include "rk_task_control.h"
+/* 这组用例仅解析请求；启动 RK 的专项在实际业务回归中验证。 */
+void rk_timing_readback_arm(int deferred) { (void)deferred; __builtin_trap(); }
+int rk_task_set_pending(void) { return 0; }
+void rk_link_manual_frequency(int64_t value) { (void)value; __builtin_trap(); }
+'''
     (build / 'service_stub.c').write_text(service_stub, encoding='utf-8')
     sources = [Path(__file__).with_name("test_pc_start.c"), build / "service_stub.c",
                *[root / p for p in ("App/protocol/pc/pc_dispatch.c", "App/protocol/pc/pc_protocol.c",
@@ -92,6 +105,7 @@ void pc_site_disconnected(void) { }
     if (root / "b1.ioc").exists():
         command.insert(1, "-DB1_RK_UART=4")
         command.insert(1, "-I" + str(root / "App/diagnostics"))
+        command.insert(1, "-I" + str(root / "App/tasks/rk"))
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     (build / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode:

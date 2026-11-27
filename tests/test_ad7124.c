@@ -442,6 +442,24 @@ static ad7124_t reset_monitor_adc(void)
     return monitor.adc;
 }
 
+/* SPI 桩给三路依次返回满量程的 1/16、2/16、3/16。 */
+static void check_monitor_voltages(const memory_monitor_sample_t *sample)
+{
+#ifdef AD_TEST_B1
+    const int32_t reference_mv = BOARD_AD_REFERENCE_MV;
+#else
+    const int32_t reference_mv = 2500;
+#endif
+    for (int rail = 0; rail < (int)MEMORY_MONITOR_RAIL_COUNT; ++rail) {
+        int32_t expected_mv = reference_mv * (rail + 1) / 16;
+#ifdef AD_TEST_MANUAL_TLV
+        /* 手动 TLV 固件仍沿用原来的分压还原。 */
+        expected_mv = (expected_mv * 101 + 50) / 100;
+#endif
+        CHECK(sample->voltage_mv[rail] == expected_mv);
+    }
+}
+
 static void test_monitor(void)
 {
     memory_monitor_t monitor = {0};
@@ -457,13 +475,7 @@ static void test_monitor(void)
     monitor.adc = reset_monitor_adc();
     CHECK(memory_monitor_init(&monitor) == IF_OK && monitor.adc_ready == 1U);
     CHECK(memory_monitor_sample(&monitor, &sample) == IF_OK);
-#if defined(AD_TEST_B1) && BOARD_AD_USE_AVDD_REFERENCE
-    CHECK(sample.voltage_mv[0] == 210 && sample.voltage_mv[1] == 420 && sample.voltage_mv[2] == 630);
-#elif defined(AD_TEST_B1)
-    CHECK(sample.voltage_mv[0] == 158 && sample.voltage_mv[1] == 315 && sample.voltage_mv[2] == 473);
-#else
-    CHECK(sample.voltage_mv[0] == 156 && sample.voltage_mv[1] == 312 && sample.voltage_mv[2] == 468);
-#endif
+    check_monitor_voltages(&sample);
 }
 
 static void test_incremental_conversion(void)
@@ -516,13 +528,7 @@ static void test_incremental_monitor(void)
     CHECK(memory_monitor_poll_voltage(&monitor, &sample, 260U, &begin) == 1);
     CHECK(begin == 100U && monitor.voltage_mask == 0U && !monitor.voltage_collecting);
     CHECK(sample.valid_mask == (MEMORY_MONITOR_VALID_VOLTAGE | MEMORY_MONITOR_VALID_IDD));
-#if defined(AD_TEST_B1) && BOARD_AD_USE_AVDD_REFERENCE
-    CHECK(sample.voltage_mv[0] == 210 && sample.voltage_mv[1] == 420 && sample.voltage_mv[2] == 630);
-#elif defined(AD_TEST_B1)
-    CHECK(sample.voltage_mv[0] == 158 && sample.voltage_mv[1] == 315 && sample.voltage_mv[2] == 473);
-#else
-    CHECK(sample.voltage_mv[0] == 156 && sample.voltage_mv[1] == 312 && sample.voltage_mv[2] == 468);
-#endif
+    check_monitor_voltages(&sample);
     /* 未ready不重发旧组三轨；超时后即使缓存有值也不得继续标为有效。 */
     status_bits = AD7124_STATUS_RDY;
     CHECK(memory_monitor_poll_voltage(&monitor, &sample, 280U, &begin) == 0);

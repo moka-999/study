@@ -64,6 +64,13 @@ uint32_t __get_IPSR(void);
         sources.append(root / "Core/Src/log_console.c")
         sources.append(root / "Core/Src/result_led.c")
         includes.append(root / "Core/Inc")
+    timing_console = (root / "App/tasks/rk/rk_timing_readback.h").is_file() and is_b1
+    if timing_console:
+        includes.append(root / "App/tasks/rk")
+    capacity = root / "App/diagnostics/rk_ddr_capacity.c"
+    if capacity.is_file():
+        sources.append(capacity)
+        includes.extend((capacity.parent, root / "BSP/TPS62868"))
     network_console = (root / 'App/tasks/console/net_console.h').is_file()
     if network_console:
         includes.append(root / 'App/tasks/console')
@@ -80,6 +87,12 @@ uint32_t __get_IPSR(void);
                "-Wl,--gc-sections,--defsym=end=_ebss", "-o", str(build / "test.elf")]
     if is_b1:
         command += ["-DTEST_B1_LOG_CONSOLE=1", f"-DB1_LOG_DEFAULT_SOURCE={args.log_default}"]
+        if "log_console_service_debug(" in (root / "Core/Inc/log_console.h").read_text(encoding="utf-8"):
+            command.append("-DTEST_B1_DEBUG_COMMANDS=1")
+    if timing_console:
+        command.append("-DTEST_TIMING_CHECK_CONSOLE=1")
+    if capacity.is_file():
+        command.append("-DTEST_RK_DDR_CAPACITY=1")
     if (root / "App/protocol/pc/pc_site_control.h").is_file():
         command += ["-DTEST_SITE_CONSOLE=1"]
     if network_console:

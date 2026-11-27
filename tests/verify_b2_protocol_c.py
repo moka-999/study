@@ -74,6 +74,8 @@ int pc_test_round_update_modes(uint8_t, const uint8_t *);
     flags = [args.compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16",
                "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
                "-ffunction-sections", "-fdata-sections"]
+    if (root / "b1.ioc").is_file():
+        flags.append("-DB1_RK_UART=4")
     link_flags = [str(support / "qemu_start.s"), "-nostartfiles", "--specs=nosys.specs",
                   "-T" + str(support / "qemu_test.ld"), "-Wl,--gc-sections"]
     command = flags + ["-I" + str(p) for p in includes] + list(map(str, sources)) + link_flags
@@ -86,8 +88,6 @@ int pc_test_round_update_modes(uint8_t, const uint8_t *);
         "Middlewares/Third_Party/FreeRTOS/Source/include",
         "Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F")]
     command = flags + ["-DSTM32H743xx", "-DUSE_HAL_DRIVER"]
-    if root.name == "b1":
-        command += ["-DB1_RK_UART=4"]
     command += ["-I" + str(p) for p in driver_includes]
     command += [str(test_root / "tests/test_b2_spi_errors.c"), *link_flags]
     run_suite(args, command, build / "spi-errors", root.name, "PASS: actual SPI DMA error classifier")

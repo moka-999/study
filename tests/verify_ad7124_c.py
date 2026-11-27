@@ -33,6 +33,7 @@ void HAL_Delay(uint32_t);
                "-std=c11", "-g", "-O1", "-Wall", "-Wextra", "-Werror",
                "-ffunction-sections", "-fdata-sections", *["-I" + str(p) for p in includes],
                *(["-DAD_TEST_B1=1"] if is_b1 else []),
+               *(["-DAD_TEST_MANUAL_TLV=1"] if (root / "Core/Inc/tlv_bridge.h").is_file() else []),
                *(["-DBOARD_AD_USE_AVDD_REFERENCE=0"] if args.internal_reference else []),
                *map(str, sources), "-nostartfiles", "--specs=nosys.specs",
                "-T" + str(Path(__file__).resolve().parent / "support/qemu_test.ld"), "-Wl,--gc-sections",

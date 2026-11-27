@@ -75,13 +75,16 @@ typedef struct {
     uint16_t port, service;
     uint32_t sequence, ack;
     unsigned resets, syns;
+    char output[16384];
+    size_t output_length;
 } peer_t;
-static peer_t peers[] = {{50001U, B1_DEBUG_TCP_PORT, 100U, 0U, 0U, 0U},
-                         {50002U, B1_DEBUG_TCP_PORT, 200U, 0U, 0U, 0U},
-                         {50003U, B1_PC_TCP_PORT, 300U, 0U, 0U, 0U}};
+static peer_t peers[] = {
+    {.port=50001U, .service=B1_DEBUG_TCP_PORT, .sequence=100U},
+    {.port=50002U, .service=B1_DEBUG_TCP_PORT, .sequence=200U},
+    {.port=50003U, .service=B1_PC_TCP_PORT,    .sequence=300U},
+    {.port=50004U, .service=B1_DEBUG_TCP_PORT, .sequence=400U},
+};
 static ip4_addr_t peer_ip;
-static char output[32768];
-static size_t output_length;
 static unsigned business_received;
 
 static err_t capture(struct netif *netif, struct pbuf *p, const ip4_addr_t *destination)
@@ -105,10 +108,10 @@ static err_t capture(struct netif *netif, struct pbuf *p, const ip4_addr_t *dest
     uint32_t next = read32(tcp + 4) + payload + ((tcp[13] & FLAG_SYN) != 0U) + ((tcp[13] & FLAG_FIN) != 0U);
     if (payload || tcp[13] & (FLAG_SYN | FLAG_FIN)) peer->ack = next;
     if (payload && peer->service == B1_DEBUG_TCP_PORT) {
-        CHECK(output_length + payload < sizeof(output));
-        memcpy(output + output_length, tcp + (tcp[12] >> 4) * 4U, payload);
-        output_length += payload;
-        output[output_length] = '\0';
+        CHECK(peer->output_length + payload < sizeof(peer->output));
+        memcpy(peer->output + peer->output_length, tcp + (tcp[12] >> 4) * 4U, payload);
+        peer->output_length += payload;
+        peer->output[peer->output_length] = '\0';
     }
     return ERR_OK;
 }
@@ -168,7 +171,42 @@ static err_t business_accept(void *arg, struct tcp_pcb *pcb, err_t error)
     tcp_recv(pcb, business_receive);
     return ERR_OK;
 }
-static void clear_output(void) { output_length = 0U; output[0] = '\0'; }
+static void clear_output(peer_t *peer) { peer->output_length = 0U; peer->output[0] = '\0'; }
+
+/* 两台各读115200/8N1满速日志；仅第一台的ACK中途停顿200ms。 */
+static void test_uart_rate(uint32_t session, uint32_t second)
+{
+    static uint8_t log[11520], second_log[sizeof(log)];
+    for (size_t i = 0U; i < sizeof(log); ++i) {
+        log[i] = (uint8_t)(i * 37U);
+        second_log[i] = (uint8_t)~log[i];
+    }
+    size_t offset = 0U;
+    uint32_t dropped = net_console_dropped_bytes();
+    clear_output(&peers[0]);
+    clear_output(&peers[1]);
+    for (unsigned step = 1U; step <= 100U; ++step) {
+        size_t end = sizeof(log) * step / 100U;
+        CHECK(net_console_write(session, log + offset, end - offset, 1) == 1);
+        CHECK(net_console_write(second, second_log + offset, end - offset, 1) == 1);
+        offset = end;
+        poll_ms(10U);
+        if (step % 2U == 0U) receive(&peers[1], FLAG_ACK, NULL, 0U);
+        if (step % 4U == 0U && (step <= 40U || step >= 60U))
+            receive(&peers[0], FLAG_ACK, NULL, 0U);
+    }
+    for (unsigned i = 0U; i < 8U; ++i) {
+        poll_ms(20U);
+        receive(&peers[0], FLAG_ACK, NULL, 0U);
+        receive(&peers[1], FLAG_ACK, NULL, 0U);
+    }
+    CHECK(peers[0].output_length == sizeof(log) && !memcmp(peers[0].output, log, sizeof(log)));
+    CHECK(peers[1].output_length == sizeof(second_log) && !memcmp(peers[1].output, second_log, sizeof(second_log)));
+    CHECK(net_console_dropped_bytes() == dropped);
+    clear_output(&peers[0]);
+    clear_output(&peers[1]);
+    message("PASS: two distinct 11520-byte streams, including a 200ms ACK pause on only one client\n");
+}
 
 void test_main(void)
 {
@@ -184,7 +222,7 @@ void test_main(void)
     connect_peer(&peers[2]);
 
     net_console_start();
-    callback_fail = 1; poll_ms(20U); CHECK(!net_console_session());
+    callback_fail = 1; poll_ms(20U); CHECK(!net_console_session(0));
     struct tcp_pcb *held[MEMP_NUM_TCP_PCB - 1U];
     for (unsigned i = 0U; i < MEMP_NUM_TCP_PCB - 1U; ++i) { held[i] = tcp_new(); CHECK(held[i]); }
     callback_fail = 0; poll_ms(20U);
@@ -193,67 +231,88 @@ void test_main(void)
     poll_ms(20U);
     /* 无可用PCB时accept收到NULL/ERR_MEM，不能崩溃或牺牲已有业务连接。 */
     for (unsigned i = 0U; i < MEMP_NUM_TCP_PCB - 1U; ++i) { held[i] = tcp_new(); CHECK(held[i]); }
-    receive(&peers[0], FLAG_SYN, NULL, 0U); CHECK(!net_console_session());
+    receive(&peers[0], FLAG_SYN, NULL, 0U); CHECK(!net_console_session(0));
     for (unsigned i = 0U; i < MEMP_NUM_TCP_PCB - 1U; ++i) tcp_abort(held[i]);
     connect_peer(&peers[0]);
-    uint32_t session = net_console_session(); CHECK(session);
-    unsigned resets = peers[1].resets;
-    receive(&peers[1], FLAG_SYN, NULL, 0U);
-    CHECK(peers[1].resets == resets + 1U && net_console_session() == session);
+    uint32_t session = net_console_session(0); CHECK(session);
+    connect_peer(&peers[1]);
+    uint32_t second = net_console_session(1);
+    CHECK(second && second != session && NET_CONSOLE_CLIENT_COUNT == 2U);
+    unsigned resets = peers[3].resets;
+    receive(&peers[3], FLAG_SYN, NULL, 0U);
+    CHECK(peers[3].resets == resets + 1U);
+    CHECK(net_console_session(0) == session && net_console_session(1) == second);
     receive(&peers[0], FLAG_ACK, "sta", 3U);
+    receive(&peers[1], FLAG_ACK, "log rk\r", 7U);
     receive(&peers[0], FLAG_ACK, "tus\r\n", 5U);
     uint8_t input[512];
+    CHECK(net_console_read(second, input, sizeof(input)) == 7U && !memcmp(input, "log rk\r", 7U));
     CHECK(net_console_read(session, input, sizeof(input)) == 8U && !memcmp(input, "status\r\n", 8U));
     CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 0U);
-    message("PASS: actual TCP handshake, duplicate refusal and immediate RX pbuf release\n");
+    message("PASS: two concurrent debug sessions, third refused, independent input and pbuf release\n");
+
+    test_uart_rate(session, second);
 
     /* 长期空闲后仍可打印；2KiB日志只能先提交1KiB，ACK后再推进。 */
     poll_ms(10000U);
     char record[256]; memset(record, 'x', sizeof(record));
     for (unsigned i = 0U; i < 8U; ++i) CHECK(net_console_write(session, record, sizeof(record), 1) == 1);
-    poll_ms(20U); CHECK(output_length == 1024U);
-    poll_ms(20U); CHECK(output_length == 1024U && net_console_session() == session);
-    receive(&peers[0], FLAG_ACK, NULL, 0U); poll_ms(20U); CHECK(output_length == 2048U);
+    poll_ms(20U); CHECK(peers[0].output_length == 1024U);
+    poll_ms(20U); CHECK(peers[0].output_length == 1024U && net_console_session(0) == session);
+    receive(&peers[0], FLAG_ACK, NULL, 0U); poll_ms(20U); CHECK(peers[0].output_length == 2048U);
     receive(&peers[0], FLAG_ACK, NULL, 0U); poll_ms(20U);
-    clear_output();
+    clear_output(&peers[0]);
     unsigned accepted = 0U;
     while (net_console_write(session, record, sizeof(record), 1) == 1) ++accepted;
     CHECK(accepted == 14U && net_console_dropped_bytes() == sizeof(record));
+    CHECK(net_console_client_dropped_bytes(0) == sizeof(record) && net_console_client_dropped_bytes(1) == 0U);
     CHECK(net_console_write(session, "control reply\r\n", 15U, 0) == 1);
     for (unsigned i = 0U; i < 10U; ++i) { poll_ms(20U); receive(&peers[0], FLAG_ACK, NULL, 0U); }
-    CHECK(strstr(output, "droppedBytes=256") && strstr(output, "control reply\r\n"));
+    CHECK(strstr(peers[0].output, "droppedBytes=256") && strstr(peers[0].output, "control reply\r\n"));
+    CHECK(peers[1].output_length == 0U);
     message("PASS: bounded TCP backlog, whole-record drops and reserved control reply space\n");
 
-    /* 不ACK的调试客户端会被释放，另一业务连接仍收包；旧会话数据不得重放。 */
+    /* 第一台停止ACK；第二台调试机和8888业务继续收发，旧会话失效。 */
     CHECK(net_console_write(session, "blocked", 7U, 1) == 1);
-    poll_ms(20U); poll_ms(3000U); CHECK(!net_console_session());
+    poll_ms(20U);
+    CHECK(net_console_write(second, "live", 4U, 0) == 1);
+    poll_ms(20U);
+    CHECK(peers[1].output_length == 4U && !strcmp(peers[1].output, "live"));
+    receive(&peers[1], FLAG_ACK, NULL, 0U);
     receive(&peers[2], FLAG_ACK, "business", 8U); CHECK(business_received == 8U);
-    poll_ms(20U); connect_peer(&peers[0]); CHECK(net_console_session() != session);
+    poll_ms(3000U); CHECK(!net_console_session(0) && net_console_session(1) == second);
+    poll_ms(20U); connect_peer(&peers[0]); CHECK(net_console_session(0) && net_console_session(0) != session);
     CHECK(net_console_write(session, "old", 3U, 0) == -1);
     CHECK(net_console_read(session, input, sizeof(input)) == 0U);
-    session = net_console_session();
+    session = net_console_session(0);
     receive(&peers[0], FLAG_ACK, record, 256U);
     receive(&peers[0], FLAG_ACK, record, 256U);
-    receive(&peers[0], FLAG_ACK, "x", 1U); CHECK(!net_console_session());
+    receive(&peers[0], FLAG_ACK, "x", 1U); CHECK(!net_console_session(0));
     CHECK(net_console_read(session, input, sizeof(input)) == 0U);
+    CHECK(net_console_session(1) == second);
+    receive(&peers[1], FLAG_ACK, "status\r", 7U);
+    CHECK(net_console_read(second, input, sizeof(input)) == 7U && !memcmp(input, "status\r", 7U));
     CHECK(lwip_stats.memp[MEMP_PBUF_POOL]->used == 0U);
     message("PASS: slow/input-flood clients are isolated from the live business connection\n");
 
     poll_ms(20U); connect_peer(&peers[0]);
-    receive(&peers[0], FLAG_ACK | FLAG_FIN, NULL, 0U); CHECK(!net_console_session());
+    receive(&peers[0], FLAG_ACK | FLAG_FIN, NULL, 0U); CHECK(!net_console_session(0));
     poll_ms(20U); connect_peer(&peers[0]);
-    receive(&peers[0], FLAG_ACK | FLAG_RST, NULL, 0U); CHECK(!net_console_session());
-    poll_ms(20U); connect_peer(&peers[0]); session = net_console_session();
+    receive(&peers[0], FLAG_ACK | FLAG_RST, NULL, 0U); CHECK(!net_console_session(0));
+    CHECK(net_console_session(1) == second);
+    poll_ms(20U); connect_peer(&peers[0]); session = net_console_session(0);
     IP4_ADDR(&ip,192,168,1,202);
     network_context = 1U; netif_set_ipaddr(&gnetif, &ip); network_context = 0U;
     poll_ms(20U);
-    CHECK(!net_console_session());
-    connect_peer(&peers[0]); CHECK(net_console_session() && net_console_session() != session);
+    CHECK(!net_console_session(0) && !net_console_session(1));
+    connect_peer(&peers[0]); connect_peer(&peers[1]);
+    CHECK(net_console_session(0) && net_console_session(0) != session);
+    CHECK(net_console_session(1) && net_console_session(1) != second);
     network_context = 1U; netif_set_link_down(&gnetif); network_context = 0U;
-    poll_ms(20U); CHECK(!net_console_session());
+    poll_ms(20U); CHECK(!net_console_session(0) && !net_console_session(1));
     network_context = 1U; netif_set_link_up(&gnetif); network_context = 0U;
-    poll_ms(20U); connect_peer(&peers[0]);
-    CHECK(net_console_session());
+    poll_ms(20U); connect_peer(&peers[0]); connect_peer(&peers[1]);
+    CHECK(net_console_session(0) && net_console_session(1));
     message("PASS: FIN/RST, dynamic IP and link recovery without stale connection output\n");
     CHECK(!critical);
     message("PASS: actual lwIP network console\n");

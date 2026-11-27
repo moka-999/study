@@ -17,7 +17,7 @@ def main():
 #include <stdint.h>
 #include <stddef.h>
 typedef struct { volatile uint32_t ISR, CR1, TDR; } USART_TypeDef;
-typedef struct { struct { uint32_t Mode; } Init; } DMA_HandleTypeDef;
+typedef struct { struct { uint32_t Mode; } Init; uint32_t interrupts, remaining; } DMA_HandleTypeDef;
 typedef struct UART_HandleTypeDef {
     USART_TypeDef *Instance;
     struct { uint32_t BaudRate; } Init;
@@ -39,9 +39,11 @@ typedef int *SemaphoreHandle_t;
 #define UART_FLAG_TC 8U
 #define __HAL_UART_GET_FLAG(uart, flags) ((uart)->Instance->ISR & (flags))
 #define DMA_NORMAL 0
+#define DMA_CIRCULAR 1
 #define DMA_IT_HT 1U
+#define __HAL_DMA_GET_COUNTER(dma) ((dma)->remaining)
 #define __HAL_UART_ENABLE_IT(uart, flags) ((uart)->Instance->CR1 |= (flags))
-#define __HAL_DMA_DISABLE_IT(dma, flags) ((void)(dma), (void)(flags))
+#define __HAL_DMA_DISABLE_IT(dma, flags) ((dma)->interrupts &= ~(flags))
 uint32_t HAL_GetTick(void);
 uint32_t __get_PRIMASK(void);
 void __disable_irq(void);

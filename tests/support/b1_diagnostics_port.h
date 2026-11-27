@@ -21,7 +21,15 @@ void test_enter(void);
 void test_exit(void);
 #define taskENTER_CRITICAL() test_enter()
 #define taskEXIT_CRITICAL() test_exit()
-size_t xPortGetFreeHeapSize(void);
+typedef struct {
+    size_t xAvailableHeapSpaceInBytes, xMinimumEverFreeBytesRemaining, xSizeOfLargestFreeBlockInBytes;
+} HeapStats_t;
+void vPortGetHeapStats(HeapStats_t *stats);
+typedef const char *TaskHandle_t;
+typedef uint32_t StackType_t;
+#define TCPIP_THREAD_NAME "tcpip_thread"
+TaskHandle_t xTaskGetHandle(const char *name);
+unsigned uxTaskGetStackHighWaterMark(TaskHandle_t task);
 uint8_t board_slot_code(void);
 uint8_t b2_service_site_id(void);
 typedef enum {
@@ -35,7 +43,7 @@ pwr_ctrl_state_t pwr_ctrl_get_state(void);
 typedef struct {
     uint8_t valid_mask;
     int32_t voltage_mv[3];
-    struct { uint64_t current_ua; } idd[3];
+    struct { uint32_t vbus_mv; uint64_t current_ua; } idd[3];
     uint8_t tps_status[3];
 } memory_monitor_sample_t;
 typedef struct {
@@ -60,8 +68,10 @@ typedef struct {
 int monitor_get_latest(monitor_snapshot_t *);
 int monitor_get_diagnostics(monitor_diagnostics_t *);
 #define UART_PORT_COUNT 3
+#define UART_PORT_RK_PROTOCOL 0
 typedef struct {
-    uint32_t errors, last_hal_error, dropped_blocks, restart_failures;
+    uint32_t errors, last_hal_error, dropped_blocks, restart_failures, queue_overflows;
+    uint32_t last_drop_ms, session_end_bytes, invalid_events, recoveries;
     uint8_t recovery_pending;
 } uart_rx_diagnostics_t;
 int uart_get_rx_diagnostics(int, uart_rx_diagnostics_t *);

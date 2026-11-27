@@ -13,6 +13,15 @@
 #include "log_console.h"
 #include "result_led.h"
 #endif
+#if defined(TEST_TIMING_CHECK_CONSOLE)
+#include "rk_task_control.h"
+#endif
+#if defined(TEST_RK_DDR_CAPACITY)
+#include "pwr_ctrl.h"
+#include "rk_ddr_capacity.h"
+static pwr_ctrl_state_t rk_power;
+pwr_ctrl_state_t pwr_ctrl_get_state(void) { return rk_power; }
+#endif
 
 #define STR1(x) #x
 #define STR(x) STR1(x)
@@ -50,7 +59,8 @@ static int allocation_failure;
 static void (*queue_wait_event)(void);
 QueueHandle_t xQueueCreate(UBaseType_t length, UBaseType_t size)
 {
-    CHECK((length == 8U || length == 2U) && size <= sizeof(queues[0].blocks[0]) && queue_count < 3U);
+    CHECK((length == 8U || length == 2U || (length == 1U && size == 1U)) &&
+          size <= sizeof(queues[0].blocks[0]) && queue_count < 3U);
     if (allocation_failure) return NULL;
     queues[queue_count].size = size;
     queues[queue_count].capacity = length;
@@ -102,6 +112,25 @@ void uart_tx_mutex_init(void) { }
 void uart_tx_isr_attach(void) { }
 static UART_HandleTypeDef uart[3];
 static uint8_t *dma_buffer[3];
+static uint16_t dma_size[3];
+#if defined(UART_RK_LOG_RX_CAPACITY)
+static uint16_t dma_position[3];
+#if defined(UART_RK_PROTOCOL_RX_CAPACITY)
+uint16_t uart_hw_rx_position(uart_if_t *port, uint16_t size)
+{
+    unsigned index = (unsigned)((UART_HandleTypeDef *)port->handle - uart);
+    CHECK(index < 3U && size == dma_size[index]);
+    return dma_position[index] % size;
+}
+int uart_hw_tx_idle(uart_if_t *port) { return port->handle == &uart[0]; }
+static uart_baud_result_t baud_result = UART_BAUD_CHANGED;
+uart_baud_result_t uart_hw_set_baud(uart_if_t *port, uint32_t baud)
+{
+    CHECK(port->handle == &uart[0] && baud == 4000000U && !isr && !critical);
+    return baud_result;
+}
+#endif
+#endif
 static unsigned starts[3], aborts;
 static int fail_start[3], fail_abort;
 #if defined(TEST_B1_LOG_CONSOLE)
@@ -127,8 +156,16 @@ static int start_rx(uart_if_t *port, uint8_t *buffer, uint16_t length)
 {
     unsigned index = (unsigned)((UART_HandleTypeDef *)port->handle - uart);
     CHECK(index < 3U);
+#if defined(UART_RK_PROTOCOL_DMA_SIZE)
+    CHECK(length == (index == UART_PORT_RK_PROTOCOL ? UART_RK_PROTOCOL_DMA_SIZE : UART_RX_BUF_SIZE));
+#else
     CHECK(length == UART_RX_BUF_SIZE);
+#endif
+    dma_size[index] = length;
     ++starts[index]; dma_buffer[index] = buffer;
+#if defined(UART_RK_LOG_RX_CAPACITY)
+    dma_position[index] = 0U;
+#endif
     return fail_start[index] ? IF_ERR : IF_OK;
 }
 static int send_tx(uart_if_t *port, uint8_t *data, uint16_t length)
@@ -168,13 +205,45 @@ static uart_if_t ports[3] = {
     {.handle = &uart[1], .send = send_tx, .start_rx = start_rx},
     {.handle = &uart[2], .send = send_tx, .start_rx = start_rx},
 };
+static void signal_rx(unsigned port, uint16_t position, int event)
+{
+    uart[port].event = event;
+    isr = 1; HAL_UARTEx_RxEventCallback(&uart[port], position); isr = 0;
+}
+
 static void receive_port(unsigned port, const uint8_t *bytes, uint16_t size, int event)
 {
-    CHECK(size <= UART_RX_BUF_SIZE && !critical);
-    CHECK(port < 3U && dma_buffer[port]);
+    CHECK(port < 3U && dma_buffer[port] && size <= dma_size[port] && !critical);
+#if defined(UART_RK_LOG_RX_CAPACITY)
+    int circular = port == UART_PORT_RK_DEBUG;
+#if defined(UART_RK_PROTOCOL_RX_CAPACITY)
+    circular |= port == UART_PORT_RK_PROTOCOL;
+#endif
+    if (circular && size) {
+        /* 模拟循环DMA；半满或满块后，IDLE可以再次报告同一写入位置。 */
+        uint16_t *position = &dma_position[port];
+        uint16_t capacity = dma_size[port];
+        while (size) {
+            size_t boundary = *position < capacity / 2U ? capacity / 2U : capacity;
+            size_t copied = boundary - *position;
+            if (copied > size) copied = size;
+            memcpy(dma_buffer[port] + *position, bytes, copied);
+            *position += (uint16_t)copied;
+            bytes += copied;
+            size -= (uint16_t)copied;
+            if (*position == boundary) {
+                signal_rx(port, (uint16_t)boundary, boundary == capacity ?
+                          HAL_UART_RXEVENT_TC : HAL_UART_RXEVENT_HT);
+                if (boundary == capacity) *position = 0U;
+            }
+        }
+        if (event == HAL_UART_RXEVENT_IDLE)
+            signal_rx(port, *position ? *position : capacity, event);
+        return;
+    }
+#endif
     if (size) memcpy(dma_buffer[port], bytes, size);
-    uart[port].event = event;
-    isr = 1; HAL_UARTEx_RxEventCallback(&uart[port], size); isr = 0;
+    signal_rx(port, size, event);
 }
 static void receive(const uint8_t *bytes, uint16_t size, int event)
 { receive_port(0U, bytes, size, event); }
@@ -248,6 +317,142 @@ static void test_uart_wait(void)
 }
 #endif
 
+#if defined(UART_RK_PROTOCOL_RX_CAPACITY)
+/* 模拟心跳与DDRbin频率查询交替进入，消费者每97帧才读取；按线帧CRC和序号核对。 */
+static void test_protocol_burst_frames(void)
+{
+    enum { FRAME_COUNT = 2048, BATCH_FRAMES = 97 };
+    uint8_t wire[TLV_CMD_FRAME_SIZE], part[UART_RX_BUF_SIZE];
+    tlv_sm_t sm;
+    tlv_sm_init(&sm);
+    unsigned decoded = 0U;
+    for (unsigned seq = 1U; seq <= FRAME_COUNT; ++seq) {
+        int length = (seq & 1U) ? tlv_pack_cmd(0x35U, NULL, 0U, seq, wire, sizeof(wire))
+                                : tlv_pack_heartbeat(seq, wire, sizeof(wire));
+        CHECK(length > 3);
+        receive(wire, 3U, HAL_UART_RXEVENT_IDLE);
+        receive(wire + 3U, (uint16_t)(length - 3), HAL_UART_RXEVENT_IDLE);
+        if (seq % BATCH_FRAMES && seq < FRAME_COUNT) continue;
+        for (;;) {
+            int count = uart_poll_rx(UART_PORT_RK_PROTOCOL, part, sizeof(part));
+            CHECK(count >= 0);
+            if (!count) break;
+            for (int i = 0; i < count; ++i) {
+                int complete = tlv_sm_feed(&sm, part[i]);
+                CHECK(complete >= 0);
+                if (complete) {
+                    tlv_frame_t frame;
+                    ++decoded;
+                    CHECK(tlv_sm_get_frame(&sm, &frame) == (int)(decoded & 1U));
+                    CHECK(frame.sequence == decoded);
+                }
+            }
+        }
+    }
+    CHECK(decoded == FRAME_COUNT);
+    message("PASS: 2048 fragmented UART4 heartbeat/query frames, CRC and sequence verified\n");
+}
+
+static void test_protocol_stream(void)
+{
+    /* 连续64个短IDLE块共1728字节，需分两次poll交付。 */
+    static uint8_t sent[UART_RK_PROTOCOL_RX_CAPACITY + 7U], received[UART_RX_BUF_SIZE];
+    const unsigned port = UART_PORT_RK_PROTOCOL;
+    uart_rx_diagnostics_t diag;
+    for (size_t i = 0; i < sizeof(sent); ++i) sent[i] = (uint8_t)(i * 7U + i / 256U);
+    const unsigned burst = 64U * 27U;
+    unsigned initial_starts = starts[port];
+    for (unsigned i = 0; i < burst; i += 27U)
+        receive(sent + i, 27U, HAL_UART_RXEVENT_IDLE);
+    /* DMA半满通知比UART IDLE晚处理，两次通知之间硬件写指针没有变化。 */
+    signal_rx(port, dma_size[port] / 2U, HAL_UART_RXEVENT_HT);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == UART_RX_BUF_SIZE);
+    CHECK(!memcmp(received, sent, UART_RX_BUF_SIZE));
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == (int)(burst - UART_RX_BUF_SIZE));
+    CHECK(!memcmp(received, sent + UART_RX_BUF_SIZE, burst - UART_RX_BUF_SIZE));
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 0 && starts[port] == initial_starts);
+    test_protocol_burst_frames();
+    CHECK(uart_get_rx_diagnostics(port, &diag) && !diag.dropped_blocks && !diag.queue_overflows);
+
+    /* 真实满环：断点之前的所有字节仍然可读，满环后的7字节只触发一次断流。 */
+    for (unsigned i = 0; i < UART_RK_PROTOCOL_RX_CAPACITY; ) {
+        unsigned remaining = UART_RK_PROTOCOL_RX_CAPACITY - i;
+        uint16_t count = remaining < dma_size[port] ? (uint16_t)remaining : dma_size[port];
+        /* 直接连续写一圈，仅半满和满圈中断发布数据，IDLE可能在结束处重复通知。 */
+        receive(sent + i, count, HAL_UART_RXEVENT_IDLE);
+        signal_rx(port, dma_size[port], HAL_UART_RXEVENT_TC);
+        i += count;
+    }
+    receive(sent + UART_RK_PROTOCOL_RX_CAPACITY, 7U, HAL_UART_RXEVENT_IDLE);
+    for (unsigned i = 0; i < UART_RK_PROTOCOL_RX_CAPACITY; i += UART_RX_BUF_SIZE) {
+        unsigned remaining = UART_RK_PROTOCOL_RX_CAPACITY - i;
+        unsigned expected = remaining < sizeof(received) ? remaining : sizeof(received);
+        CHECK(uart_poll_rx(port, received, sizeof(received)) == (int)expected);
+        CHECK(!memcmp(received, sent + i, expected));
+    }
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == UART_RX_GAP);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 0);
+    CHECK(uart_get_rx_diagnostics(port, &diag) && diag.queue_overflows == 1U && diag.dropped_blocks == 1U);
+
+    /* HAL报错前的最后一帧、断流、恢复后的第一帧按接收顺序交付。 */
+    receive(sent, 16U, HAL_UART_RXEVENT_IDLE);
+    error_event(8U);
+    tick += 100U;
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 16 && !memcmp(received, sent, 16U));
+    receive(sent + 16U, 19U, HAL_UART_RXEVENT_IDLE);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == UART_RX_GAP);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 19 && !memcmp(received, sent + 16U, 19U));
+    CHECK(uart_get_rx_diagnostics(port, &diag) && diag.errors == 1U && diag.recoveries == 1U &&
+          diag.dropped_blocks == 1U && !diag.recovery_pending);
+
+    /* TX锁或TC不满足时硬件还在接收，不能清DMA游标或插入断流标记。 */
+    receive(sent, 18U, HAL_UART_RXEVENT_IDLE);
+    receive(sent + 18U, 5U, HAL_UART_RXEVENT_HT);
+    initial_starts = starts[port];
+    baud_result = UART_BAUD_UNCHANGED;
+    CHECK(uart_set_baud(port, 4000000U) == IF_ERR);
+    receive(sent + 23U, 16U, HAL_UART_RXEVENT_IDLE);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 39 && !memcmp(received, sent, 39U));
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 0 && starts[port] == initial_starts);
+    baud_result = UART_BAUD_CHANGED;
+
+    /* 末尾5个旧波特率字节尚未触发IDLE；换速后先读这些字节，再读GAP和新速率首帧。 */
+    receive(sent, 16U, HAL_UART_RXEVENT_IDLE);
+    receive(sent + 16U, 5U, HAL_UART_RXEVENT_HT);
+    uint16_t old_rx_bytes = 0U;
+    CHECK(uart_rk_set_baud(4000000U, &old_rx_bytes) == IF_OK && old_rx_bytes == 21U);
+    receive(sent + 21U, 23U, HAL_UART_RXEVENT_IDLE);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 21 && !memcmp(received, sent, 21U));
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == UART_RX_GAP);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 23 && !memcmp(received, sent + 21U, 23U));
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 0);
+    /* 关机时同时清理已收的16字节和DMA内尚未通知的5字节，下次开机连续接收。 */
+    receive(sent, 16U, HAL_UART_RXEVENT_IDLE);
+    receive(sent + 16U, 5U, HAL_UART_RXEVENT_HT);
+    initial_starts = starts[port];
+    CHECK(uart_rk_end_rx_session() == IF_OK);
+    CHECK(uart_rk_end_rx_session() == IF_OK);
+    CHECK(uart_get_rx_diagnostics(port, &diag) && diag.session_end_bytes == 21U &&
+          diag.dropped_blocks == 1U && starts[port] == initial_starts);
+    receive(sent + 21U, 27U, HAL_UART_RXEVENT_IDLE);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 27 && !memcmp(received, sent + 21U, 27U));
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 0);
+
+    /* 故障期间相同DMA位置产生的重复通知不算丢块，实际新增的一段只记一次。 */
+    error_event(8U);
+    signal_rx(port, dma_size[port] / 2U, HAL_UART_RXEVENT_HT);
+    CHECK(uart_get_rx_diagnostics(port, &diag) && diag.dropped_blocks == 1U);
+    ++tick;
+    receive(sent, 11U, HAL_UART_RXEVENT_IDLE);
+    signal_rx(port, dma_size[port] / 2U, HAL_UART_RXEVENT_HT);
+    CHECK(uart_get_rx_diagnostics(port, &diag) && diag.dropped_blocks == 2U && diag.last_drop_ms == tick);
+    tick += 100U;
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == UART_RX_GAP);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 0);
+    message("PASS: UART4 circular DMA bursts, overflow prefix, recovery, baud and session boundaries\n");
+}
+#endif
+
 static void test_uart(void)
 {
     uint8_t heartbeat[16], buffer[UART_RX_BUF_SIZE];
@@ -255,6 +460,13 @@ static void test_uart(void)
     CHECK(tlv_pack_heartbeat(5U, heartbeat, sizeof(heartbeat)) == 16);
     CHECK(!memcmp(heartbeat, golden, sizeof(golden)));
     uart_rx_diagnostics_t diag;
+#if defined(UART_RK_PROTOCOL_DMA_SIZE)
+    /* 模拟热复位残留的AXI数据，首次注册必须清掉旧游标与断流位。 */
+    extern uint8_t __uart_rx_ring_start[], __uart_rx_ring_end[];
+    size_t ring_bytes = (uintptr_t)__uart_rx_ring_end - (uintptr_t)__uart_rx_ring_start;
+    CHECK(ring_bytes >= UART_RK_PROTOCOL_RX_CAPACITY);
+    memset(__uart_rx_ring_start, 0xA5, ring_bytes);
+#endif
     uart_register(-1, &ports[0]); uart_register(0, NULL);
     CHECK(!uart_get_rx_diagnostics(0, &diag));
     allocation_failure = 1; uart_register(0, &ports[0]);
@@ -266,8 +478,10 @@ static void test_uart(void)
 #endif
     uart_start_all(); CHECK(starts[0] == 1U && starts[1] == 1U);
     CHECK(uart_get_rx_diagnostics(1, &diag) && diag.restart_failures == 1U && diag.recovery_pending);
+#if !defined(UART_RK_PROTOCOL_RX_CAPACITY)
     receive(heartbeat, 10U, HAL_UART_RXEVENT_HT);
     CHECK(starts[0] == 1U && uart_poll_rx(0, buffer, sizeof(buffer)) == 0);
+#endif
     receive(heartbeat, 16U, HAL_UART_RXEVENT_IDLE);
     CHECK(uart_poll_rx(0, buffer, 1U) == 0); /* 参数无效不得消费已有块。 */
     CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 16 && !memcmp(buffer, golden, 16U));
@@ -276,6 +490,9 @@ static void test_uart(void)
 #if defined(TEST_B1_LOG_CONSOLE)
     test_uart_wait();
 #endif
+#if defined(UART_RK_PROTOCOL_RX_CAPACITY)
+    test_protocol_stream();
+#else
     tlv_sm_t sm; tlv_sm_init(&sm);
     receive(heartbeat, 10U, HAL_UART_RXEVENT_IDLE);
     CHECK(parse(&sm, buffer, uart_poll_rx(0, buffer, sizeof(buffer))) == 0);
@@ -327,6 +544,7 @@ static void test_uart(void)
     tick = 10U; CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 0 && aborts == saved_aborts);
     fail_start[0] = 0; tick = 79U;
     CHECK(uart_poll_rx(0, buffer, sizeof(buffer)) == 0 && aborts == saved_aborts + 1U);
+#endif
     CHECK(uart_send(0, heartbeat, 20U) == IF_OK && uart_send(-1, heartbeat, 20U) == IF_ERR);
     CHECK(!critical && !isr);
 }
@@ -346,11 +564,15 @@ static void test_serial_upload(void)
         request.length = network_headers + payloads[i];
         memset(request.data, 0x5A, request.length);
         uint16_t length = sn_pack(&request, wire, sizeof(wire));
-        /* 必须在帧尾IDLE前装下整帧，不能靠NORMAL DMA中途停收重启承接尾部。 */
+        /* 验证完整以太网负载在DMA跨界时仍能解出同一帧。 */
         CHECK(length > request.length && length < UART_RX_BUF_SIZE);
         unsigned before = starts[0];
         receive(wire, length, HAL_UART_RXEVENT_IDLE);
+#if defined(UART_RK_PROTOCOL_RX_CAPACITY)
+        CHECK(starts[0] == before);
+#else
         CHECK(starts[0] == before + 1U);
+#endif
         CHECK(uart_poll_rx(0, block, sizeof(block)) == length);
         sn_parser_reset(&parser);
         for (unsigned j = 0U; j < length; ++j)
@@ -360,7 +582,7 @@ static void test_serial_upload(void)
         CHECK(uart_poll_rx(0, block, sizeof(block)) == 0);
     }
     CHECK(UART_RX_BUF_SIZE > SN_WIRE_MAX);
-    message("PASS: MCU UART RX accepts 512/1024/1468 TFTP upload blocks before DMA restart\n");
+    message("PASS: MCU UART RX accepts 512/1024/1468 TFTP upload blocks\n");
 }
 #endif
 
@@ -525,6 +747,85 @@ static void rk_log_input(const char *text)
     receive_port(UART_PORT_RK_DEBUG, (const uint8_t *)text, (uint16_t)strlen(text), HAL_UART_RXEVENT_IDLE);
     log_console_process();
 }
+#if defined(TEST_RK_DDR_CAPACITY)
+static void test_ddr_capacity_log(void)
+{
+    console_input("log mcu\n");
+    clear_console_output();
+    rk_ddr_capacity_round_begin();
+    rk_power = PWR_CTRL_STATE_WAIT_SECOND_RAIL;
+    /* 真实双 Rank 格式。故意拆开通道名和单位，重复一行，并改变通道到达顺序。 */
+    rk_log_input("LPDDR4X, 2112MHz\r\nchan");
+    rk_log_input("nel[0] BW=16 Col=10 Bk=8 CS0 Row=15 CS1 Row=15 CS=2 Die BW=16 Size=1024M");
+    rk_log_input("B\r\nchannel[0] BW=16 Size=1024MB\nchannel[3] BW=16 Size=1024MB\n");
+    rk_log_input("channel[2] BW=16 Size=1024MB\nchannel[1] BW=16 Size=1024MB/s\n");
+    CHECK(rk_ddr_capacity_snapshot().current_mib == 3072U);
+    rk_log_input("channel[1] BW=16 Size=1024MB\r");
+    CHECK(rk_ddr_capacity_snapshot().current_mib == 4096U && !console_output_length);
+
+    rk_power = PWR_CTRL_STATE_OFF; log_console_process();
+    rk_power = PWR_CTRL_STATE_ON;
+    rk_log_input("channel[0] BW=16 Size=2048MB\nchannel[1] BW=16 Size=2048MB\n"
+                 "channel[2] BW=16 Size=2048MB\nchannel[3] BW=16 Size=2048MB\n");
+    rk_log_input("B1-DDR: detected 16384 MiB (MMIO/secure/UEFI reservations excluded from tests)\n");
+    CHECK(rk_ddr_capacity_snapshot().current_mib == 4096U);
+    rk_ddr_capacity_round_end(true);
+    CHECK(rk_ddr_capacity_snapshot().last_completed_mib == 4096U);
+    rk_ddr_capacity_round_begin();
+    CHECK(!rk_ddr_capacity_snapshot().current_mib);
+    rk_ddr_capacity_use_running_boot();
+    CHECK(rk_ddr_capacity_snapshot().current_mib == 8192U);
+    rk_ddr_capacity_round_end(false);
+    CHECK(rk_ddr_capacity_snapshot().last_completed_mib == 4096U);
+
+    rk_ddr_capacity_round_begin();
+    rk_power = PWR_CTRL_STATE_OFF; log_console_process();
+    rk_power = PWR_CTRL_STATE_ON;
+    rk_log_input("B1-DDR: detected 8192 MiB\n");
+    rk_ddr_capacity_use_running_boot();
+    CHECK(!rk_ddr_capacity_snapshot().current_mib);
+    rk_log_input("DDR 9fa84341ce typ 25/09/11-09:07.16,fwver: v1.18\nLPDDR4X, 2112MHz\n");
+    rk_log_input("channel[0] BW=16 Size=2048MB\nchannel[1] BW=16 Size=2048MB\nchannel[2] BW=16 Si");
+    uart[UART_PORT_RK_DEBUG].ErrorCode = 8U;
+    isr = 1; HAL_UART_ErrorCallback(&uart[UART_PORT_RK_DEBUG]); isr = 0;
+    tick += 100U; log_console_process();
+    rk_log_input("ze=2048MB\nchannel[3] BW=16 Size=2048MB\n");
+    rk_log_input("channel[0] BW=16 Size=4294967296MB\nchannel[1] BW=16 Size=2048MB\n");
+    rk_ddr_capacity_use_running_boot();
+    rk_ddr_capacity_t partial = rk_ddr_capacity_snapshot();
+    CHECK(partial.chips[0].size_mib == 4096U && partial.chips[1].size_mib == 2048U);
+    CHECK(partial.chips[0].memory_type && !strcmp(partial.chips[0].memory_type, "LPDDR4X"));
+    CHECK(partial.chips[1].memory_type && !strcmp(partial.chips[1].memory_type, "LPDDR4X"));
+    /* 通道表结束后，迟到的通道行及EDK总量不更改已识别的三路。原始日志照常转发。 */
+    rk_log_input("Manufacturer ID:0xff\nchannel[2] BW=16 Size=2048MB\n");
+    console_input("log rk\n"); clear_console_output();
+    const char *edk = "B1-DDR: detected 8192 MiB (MMIO add-symbol-file ";
+    const char *tail = "/Build/RK3588/DEBUG_GCC5/AARCH64/MdeModulePkg/Core/Dxe/DxeMain/DEBUG/DxeCore.dll 0x3F726000)\r\n";
+    rk_log_input(edk); rk_log_input(tail);
+    CHECK(console_output_length == strlen(edk) + strlen(tail));
+    CHECK(!memcmp(console_output, edk, strlen(edk)) && !strcmp(console_output + strlen(edk), tail));
+    rk_ddr_capacity_round_end(true);
+    CHECK(rk_ddr_capacity_snapshot().has_completed && rk_ddr_capacity_snapshot().last_completed_mib == 6144U);
+    rk_power = PWR_CTRL_STATE_OFF; log_console_process();
+    console_input("log mcu\n");
+    /* 丢块后没有新通道时，超时仍能取得丢块前已完整读到的一路。 */
+    rk_ddr_capacity_round_begin();
+    rk_power = PWR_CTRL_STATE_ON;
+    rk_log_input("LPDDR4X, 2112MHz\nchannel[2] Size=1024MB\n");
+    uart[UART_PORT_RK_DEBUG].ErrorCode = 8U;
+    isr = 1; HAL_UART_ErrorCallback(&uart[UART_PORT_RK_DEBUG]); isr = 0;
+    tick += 100U; log_console_process();
+    rk_ddr_chip_t chips[RK_DDR_MIRROR_COUNT];
+    CHECK(!rk_ddr_capacity_take_chip_info(false, chips));
+    CHECK(rk_ddr_capacity_take_chip_info(true, chips));
+    CHECK(!chips[0].size_mib && !chips[0].memory_type);
+    CHECK(chips[1].size_mib == 1024U && chips[1].memory_type && !strcmp(chips[1].memory_type, "LPDDR4X"));
+    rk_ddr_capacity_round_end(true);
+    rk_power = PWR_CTRL_STATE_OFF; log_console_process();
+    message("PASS: B1 DDRbin-only capacity, UART fragments, loss, raw forwarding and boot reuse\n");
+}
+#endif
+
 static void test_console_led(void)
 {
     static const result_led_board_map_t map = {.pairs = {
@@ -614,6 +915,16 @@ static void test_console_power(void)
     CHECK(strstr(console_output, "busy") && log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
     log_console_complete_power_request(NULL); clear_console_output(); log_console_process();
     CHECK(strstr(console_output, "1800/1100/600mV; fspiM1") && strstr(console_output, "power ON"));
+#ifdef LOG_CONSOLE_FUNC_NAME_SIZE
+    console_input("start rk LPDDR4\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_START_LPDDR4);
+    log_console_complete_power_request(NULL); clear_console_output(); log_console_process();
+    CHECK(strstr(console_output, "LPDDR4 1800/1100/1100mV"));
+    console_input("start rk LPDDR4X\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_START_RK);
+    log_console_complete_power_request(NULL); clear_console_output(); log_console_process();
+    CHECK(strstr(console_output, "LPDDR4X 1800/1100/600mV"));
+#endif
     console_input("end rk\n");
     CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_END_RK);
     clear_console_output(); log_console_complete_power_request(NULL); log_console_process();
@@ -874,6 +1185,9 @@ static void test_log_console(void)
     check_rk_console_output(NULL, 0U);
     test_console_led();
     test_console_power();
+#if defined(TEST_RK_DDR_CAPACITY)
+    test_ddr_capacity_log();
+#endif
     /* 默认值在重新初始化后恢复，两种编译配置各执行一次本用例。 */
     log_console_start(); clear_console_output();
     CHECK(log_console_write("mcu", 3U) == 3U); rk_log_input("rk");
@@ -885,48 +1199,257 @@ static void test_log_console(void)
 #endif
 
 #if defined(TEST_NET_CONSOLE)
-extern uint32_t fake_net_session;
-extern int fake_net_blocked;
-extern char fake_net_output[];
-extern size_t fake_net_output_length, fake_net_input_length;
-extern uint8_t fake_net_input[];
+#include "support/net_console_fake.h"
 
-static void network_input(const char *text)
+static void network_input_peer(unsigned slot, const char *text)
 {
-    CHECK(fake_net_input_length == 0U && strlen(text) <= 512U);
-    fake_net_input_length = strlen(text);
-    memcpy(fake_net_input, text, fake_net_input_length);
+    fake_net_peer_t *peer = &fake_net_peers[slot];
+    CHECK(peer->input_length == 0U && strlen(text) <= sizeof(peer->input));
+    peer->input_length = strlen(text);
+    memcpy(peer->input, text, peer->input_length);
     log_console_process();
 }
+static void network_input(const char *text) { network_input_peer(0U, text); }
 static void clear_network_output(void)
 {
-    fake_net_output_length = 0U;
-    fake_net_output[0] = '\0';
+    fake_net_peers[0].output_length = 0U;
+    fake_net_peers[0].output[0] = '\0';
 }
+
+#if defined(UART_RK_LOG_RX_CAPACITY)
+/* 启动时的短暂停顿会产生大量IDLE事件。两路观察同一串RK原始字节。 */
+static void test_rk_log_burst(void)
+{
+    static const char text[] = "LPDDR4X, 1600MHz\r\nchange to F1: 528MHz\r\n"
+                               "change to F2: 1068MHz\r\nchange to F3: 1560MHz\r\n"
+                               "change to F0: 1600MHz\r\nout\r\n";
+    static uint8_t burst[3000];
+    for (size_t i = 0U; i < sizeof(burst); ++i)
+        burst[i] = (uint8_t)text[i % (sizeof(text) - 1U)];
+    clear_network_output();
+    clear_console_output();
+    uart_rx_diagnostics_t before, after;
+    CHECK(uart_get_rx_diagnostics(UART_PORT_RK_DEBUG, &before));
+    for (size_t i = 0U; i < sizeof(burst); i += 5U)
+        receive_port(UART_PORT_RK_DEBUG, burst + i, 5U, HAL_UART_RXEVENT_IDLE);
+    for (unsigned i = 0U; i < 4U; ++i) log_console_process();
+    CHECK(fake_net_peers[0].output_length == sizeof(burst) && !memcmp(fake_net_peers[0].output, burst, sizeof(burst)));
+    CHECK(console_output_length == sizeof(burst) && !memcmp(console_output, burst, sizeof(burst)));
+    CHECK(uart_get_rx_diagnostics(UART_PORT_RK_DEBUG, &after) && after.dropped_blocks == before.dropped_blocks);
+    clear_network_output();
+    clear_console_output();
+    message("PASS: 600 short RK DMA events reach both log outputs byte-for-byte\n");
+}
+
+static void test_rk_log_gap(void)
+{
+    static uint8_t bytes[UART_RX_BUF_SIZE], received[UART_RX_BUF_SIZE];
+    const unsigned port = UART_PORT_RK_DEBUG;
+    for (size_t i = 0U; i < sizeof(bytes); ++i) bytes[i] = (uint8_t)i;
+    uart_rx_diagnostics_t before, after;
+    CHECK(uart_get_rx_diagnostics(port, &before));
+    for (size_t i = 0U; i < UART_RK_LOG_RX_CAPACITY + 1U; i += sizeof(bytes))
+        receive_port(port, bytes, sizeof(bytes), HAL_UART_RXEVENT_IDLE);
+    size_t total = 0U;
+    while (total < UART_RK_LOG_RX_CAPACITY) {
+        int read = uart_poll_rx(port, received, sizeof(received));
+        size_t expected = UART_RK_LOG_RX_CAPACITY - total;
+        if (expected > sizeof(bytes)) expected = sizeof(bytes);
+        CHECK(read == (int)expected && !memcmp(received, bytes, expected));
+        total += expected;
+    }
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == UART_RX_GAP);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 0);
+    CHECK(uart_get_rx_diagnostics(port, &after) && after.queue_overflows == before.queue_overflows + 1U);
+
+    /* 两次新ORE相隔不到100ms，仍及时恢复；先交付旧字节，再交付GAP。 */
+    unsigned initial_starts = starts[port];
+    for (unsigned i = 0U; i < 2U; ++i) {
+        receive_port(port, bytes + i, 13U, HAL_UART_RXEVENT_IDLE);
+        uart[port].ErrorCode = 8U;
+        isr = 1; HAL_UART_ErrorCallback(&uart[port]); isr = 0;
+        ++tick;
+        CHECK(uart_poll_rx(port, received, sizeof(received)) == 13 && !memcmp(received, bytes + i, 13U));
+        CHECK(starts[port] == initial_starts + i + 1U);
+        CHECK(uart_poll_rx(port, received, sizeof(received)) == UART_RX_GAP);
+    }
+    /* Abort失败时保留退避，避免硬件故障导致默认任务反复停止DMA。 */
+    fail_abort = 1;
+    isr = 1; HAL_UART_ErrorCallback(&uart[port]); isr = 0;
+    unsigned old_aborts = aborts;
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == UART_RX_GAP && aborts == old_aborts + 1U);
+    fail_abort = 0;
+    tick += 99U; CHECK(uart_poll_rx(port, received, sizeof(received)) == 0 && aborts == old_aborts + 1U);
+    ++tick; CHECK(uart_poll_rx(port, received, sizeof(received)) == 0 && aborts == old_aborts + 2U);
+    receive_port(port, bytes + 5U, 17U, HAL_UART_RXEVENT_IDLE);
+    CHECK(uart_poll_rx(port, received, sizeof(received)) == 17 && !memcmp(received, bytes + 5U, 17U));
+    message("PASS: RK log overflow preserves the prefix, ordered gap and ORE recovery\n");
+}
+#endif
+
+#if defined(TEST_TIMING_CHECK_CONSOLE)
+static unsigned check_requests;
+static char checked_name[32];
+static const char *check_error;
+
+const char *rk_task_check_timing(const char *name)
+{
+    CHECK(strlen(name) < sizeof(checked_name));
+    strcpy(checked_name, name);
+    ++check_requests;
+    return check_error;
+}
+
+static void test_timing_console(void)
+{
+    clear_console_output(); clear_network_output();
+    console_input("check CASWrite"); CHECK(check_requests == 0U);
+    console_input("Latency\r\n");
+    CHECK(check_requests == 1U && !strcmp(checked_name, "CASWriteLatency"));
+    CHECK(strstr(console_output, "check CASWriteLatency queued") && !fake_net_peers[0].output_length);
+
+    /* 网络出口拥塞时保留自己的控制回复，串口的下一条查询不会覆盖它。 */
+    clear_console_output();
+    fake_net_peers[0].blocked = 1; check_error = "uartHandoff"; network_input("check tRCD\n");
+    CHECK(check_requests == 2U && !strcmp(checked_name, "tRCD") && !fake_net_peers[0].output_length);
+    check_error = "invalidTiming"; console_input("check unknown\n");
+    CHECK(check_requests == 3U && strstr(console_output, "check unknown invalidTiming"));
+    fake_net_peers[0].blocked = 0; log_console_process();
+    CHECK(strstr(fake_net_peers[0].output, "check tRCD uartHandoff") && !strstr(fake_net_peers[0].output, "unknown"));
+    check_error = "powerOff"; network_input("check BL\r");
+    CHECK(check_requests == 4U && strstr(fake_net_peers[0].output, "check BL powerOff"));
+    check_error = NULL;
+
+    /* 串口和 TCP 使用相同的 all 参数，各自给发起者回显。 */
+    clear_console_output(); clear_network_output();
+    console_input("check all\r\n");
+    CHECK(check_requests == 5U && !strcmp(checked_name, "all"));
+    CHECK(strstr(console_output, "check all queued") && !fake_net_peers[0].output_length);
+    network_input("check all\n");
+    CHECK(check_requests == 6U && !strcmp(checked_name, "all"));
+    CHECK(strstr(fake_net_peers[0].output, "check all queued"));
+
+    /* RK模式下同一条文本交给RK调试口；关站时在MCU模式拦住查询。 */
+    console_input("log rk\n"); clear_rk_console_output();
+    console_input("check tWR\r\n"); check_rk_console_output("check tWR\r\n", 11U);
+    console_input("log mcu\n");
+    log_console_set_site_enabled(0U); clear_console_output();
+    console_input("check all\n");
+    CHECK(check_requests == 6U && strstr(console_output, "siteDisabled"));
+    log_console_set_site_enabled(1U);
+    message("PASS: timing check source, pending replies, site gate and RK passthrough\n");
+}
+#endif
+
+#ifdef TEST_B1_DEBUG_COMMANDS
+#ifdef LOG_CONSOLE_FUNC_NAME_SIZE
+static void test_console_func(void)
+{
+    char name[LOG_CONSOLE_FUNC_NAME_SIZE];
+    clear_console_output(); clear_network_output();
+    console_input("func\nfunc gtest-rand typo\n");
+    CHECK(!log_console_take_func(name) && strstr(console_output, "use: func"));
+    network_input("func gtest-");
+    CHECK(!log_console_take_func(name));
+    network_input("rand\r\n");
+    CHECK(log_console_take_func(name) && !strcmp(name, "gtest-rand"));
+    CHECK(!log_console_take_func(name));
+    clear_console_output(); console_input("func gtest-sub\n");
+    CHECK(strstr(console_output, "[func] busy") && !log_console_take_func(name));
+    fake_net_peers[0].blocked = 1;
+    log_console_complete_func("[func] die0=PASS die1=FAIL\r\n"); log_console_process();
+    CHECK(!strstr(fake_net_peers[0].output, "die0="));
+    fake_net_peers[0].blocked = 0; log_console_process();
+    CHECK(strstr(fake_net_peers[0].output, "die0=PASS die1=FAIL") && !strstr(console_output, "die0="));
+
+    /* 原窗口断线后，新会话既不能继承已运行的终态，也不能启动未领取的旧命令。 */
+    network_input("func marchc-\n");
+    CHECK(log_console_take_func(name) && !strcmp(name, "marchc-"));
+    ++fake_net_peers[0].session;
+    clear_network_output(); log_console_complete_func("[func] old result\r\n"); log_console_process();
+    CHECK(!strstr(fake_net_peers[0].output, "old result"));
+    network_input("func marchc+\n");
+    ++fake_net_peers[0].session;
+    CHECK(!log_console_take_func(name)); log_console_process();
+    console_input("func marchc+\n");
+    log_console_set_site_enabled(0U); log_console_set_site_enabled(1U);
+    CHECK(!log_console_take_func(name)); log_console_process();
+    CHECK(strstr(console_output, "[func] cancelled"));
+    clear_network_output(); clear_console_output();
+}
+#endif
+static unsigned debug_calls;
+static void echo_debug(char *command, char *reply, size_t capacity)
+{
+    CHECK(!critical && capacity > strlen(command));
+    strcpy(reply, command);
+    ++debug_calls;
+}
+
+static void test_debug_commands(void)
+{
+    clear_network_output(); clear_console_output();
+    network_input("set CASWrite"); console_input("test status\r\n");
+    network_input("Latency 4294967295\n");
+    log_console_service_debug(echo_debug); log_console_process();
+    CHECK(debug_calls == 2U && !strcmp(console_output, "test status"));
+    CHECK(!strcmp(fake_net_peers[0].output, "set CASWriteLatency 4294967295"));
+
+    /* 断线后丢弃未处理的写入，不把新会话的后续输入当成旧命令。 */
+    network_input("set freq 1600\n");
+    ++fake_net_peers[0].session;
+    log_console_service_debug(echo_debug); log_console_process();
+    CHECK(debug_calls == 2U);
+    /* 旧电源请求尚未受理时也能抢占，两个端分别收到取消和真实OFF终态。 */
+    clear_network_output(); clear_console_output();
+    console_input("start rk\n"); network_input("end rk force\r\n");
+    CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
+    CHECK(log_console_take_force_off() && !log_console_take_force_off());
+    console_input("start rk\n");
+    CHECK(strstr(console_output, "busy") && strstr(console_output, "cancelled"));
+    log_console_complete_force_off(NULL); log_console_process();
+    CHECK(strstr(fake_net_peers[0].output, "power OFF") && !strstr(console_output, "power OFF"));
+    clear_network_output(); clear_console_output();
+    message("PASS: manual debug command routing, session generation and priority force-off\n");
+}
+#endif
 
 static void test_network_console(void)
 {
     console_input("log mcu\n");
-    fake_net_session = 1U;
+    fake_net_peers[0].session = 1U;
     log_console_process();
-    CHECK(strstr(fake_net_output, "connected; source=mcu"));
+    CHECK(strstr(fake_net_peers[0].output, "connected; source=mcu"));
     clear_network_output(); clear_console_output();
     log_console_write_record("both\r\n", 6U);
-    CHECK(!strcmp(fake_net_output, "both\r\n") && !strcmp(console_output, "both\r\n"));
+    CHECK(!strcmp(fake_net_peers[0].output, "both\r\n") && !strcmp(console_output, "both\r\n"));
+#if defined(TEST_TIMING_CHECK_CONSOLE)
+    test_timing_console();
+#endif
+#ifdef TEST_B1_DEBUG_COMMANDS
+#ifdef LOG_CONSOLE_FUNC_NAME_SIZE
+    test_console_func();
+#endif
+    test_debug_commands();
+#endif
 
     /* 两端半行不互拼；status只返回发起端，切换另一端不会取消报告。 */
     network_input("sta"); console_input("log rk\n"); network_input("tus\n");
     CHECK(log_console_take_status_request());
     clear_network_output(); clear_console_output();
     CHECK(log_console_write_status("snapshot", 8U) == 1);
-    CHECK(!strcmp(fake_net_output, "snapshot") && !console_output_length);
+    CHECK(!strcmp(fake_net_peers[0].output, "snapshot") && !console_output_length);
     CHECK(log_console_mcu_selected());
     clear_network_output(); log_console_write_record("mcu\r\n", 5U);
-    CHECK(!strcmp(fake_net_output, "mcu\r\n") && !console_output_length);
+    CHECK(!strcmp(fake_net_peers[0].output, "mcu\r\n") && !console_output_length);
     rk_log_input("rk text"); CHECK(!strcmp(console_output, "rk text"));
 
     /* 两端可同时观察RK，但只有先进入者的按键会写入USART2。 */
-    network_input("log rk\n"); CHECK(strstr(fake_net_output, "read-only"));
+    network_input("log rk\n"); CHECK(strstr(fake_net_peers[0].output, "read-only"));
+#if defined(UART_RK_LOG_RX_CAPACITY)
+    test_rk_log_burst();
+    test_rk_log_gap();
+#endif
     clear_rk_console_output(); network_input("version\n"); check_rk_console_output(NULL, 0U);
     console_input("version\n"); check_rk_console_output("version\n", 8U);
     clear_rk_console_output(); console_input("log mcu\n");
@@ -937,43 +1460,94 @@ static void test_network_console(void)
 
     /* 断线丢弃输入半行并释放RK控制权，不向新连接送旧状态/电源回复。 */
     network_input("log mcu\nstatus\n"); CHECK(log_console_take_status_request());
-    fake_net_session = 0U; log_console_process();
+    fake_net_peers[0].session = 0U; log_console_process();
     CHECK(log_console_write_status("old", 3U) == -1);
-    fake_net_session = 2U; log_console_process();
-    network_input("start "); fake_net_session = 3U; log_console_process(); network_input("rk\n");
+    fake_net_peers[0].session = 2U; log_console_process();
+    network_input("start "); fake_net_peers[0].session = 3U; log_console_process(); network_input("rk\n");
     CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
     network_input("start rk\n"); CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_START_RK);
-    fake_net_session = 4U; log_console_process(); clear_network_output();
+    fake_net_peers[0].session = 4U; log_console_process(); clear_network_output();
     log_console_complete_power_request(NULL); log_console_process();
-    CHECK(!strstr(fake_net_output, "power ON"));
+    CHECK(!strstr(fake_net_peers[0].output, "power ON"));
     network_input("end rk\n"); CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_END_RK);
     log_console_complete_power_request(NULL); log_console_process();
-    CHECK(strstr(fake_net_output, "power OFF"));
+    CHECK(strstr(fake_net_peers[0].output, "power OFF"));
 #if defined(TEST_SITE_CONSOLE)
     log_console_set_site_enabled(0U);
     clear_network_output(); network_input("start rk\nnet rk\n");
-    CHECK(strstr(fake_net_output, "siteDisabled") && !strstr(fake_net_output, "queued"));
+    CHECK(strstr(fake_net_peers[0].output, "siteDisabled") && !strstr(fake_net_peers[0].output, "queued"));
     CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
     log_console_set_site_enabled(1U);
 #endif
 
     /* 网络拥塞不阻塞串口日志和命令；两路共用电源单槽，不能并发动作。 */
-    fake_net_blocked = 1; network_input("status\n");
+    fake_net_peers[0].blocked = 1; network_input("status\n");
     console_input("log mcu\n"); clear_console_output();
     log_console_write_record("serial alive\r\n", 14U);
     CHECK(!strcmp(console_output, "serial alive\r\n"));
     console_input("start rk\n"); CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_START_RK);
-    fake_net_blocked = 0; log_console_process();
-    network_input("end rk\n"); CHECK(strstr(fake_net_output, "busy"));
+    fake_net_peers[0].blocked = 0; log_console_process();
+    network_input("end rk\n"); CHECK(strstr(fake_net_peers[0].output, "busy"));
     CHECK(log_console_take_power_request() == LOG_CONSOLE_POWER_NONE);
     log_console_complete_power_request(NULL); log_console_process();
-    network_input("log rk\n"); fake_net_session = 0U; log_console_process();
+    network_input("log rk\n"); fake_net_peers[0].session = 0U; log_console_process();
     console_input("log rk\n"); clear_rk_console_output();
     console_input("version\n"); check_rk_console_output("version\n", 8U);
     console_input("log mcu\n");
     CHECK(!critical && !isr);
     message("PASS: network/serial source isolation, RK input ownership, status routing and reconnect\n");
 }
+#if defined(NET_CONSOLE_CLIENT_COUNT)
+static void test_two_network_consoles(void)
+{
+    fake_net_peer_t *first = &fake_net_peers[0];
+    fake_net_peer_t *second = &fake_net_peers[1];
+    memset(fake_net_peers, 0, sizeof(fake_net_peers));
+    first->session = 5U;
+    second->session = 6U;
+    log_console_process();
+    CHECK(strstr(first->output, "connected; source=mcu") && strstr(second->output, "connected; source=mcu"));
+
+    network_input_peer(0U, "log rk\n");
+    rk_log_input("RK-only");
+    log_console_write_record("MCU-only", 8U);
+    CHECK(strstr(first->output, "RK-only") && !strstr(second->output, "RK-only"));
+    CHECK(strstr(second->output, "MCU-only") && !strstr(first->output, "MCU-only"));
+
+    /* 一个窗口保留半行时，另一窗口可独立收日志和提交命令。 */
+    network_input_peer(1U, "sta");
+    network_input_peer(0U, "log mcu\nstatus\n");
+    network_input_peer(1U, "tus\n");
+    CHECK(log_console_take_status_request() && log_console_write_status("reportA", 7U) == 1);
+    CHECK(log_console_take_status_request() && log_console_write_status("reportB", 7U) == 1);
+    CHECK(!log_console_take_status_request());
+    CHECK((strstr(first->output, "reportA") != NULL) != (strstr(second->output, "reportA") != NULL));
+    CHECK((strstr(first->output, "reportB") != NULL) != (strstr(first->output, "reportA") != NULL));
+    CHECK((strstr(second->output, "reportB") != NULL) != (strstr(second->output, "reportA") != NULL));
+
+    first->blocked = 1;
+    log_console_write_record("other-alive", 11U);
+    CHECK(!strstr(first->output, "other-alive") && strstr(second->output, "other-alive"));
+    first->blocked = 0;
+    network_input_peer(0U, "log rk\n");
+    network_input_peer(1U, "log rk\n");
+    CHECK(strstr(second->output, "read-only"));
+    rk_log_input("both-RK");
+    CHECK(strstr(first->output, "both-RK") && strstr(second->output, "both-RK"));
+    clear_rk_console_output();
+    network_input_peer(1U, "denied\n"); check_rk_console_output(NULL, 0U);
+    network_input_peer(0U, "ok\n"); check_rk_console_output("ok\n", 3U);
+
+    first->session = 0U; log_console_process();
+    network_input_peer(1U, "log mcu\nlog rk\n");
+    clear_rk_console_output();
+    network_input_peer(1U, "owner\n"); check_rk_console_output("owner\n", 6U);
+    first->session = 7U; log_console_process();
+    log_console_write_record("new-MCU", 7U);
+    CHECK(strstr(first->output, "new-MCU") && !strstr(second->output, "new-MCU"));
+    message("PASS: two network consoles, isolated sources, status, RK ownership and reconnect\n");
+}
+#endif
 #endif
 
 void test_main(void)
@@ -987,6 +1561,9 @@ void test_main(void)
 #endif
 #if defined(TEST_NET_CONSOLE)
     test_network_console();
+#if defined(NET_CONSOLE_CLIENT_COUNT)
+    test_two_network_consoles();
+#endif
 #endif
     message("PASS: UART recovery, RK bounds and IDD windows\n");
     finish(0U);

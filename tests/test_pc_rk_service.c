@@ -6,6 +6,14 @@
 #include "rk_link.h"
 #include "pc_power_service.h"
 #include "b2_service.h"
+#include <stdio.h>
+#include <string.h>
+#if defined(TEST_RK_DDR_CAPACITY)
+#include "rk_ddr_capacity.h"
+#endif
+#if defined(PC_COMMAND_CHIP_INFO)
+#include "board_rk_config.h"
+#endif
 #if defined(TEST_B1_AUTO_SLT)
 #include "handoff_test.h"
 #endif
@@ -16,6 +24,28 @@
 #endif
 #if defined(TEST_B1_CONSOLE_POWER)
 #include "log_console.h"
+static char console_debug_line[32], console_debug_reply[256];
+static char console_func_name[LOG_CONSOLE_FUNC_NAME_SIZE], console_func_reply[LOG_CONSOLE_RECORD_SIZE];
+static unsigned console_func_completions;
+int log_console_take_func(char name[LOG_CONSOLE_FUNC_NAME_SIZE])
+{
+    if (!console_func_name[0]) return 0;
+    strcpy(name, console_func_name);
+    console_func_name[0] = '\0';
+    return 1;
+}
+void log_console_complete_func(const char *text)
+{
+    snprintf(console_func_reply, sizeof(console_func_reply), "%s", text);
+    ++console_func_completions;
+}
+void log_console_service_debug(log_console_debug_handler_t handler)
+{
+    if (console_debug_line[0]) {
+        handler(console_debug_line, console_debug_reply, sizeof(console_debug_reply));
+        console_debug_line[0] = '\0';
+    }
+}
 static log_console_power_request_t console_request;
 static unsigned console_completions;
 static const char *console_error;
@@ -28,6 +58,17 @@ log_console_power_request_t log_console_take_power_request(void)
 }
 void log_console_complete_power_request(const char *error)
 { ++console_completions; console_error = error; }
+static int console_force_request;
+static unsigned console_force_completions;
+static const char *console_force_error;
+int log_console_take_force_off(void)
+{
+    int pending = console_force_request;
+    console_force_request = 0;
+    return pending;
+}
+void log_console_complete_force_off(const char *error)
+{ ++console_force_completions; console_force_error = error; }
 #endif
 #if defined(ENABLE_V2_POWER_SIMULATION) && ENABLE_V2_POWER_SIMULATION
 #include "v2_power_sim.h"
@@ -69,8 +110,6 @@ int monitor_idd_get(idd_stats_t *out)
 #include <stddef.h>
 #include <math.h>
 #include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
 
 #define S1(x) #x
 #define S(x) S1(x)
@@ -86,10 +125,8 @@ uint8_t b2_service_thermal_modes(uint8_t modes[3])
 { memcpy(modes, b2_modes, sizeof(b2_modes)); return b2_known; }
 uint8_t b2_service_site_id(void) { return b2_site; }
 #ifdef PC_COMMAND_SITE_ENABLE
-/* 固定测试仪2模拟B2分配；有效编号和真实B2分配另由B2服务实际C覆盖。 */
-int b2_service_matches_site(uint16_t tester, uint16_t site)
-{ return tester && tester <= B2_TESTER_ID_MAX && site && site <= B2_SITE_ID_MAX &&
-         (!b2_site || (tester == 2U && site == b2_site)); }
+/* 模拟 B2 已分配给测试仪 2 的站点；范围和目标匹配由正式 010C 代码执行。 */
+uint8_t b2_service_tester_id(void) { return b2_site ? 2U : 0U; }
 static uint32_t visible_leds = (1U << RESULT_LED_TARGET_COUNT) - 1U;
 static uint8_t site_ready_led = 1U;
 /* 控制台实际收包和拥塞撤销由UART套件覆盖；此处只验证业务和灯的输出。 */
@@ -105,6 +142,39 @@ static char site_label[16] = "SITE-7";
 static rk_request_t queued_request;
 static rk_response_t queued_response;
 #if defined(PC_COMMAND_STOP_TEST)
+#include "rk_task_control.h"
+/* 接收窗口/令牌由RK任务回归覆盖；本套件控制业务快照读到的最新百分比。 */
+static int mock_progress = -1;
+int rk_link_progress_percent(uint32_t cookie, uint16_t command)
+{
+    return cookie == queued_request.cookie && command == queued_request.command_id ? mock_progress : -1;
+}
+/* 记录实际电源编排对 RK 回读的通知；四通道应答和超时由 RK 任务回归验证。 */
+static unsigned readback_arms, readback_settings_done, readback_waits;
+static int readback_deferred, readback_held, console_spl_ready;
+int rk_timing_startup_ready(void) { return console_spl_ready; }
+static uint16_t debug_set_command;
+static uint32_t debug_set_value;
+int rk_task_set_pending(void) { return debug_set_command != 0U; }
+const char *rk_task_set_timing(uint16_t command, uint32_t value)
+{
+    if (mock_power_state != PWR_CTRL_STATE_ON) return "powerOff";
+    if (debug_set_command) return "busy";
+    debug_set_command = command;
+    debug_set_value = value;
+    return NULL;
+}
+void rk_timing_readback_arm(int defer_until_settings)
+{
+    ++readback_arms;
+    readback_deferred = defer_until_settings;
+}
+void rk_timing_readback_settings_done(void) { ++readback_settings_done; }
+int rk_timing_readback_busy(void)
+{
+    if (readback_held) ++readback_waits;
+    return readback_held;
+}
 /* PC层只注入RK清理确认；真正队列/IDD/串口停止另由RK和交接实际C回归验证。 */
 static int stop_requested, stop_ready;
 void rk_task_stop_begin(void) { stop_requested = 1; stop_ready = 0; }
@@ -319,6 +389,47 @@ static int dispatch(uint16_t command, const char *json, uint32_t sequence, pc_di
         .json = (const uint8_t *)json, .json_length = (uint32_t)strlen(json)};
     return pc_dispatch_handle(&request, sequence, response);
 }
+#if defined(TEST_RK_DDR_CAPACITY)
+static void observe_ddrbin_boot(unsigned channel_mib)
+{
+    static const uint8_t banner[] = "LPDDR4X, 2112MHz\n";
+    rk_ddr_capacity_observe(true, banner, sizeof(banner) - 1U);
+    for (unsigned channel = 0U; channel < 4U; ++channel) {
+        char line[48];
+        int length = snprintf(line, sizeof(line), "channel[%u] BW=16 Size=%uMB\n", channel, channel_mib);
+        rk_ddr_capacity_observe(true, (const uint8_t *)line, length);
+    }
+}
+#endif
+
+#if defined(PC_COMMAND_CHIP_INFO)
+static void check_chip_report(uint32_t sequence, const char *type0, unsigned size0,
+                              const char *type1, unsigned size1)
+{
+    pc_dispatch_response_t response;
+    CHECK(pc_dispatch_next_response(sequence, &response) == PC_DISPATCH_RESPONSE_READY);
+    cJSON *body = decode(&response, PC_COMMAND_CHIP_INFO, sequence);
+    const cJSON *array = cJSON_GetObjectItemCaseSensitive(body, "chipinfo");
+    CHECK(cJSON_GetArraySize(body) == 1 && cJSON_IsArray(array) && cJSON_GetArraySize(array) == 2);
+    for (unsigned i = 0U; i < 2U; ++i) {
+        const cJSON *entry = cJSON_GetArrayItem(array, i);
+        CHECK(cJSON_IsObject(entry) && cJSON_GetArraySize(entry) == 3);
+        number_is(entry, "mirrorIndex", i);
+        string_is(entry, "MemoryType", i ? type1 : type0);
+        number_is(entry, "MemorySize", i ? size1 : size0);
+    }
+    cJSON_Delete(body);
+}
+
+/* 只测后续业务的用例从本轮已上报010D的状态开始；首项交错及发送失败单独从原始0106执行。 */
+static void deliver_round_chip_info(unsigned channel_mib)
+{
+    observe_ddrbin_boot(channel_mib);
+    check_chip_report(60U, "LPDDR4X", channel_mib * 2U, "LPDDR4X", channel_mib * 2U);
+    pc_dispatch_response_sent(PC_COMMAND_CHIP_INFO);
+}
+#endif
+
 static void start_expect(const char *json, const char *error)
 {
     pc_dispatch_response_t response;
@@ -332,6 +443,9 @@ static void start_expect(const char *json, const char *error)
         CHECK(cJSON_IsString(status));
         CHECK(strcmp(status->valuestring, "completed") == 0 ||
               strcmp(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(body, "errorCode")), "busy") == 0);
+#if defined(PC_COMMAND_CHIP_INFO)
+        if (strcmp(status->valuestring, "completed") == 0) deliver_round_chip_info(1024U);
+#endif
         cJSON_Delete(body);
     }
     unsigned before = queue_calls;
@@ -433,8 +547,52 @@ static void *delivery_allocator(size_t bytes)
     return position == delivery_fail_at ? NULL : malloc(bytes);
 }
 
+#if defined(PC_POWER_SEQUENCE_TEST) || defined(PC_COMMAND_CHIP_INFO)
+/* 下面的短等待只为故障注入，绝不是B1获批的硬件时序。 */
+static const pc_power_config_t sequence_config = {
+    .transition_timeout_ms = 100U, .ready_timeout_ms = 100U,
+    .off_hold_ms = 10U, .boot_settle_ms = 5U,
+};
+#endif
+
+#if defined(PC_COMMAND_CHIP_INFO)
+/* 外部启动夹具只模拟硬件，0107仍要运行正式电源服务；在OFF时配置后模拟外部上电。 */
+static void configure_external_power(void)
+{
+    power_fixture = 1;
+    mock_power_state = PWR_CTRL_STATE_OFF;
+    CHECK(pc_power_service_configure(&sequence_config, NULL) == 0);
+    mock_power_state = PWR_CTRL_STATE_ON;
+}
+
+/* 实际业务和电源状态机必须先发起并完成OFF；只替代GPIO轨到位和RK清理通知。 */
+static void complete_test_power_off(void)
+{
+    pc_dispatch_response_t response;
+    for (unsigned poll = 0U; poll < 6U && mock_power_state != PWR_CTRL_STATE_OFF; ++poll) {
+        CHECK(pc_dispatch_next_response(104U, &response) == PC_DISPATCH_NO_RESPONSE);
+        pc_dispatch_poll();
+        if (mock_power_state == PWR_CTRL_STATE_WAIT_SECOND_RAIL_OFF) {
+            CHECK(pc_dispatch_next_response(104U, &response) == PC_DISPATCH_NO_RESPONSE);
+            mock_power_state = PWR_CTRL_STATE_OFF;
+        }
+    }
+    CHECK(mock_power_state == PWR_CTRL_STATE_OFF);
+    if (stop_requested) {
+        handoff_test.reserved = 0;
+        response_ready = 0;
+        stop_ready = 1;
+    }
+    pc_dispatch_poll();
+}
+
+#endif
+
 static void delivery_retry_check(void)
 {
+#if defined(PC_COMMAND_CHIP_INFO)
+    configure_external_power();
+#endif
     pc_dispatch_response_t response;
     start_expect(START_JSON, NULL);
 #if defined(B1_RK_UART)
@@ -489,13 +647,28 @@ static void delivery_retry_check(void)
 
     /* 待组包结果仍受连接归属和0107废弃规则限制，不跨连接补报。 */
     for (unsigned disconnect = 0U; disconnect < 2U; ++disconnect) {
+#if defined(PC_COMMAND_CHIP_INFO)
+        mock_power_state = PWR_CTRL_STATE_ON;
+#endif
         start_expect(START_JSON, NULL);
         inject(RK_RESPONSE_COMPLETE, 0U);
         pc_json_configure_allocator(no_memory, free);
         CHECK(pc_dispatch_next_response(35U, &response) == 0 && pc_test_service_busy());
         pc_json_configure_allocator(NULL, NULL);
         if (disconnect) pc_dispatch_disconnected();
-        else CHECK(pc_test_round_end(0U, 36U, &response) == PC_DISPATCH_RESPONSE_READY);
+        else {
+#if defined(PC_COMMAND_CHIP_INFO)
+            CHECK(pc_test_round_end(0U, 36U, &response) == PC_DISPATCH_NO_RESPONSE);
+            complete_test_power_off();
+            CHECK(pc_dispatch_next_response(36U, &response) == PC_DISPATCH_RESPONSE_READY);
+            cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 36U);
+            number_is(body, "requestCommandId", PC_COMMAND_ROUND_END);
+            string_is(body, "status", "completed");
+            cJSON_Delete(body);
+#else
+            CHECK(pc_test_round_end(0U, 36U, &response) == PC_DISPATCH_RESPONSE_READY);
+#endif
+        }
         CHECK(pc_dispatch_next_response(37U, &response) == 0 && !pc_test_service_busy());
     }
 
@@ -822,11 +995,6 @@ static void mats_fail_scope_check(void)
 #endif
 
 #if defined(PC_POWER_SEQUENCE_TEST)
-/* 下面的短等待只为故障注入，绝不是B1获批的硬件时序。 */
-static const pc_power_config_t sequence_config = {
-    .transition_timeout_ms = 100U, .ready_timeout_ms = 100U,
-    .off_hold_ms = 10U, .boot_settle_ms = 5U,
-};
 #define COLD_START "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1800\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\",\"TimingParameters\":{}}"
 #define COLD_CHANGED "{\"algorithmType\":\"functional\",\"algorithmName\":\"mats\",\"algorithmIndex\":37,\"power\":{\"memoryType\":\"LPDDR4X\",\"vdd1\":\"1810\",\"vdd2\":\"1100\",\"vddq\":\"600\"},\"reboot\":false,\"bootMode\":\"emmc\",\"TimingParameters\":{}}"
 static uint32_t armed_token;
@@ -888,6 +1056,46 @@ static void preparation_failed(const char *error)
     status_is(&response, error, 104U);
     CHECK(!pc_test_service_busy() && !pc_power_service_busy());
 }
+
+#if defined(PC_COMMAND_CHIP_INFO)
+/* RK没有开始执行算法；两颗都应报告启动失败，且没有错误地址和采样值。 */
+static void training_failed_result(int para, uint32_t elapsed_ms)
+{
+    pc_dispatch_response_t response;
+    unsigned off = power_off_calls;
+    complete_test_power_off();
+    CHECK(power_off_calls == off + 1U);
+    /* 第一次轮询可先消费电源终态；后续轮询交付结果，短暂缺内存时不能丢失。 */
+    pc_json_configure_allocator(no_memory, free);
+    for (unsigned attempt = 0U; attempt < 2U; ++attempt)
+        CHECK(pc_dispatch_next_response(104U, &response) != PC_DISPATCH_RESPONSE_READY);
+    pc_json_configure_allocator(NULL, NULL);
+    CHECK(pc_test_service_busy() && pc_dispatch_next_response(104U, &response) == PC_DISPATCH_RESPONSE_READY);
+    cJSON *body = decode(&response, para ? PC_COMMAND_PARA_RESULT : PC_COMMAND_TEST_RESULT_REPORT, 104U);
+    string_is(body, "algorithmType", para ? "parametric" : "functional");
+    string_is(body, "algorithmName", para ? "idd_0" : "mats");
+    number_is(body, "algorithmIndex", para ? 91U : 37U);
+    number_is(body, "testTimeMs", elapsed_ms);
+    string_is(body, "siteId", site_label);
+    const cJSON *measurement = cJSON_GetObjectItemCaseSensitive(body, "measurementData");
+    CHECK(cJSON_IsObject(measurement) && cJSON_GetArraySize(measurement) == 0);
+    const cJSON *results = cJSON_GetObjectItemCaseSensitive(body, "testResults");
+    CHECK(cJSON_IsArray(results) && cJSON_GetArraySize(results) == 2);
+    for (unsigned die = 0U; die < 2U; ++die) {
+        const cJSON *entry = cJSON_GetArrayItem(results, die);
+        number_is(entry, "mirrorIndex", die);
+        number_is(entry, "testStatus", 0U);
+        string_is(entry, "physicalAddr", "");
+        const cJSON *desc = cJSON_GetObjectItemCaseSensitive(entry, "resultDesc");
+        string_is(desc, "errorType", "DdrTrainingFailed");
+        CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(desc, "firstErrorAddress")));
+    }
+    cJSON_Delete(body);
+    CHECK(!pc_test_service_busy() && !pc_power_service_busy());
+    CHECK(pc_dispatch_next_response(105U, &response) == PC_DISPATCH_NO_RESPONSE);
+}
+#endif
+
 static void cold_to_ready(void)
 {
     CHECK(pc_power_service_diagnostic()->phase == PC_POWER_OFF_HOLD);
@@ -911,6 +1119,13 @@ static void ready_starts_algorithm(void)
     string_is(body, "status", "completed"); number_is(body, "algorithmIndex", 37U);
     cJSON_Delete(body);
     CHECK(queue_calls == before + 1U && queued_request.command_id == 17U);
+#ifdef PC_COMMAND_SHMOO_START
+    char status[256];
+    mock_progress = 0;
+    pc_test_format_status(status, sizeof(status));
+    CHECK(strstr(status, "round=active type=functional algorithm=mats phase=running progress=0%"));
+    mock_progress = -1;
+#endif
 }
 static void direct_off_to_hold(void)
 {
@@ -1096,12 +1311,29 @@ static void power_sequence_check(void)
     start_expect(COLD_START, NULL); step_power(10U); step_power(5U); preparation_failed("busy");
     on = power_on_calls; step_power(1000U); CHECK(power_on_calls == on);
 
-    /* READY超时只结束业务等待，不擅自强制切断可能仍在启动的RK。 */
+    /* B1冷启动未收到心跳，必须先下电再报训练失败，V2仍沿用原超时策略。 */
     configure_power(); start_expect(COLD_START, NULL); cold_to_ready();
     unsigned queued = queue_calls;
-    confirm_power(1); step_power(100U); preparation_failed("timeout");
+    step_power(sequence_config.ready_timeout_ms);
+#if defined(PC_COMMAND_CHIP_INFO)
+    training_failed_result(0, 0U);
+    CHECK(queue_calls == queued && mock_power_state == PWR_CTRL_STATE_OFF);
+    start_expect(COLD_CHANGED, NULL);
+    cold_to_ready(); ready_starts_algorithm();
+    CHECK(ddr_power_get_training_mv(DDR_RAIL_VDD1) == 1810U);
+    result_is(0U, NULL, "SITE-7");
+    queued = queue_calls;
+    /* 心跳超时后的下电也可能失败；失败原因必须归属电源操作，不能假报DDR点已收尾。 */
+    configure_power(); start_expect(COLD_START, NULL); cold_to_ready();
+    step_power(sequence_config.ready_timeout_ms);
+    power_failure = PWR_CTRL_ERR_FAULT;
+    step_power(0U); preparation_failed("executionFailed");
+    CHECK(mock_power_state == PWR_CTRL_STATE_ON && queue_calls == queued);
+#else
+    preparation_failed("timeout");
     CHECK(queue_calls == queued && mock_power_state == PWR_CTRL_STATE_ON);
     CHECK(pc_power_service_diagnostic()->failed_phase == PC_POWER_WAIT_RK_READY);
+#endif
     configure_power(); start_expect(COLD_START, NULL); step_power(10U); step_power(5U);
     step_power(100U); preparation_failed("timeout");
     CHECK(queue_calls == queued); /* 低层仍过渡时，不能自动重发或假报算法FAIL。 */
@@ -1168,46 +1400,76 @@ static void console_command(log_console_power_request_t request)
     pc_dispatch_poll();
     CHECK(console_request == LOG_CONSOLE_POWER_NONE);
 }
-static void console_cold_finish(void)
+static void console_cold_finish(ddr_memory_type_t memory_type)
 {
     unsigned completed = console_completions, on = power_on_calls, arms = rk_arms, queued = queue_calls;
+    unsigned previous_readback = readback_arms;
     CHECK(pc_power_service_diagnostic()->phase == PC_POWER_OFF_HOLD);
     step_power(sequence_config.off_hold_ms);
     CHECK(last_boot_mode == BOOT_MODE_FSPI_M1 && power_on_calls == on);
     step_power(sequence_config.boot_settle_ms);
     CHECK(power_on_calls == on + 1U && mock_power_state == PWR_CTRL_STATE_WAIT_FIRST_RAIL);
-    CHECK(ddr_power_get_memory_type() == DDR_MEMORY_LPDDR4X);
+    CHECK(ddr_power_get_memory_type() == memory_type);
     CHECK(ddr_power_get_training_mv(DDR_RAIL_VDD1) == 1800U);
     CHECK(ddr_power_get_training_mv(DDR_RAIL_VDD2) == 1100U);
-    CHECK(ddr_power_get_training_mv(DDR_RAIL_VDDQ) == 600U);
+    CHECK(ddr_power_get_training_mv(DDR_RAIL_VDDQ) == (memory_type == DDR_MEMORY_LPDDR4 ? 1100U : 600U));
     CHECK(console_completions == completed);
     mock_power_state = PWR_CTRL_STATE_ON; step_power(1U);
     CHECK(console_completions == completed + 1U && console_error == NULL);
     CHECK(!pc_power_service_busy() && !pc_test_service_busy());
+    CHECK(readback_arms == previous_readback + 1U && !readback_deferred);
     CHECK(rk_arms == arms && queue_calls == queued); /* 不等待SPL心跳、不发算法或建SLT占用。 */
 }
 static void console_power_check(void)
 {
     pc_dispatch_response_t response;
     configure_power();
+    /* 边界和语法错误从控制台原文走正式解析，不能截断成可用数值。 */
+    const char *invalid[] = {"set freq -2", "set freq 9223372036854775808", "set tWR -1",
+                             "set tWR 4294967296", "set tWR 2.5", "set BL 16x", "set Freq"};
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        strcpy(console_debug_line, invalid[i]);
+        pc_dispatch_poll();
+        CHECK(strstr(console_debug_reply, "invalidArgument"));
+    }
+    strcpy(console_debug_line, "set freq -1"); pc_dispatch_poll();
+    CHECK(strstr(console_debug_reply, "-1 next manual start"));
+    strcpy(console_debug_line, "test status"); pc_dispatch_poll();
+    CHECK(strstr(console_debug_reply, "round="));
+    CHECK(pc_dispatch_debug_set("Freq", 1066) == NULL);
     CHECK(pc_power_service_configure(NULL, NULL) == 0);
     console_command(LOG_CONSOLE_POWER_START_RK);
     CHECK(strcmp(console_error, "notConfigured") == 0 && !pc_power_service_busy());
 
     configure_power();
     const uint16_t biased[] = {1700U, 1060U, 570U};
+    /* PC冷启动由自己的令牌控制，控制台暂存只由下一次成功受理的start rk消费。 */
+    power_command(PC_COMMAND_POWER_ON, "accepted", NULL);
+    step_power(10U); step_power(5U);
+    CHECK(rk_link_frequency_get(NULL) == -1);
+    mock_power_state = PWR_CTRL_STATE_ON; step_power(1U);
+    power_completion(PC_COMMAND_POWER_ON, NULL);
+    console_command(LOG_CONSOLE_POWER_END_RK); step_power(0U);
+    mock_power_state = PWR_CTRL_STATE_OFF; step_power(1U);
     CHECK(ddr_power_configure_training(DDR_MEMORY_LPDDR4X, biased) == IF_OK);
     CHECK(pc_power_service_configure(&sequence_config, NULL) == 0);
     console_command(LOG_CONSOLE_POWER_START_RK);
     power_command(PC_COMMAND_POWER_OFF, "failed", "busy");
     start_expect(START_JSON, "busy");
     pc_dispatch_disconnected(); /* 无PC/断线均不取消已经受理的本地动作。 */
-    console_cold_finish();
+    console_cold_finish(DDR_MEMORY_LPDDR4X);
+    CHECK(rk_link_frequency_get(NULL) == 1066);
+    CHECK(pc_dispatch_debug_set("tRCD", 35) == NULL && debug_set_command == 0x2BU && debug_set_value == 35U);
+    start_expect(START_JSON, "busy");
+    debug_set_command = 0U; /* RK实际回读取值及超时由协议任务回归覆盖。 */
     CHECK(pc_dispatch_next_response(500U, &response) == 0);
 
     /* 已经ON也重新下电，确保Boot和训练目标真正重新进入启动流程。 */
+    console_command(LOG_CONSOLE_POWER_START_LPDDR4);
+    direct_off_to_hold(); console_cold_finish(DDR_MEMORY_LPDDR4);
+    CHECK(rk_link_frequency_get(NULL) == -1);
     console_command(LOG_CONSOLE_POWER_START_RK);
-    direct_off_to_hold(); console_cold_finish();
+    direct_off_to_hold(); console_cold_finish(DDR_MEMORY_LPDDR4X);
     console_command(LOG_CONSOLE_POWER_END_RK);
     step_power(0U);
     CHECK(pc_power_service_diagnostic()->phase == PC_POWER_WAIT_OFF);
@@ -1264,7 +1526,17 @@ static void console_power_check(void)
 static void round_command(uint16_t command, const char *json, const char *status, const char *error)
 {
     pc_dispatch_response_t response;
-    CHECK(dispatch(command, json, 77U, &response) == PC_DISPATCH_RESPONSE_READY);
+    int result = dispatch(command, json, 77U, &response);
+#if defined(PC_COMMAND_CHIP_INFO)
+    if (command == PC_COMMAND_ROUND_END && !error) {
+        if (result == PC_DISPATCH_NO_RESPONSE) {
+            complete_test_power_off();
+            result = pc_dispatch_next_response(77U, &response);
+        }
+        CHECK(mock_power_state == PWR_CTRL_STATE_OFF && !pc_test_service_busy());
+    }
+#endif
+    CHECK(result == PC_DISPATCH_RESPONSE_READY);
     cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 77U);
     number_is(body, "requestCommandId", command);
     string_is(body, "status", status);
@@ -1275,11 +1547,27 @@ static void round_command(uint16_t command, const char *json, const char *status
     cJSON_Delete(body);
 }
 
-static void round_begin(void) { round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL); }
+static void round_begin(void)
+{
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+#if defined(PC_COMMAND_CHIP_INFO)
+    deliver_round_chip_info(1024U);
+#endif
+}
 static void round_end(void)
 {
     round_command(PC_COMMAND_ROUND_END, "{\"failChips\":[]}", "completed", NULL);
 }
+
+#if defined(TEST_RK_DDR_CAPACITY)
+static void check_round_capacity(bool active, uint32_t current, uint32_t last)
+{
+    rk_ddr_capacity_t capacity = rk_ddr_capacity_snapshot();
+    CHECK(capacity.round_active == active);
+    CHECK(capacity.current_mib == current && capacity.last_completed_mib == last);
+    CHECK(capacity.has_completed);
+}
+#endif
 
 /* 构造PC实际请求文本；返回后cJSON源树已销毁，业务不能借用临时字段。 */
 static char *para_json(const char *type, const char *name, uint32_t index)
@@ -1322,6 +1610,9 @@ static void para_flow_check(void)
         "idd_3NS", "idd_4R", "idd_4W", "idd_5", "idd_5AB", "idd_5PB", "idd_6", "idd_6ET"
     };
     pc_dispatch_response_t response;
+#if defined(PC_COMMAND_CHIP_INFO)
+    mock_power_state = PWR_CTRL_STATE_ON; /* 本组先验证复用已上电RK的PARA入口。 */
+#endif
     char *json = para_json("parametric", "idd_0", 91U);
     CHECK(!pc_test_service_busy());
     para_command(PC_COMMAND_PARA_START, json, 91U, "invalidState");
@@ -1398,6 +1689,16 @@ static void para_flow_check(void)
     CHECK(cJSON_ReplaceItemInObjectCaseSensitive(cold, "algorithmIndex", cJSON_CreateNumber(91)));
     json = cJSON_PrintUnformatted(cold); CHECK(json); cJSON_Delete(cold);
     unsigned queued = queue_calls;
+#if defined(PC_COMMAND_CHIP_INFO)
+    uint32_t accepted_ms = mock_tick;
+    para_command(PC_COMMAND_PARA_START, json, 91U, NULL);
+    cold_to_ready();
+    step_power(sequence_config.ready_timeout_ms - 1U);
+    CHECK(pc_dispatch_next_response(62U, &response) == PC_DISPATCH_NO_RESPONSE);
+    step_power(1U);
+    training_failed_result(1, mock_tick - accepted_ms);
+    CHECK(queue_calls == queued);
+#endif
     para_command(PC_COMMAND_PARA_START, json, 91U, NULL);
     cJSON_free(json);
     CHECK(queue_calls == queued);
@@ -1408,6 +1709,13 @@ static void para_flow_check(void)
     number_is(completed, "algorithmIndex", 91U);
     string_is(completed, "status", "completed"); cJSON_Delete(completed);
     CHECK(queue_calls == queued + 1U && queued_request.command_id == 21U);
+#ifdef PC_COMMAND_SHMOO_START
+    char status[256];
+    mock_progress = 88;
+    pc_test_format_status(status, sizeof(status));
+    CHECK(strstr(status, "type=parametric algorithm=idd_0 phase=running progress=--"));
+    mock_progress = -1;
+#endif
     inject(RK_RESPONSE_COMPLETE, 0U);
     CHECK(pc_dispatch_next_response(62U, &response) == 1 && !pc_test_service_busy());
     completed = decode(&response, PC_COMMAND_PARA_RESULT, 62U); cJSON_Delete(completed);
@@ -1434,7 +1742,7 @@ static void para_flow_check(void)
         }
         CHECK(!pc_test_service_busy());
     }
-    /* 原连接离开或整轮结束，只废弃结果，不能提前解除RK占用。 */
+    /* 断线等待在途算法；B1提前0107则等RK掉电清理，再解除占用。 */
     para_command(PC_COMMAND_PARA_START, json, 91U, NULL);
     pc_dispatch_disconnected(); CHECK(pc_test_service_busy());
     para_command(PC_COMMAND_PARA_START, json, 91U, "busy");
@@ -1442,7 +1750,12 @@ static void para_flow_check(void)
     CHECK(pc_dispatch_next_response(65U, &response) == 0 && !pc_test_service_busy());
     round_begin();
     para_command(PC_COMMAND_PARA_START, json, 91U, NULL);
-    round_end(); CHECK(pc_test_service_busy());
+    round_end();
+#if defined(PC_COMMAND_CHIP_INFO)
+    CHECK(!pc_test_service_busy() && mock_power_state == PWR_CTRL_STATE_OFF);
+#else
+    CHECK(pc_test_service_busy());
+#endif
     unsigned writes = led_writes;
     inject(RK_RESPONSE_COMPLETE, UINT64_C(0x1234));
     CHECK(pc_dispatch_next_response(66U, &response) == 0 && !pc_test_service_busy());
@@ -1454,7 +1767,14 @@ static void para_flow_check(void)
 static void round_flow_check(void)
 {
     pc_dispatch_response_t response;
-#if defined(B1_RK_UART)
+#if defined(PC_COMMAND_SITE_ENABLE)
+    const result_led_state_t emcp_pass = RESULT_LED_OFF, emcp_fail = RESULT_LED_OFF;
+#else
+    const result_led_state_t emcp_pass = RESULT_LED_PASS, emcp_fail = RESULT_LED_FAIL;
+#endif
+#if defined(PC_COMMAND_CHIP_INFO)
+    configure_external_power();
+#elif defined(B1_RK_UART)
     mock_power_state = PWR_CTRL_STATE_ON;
 #endif
     round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "invalidState");
@@ -1469,7 +1789,15 @@ static void round_flow_check(void)
     pc_json_configure_allocator(NULL, NULL);
     CHECK(!led_writes);
     round_begin();
+#if defined(TEST_RK_DDR_CAPACITY)
+    rk_ddr_capacity_observe(false, NULL, 0);
+    observe_ddrbin_boot(1024U);
+#endif
+#if defined(PC_COMMAND_SITE_ENABLE)
+    for (unsigned i = 0U; i < RESULT_LED_TARGET_COUNT; ++i) CHECK(led_states[i] == RESULT_LED_OFF);
+#else
     for (unsigned i = 0U; i < RESULT_LED_TARGET_COUNT; ++i) CHECK(led_states[i] == RESULT_LED_TEST_NORMAL);
+#endif
     round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "busy");
     const char *bad_lists[] = {
         "{}", "{\"failChips\":null}", "{\"failChips\":{},\"leds\":{}}",
@@ -1506,57 +1834,141 @@ static void round_flow_check(void)
     round_command(PC_COMMAND_ROUND_END,
         "{\"failChips\":[{\"physicalAddr\":\"a\",\"mirrorIndex\":0},{\"physicalAddr\":\"b\",\"mirrorIndex\":0},{\"physicalAddr\":\"b\",\"mirrorIndex\":0},{\"physicalAddr\":\"\",\"mirrorIndex\":2}]}",
         "completed", NULL);
-    CHECK(led_states[0] == RESULT_LED_FAIL && led_states[1] == RESULT_LED_PASS && led_states[2] == RESULT_LED_FAIL);
+#if defined(TEST_RK_DDR_CAPACITY)
+    /* 重复 0106、非法 0107、分配或灯态失败均不能提前覆盖这份值。 */
+    check_round_capacity(false, 0U, 4096U);
+#endif
+    CHECK(led_states[0] == RESULT_LED_FAIL && led_states[1] == RESULT_LED_PASS && led_states[2] == emcp_fail);
     round_command(PC_COMMAND_ROUND_END, "{\"failChips\":[]}", "failed", "invalidState");
-    /* 复现PC截图：同一镜像两条地址只点亮该镜像FAIL，其余镜像PASS。 */
-    round_begin();
+    /* 同一镜像两条地址只点亮该镜像 FAIL，另一颗 DDR 显示 PASS。 */
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
     round_command(PC_COMMAND_ROUND_END,
         "{\"failChips\":[{\"physicalAddr\":\"0x0000000000200000\",\"mirrorIndex\":0},{\"physicalAddr\":\"0x0000000000200320\",\"mirrorIndex\":0}]}",
         "completed", NULL);
-    CHECK(led_states[0] == RESULT_LED_FAIL && led_states[1] == RESULT_LED_PASS && led_states[2] == RESULT_LED_PASS);
-    round_begin();
+    CHECK(led_states[0] == RESULT_LED_FAIL && led_states[1] == RESULT_LED_PASS && led_states[2] == emcp_pass);
+#if defined(PC_COMMAND_SITE_ENABLE)
+    b2_known = 0U;
+#endif
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
     round_end();
-    for (unsigned i = 0U; i < RESULT_LED_TARGET_COUNT; ++i) CHECK(led_states[i] == RESULT_LED_PASS);
-    round_begin();
+    CHECK(led_states[0] == RESULT_LED_PASS && led_states[1] == RESULT_LED_PASS && led_states[2] == emcp_pass);
+#if defined(TEST_RK_DDR_CAPACITY)
+    check_round_capacity(false, 0U, 0U);
+#endif
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+#if defined(PC_COMMAND_CHIP_INFO)
+    mock_power_state = PWR_CTRL_STATE_ON;
+#endif
     round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
-    round_end(); writes = led_writes;
+#if defined(TEST_RK_DDR_CAPACITY)
+    check_round_capacity(true, 4096U, 0U); /* 实际受理了沿用已运行 RK 的算法。 */
+#endif
+#if defined(PC_COMMAND_CHIP_INFO)
+    check_chip_report(60U, "LPDDR4X", 2048U, "LPDDR4X", 2048U);
+    pc_dispatch_response_sent(PC_COMMAND_CHIP_INFO);
+    CHECK(pc_dispatch_next_response(61U, &response) == 0);
+#endif
+#if defined(PC_COMMAND_CHIP_INFO)
+    CHECK(dispatch(PC_COMMAND_ROUND_END,
+        "{\"failChips\":[{\"mirrorIndex\":1,\"physicalAddr\":\"\"}]}", 77U, &response) == PC_DISPATCH_NO_RESPONSE);
+    /* 0107已经提交结果，等RK下电期间的高温通知和离线清除都不能再改灯。 */
+    const uint8_t hot[] = {1U, 1U, 1U}, clear_modes[] = {0U, 0U, 0U};
+    writes = led_writes;
+    CHECK(pc_test_round_update_modes(7U, hot) && pc_test_round_update_modes(7U, clear_modes));
+    CHECK(led_writes == writes && led_states[0] == RESULT_LED_PASS &&
+          led_states[1] == RESULT_LED_FAIL && led_states[2] == RESULT_LED_OFF);
+#else
+    round_end();
+#endif
+    writes = led_writes;
     CHECK(pc_test_service_busy());
     round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "busy");
     round_command(PC_COMMAND_POWER_OFF, "{}", "failed", "busy");
     round_command(PC_COMMAND_FIRMWARE_UPGRADE_REQUEST, "{\"action\":\"mcu_begin\"}", "failed", "notSupported");
     CHECK(dispatch(PC_COMMAND_CLIENT_HEARTBEAT, "{}", 77U, &response) == 1);
     inject(RK_RESPONSE_COMPLETE, UINT64_C(0x123456789ABCDEF0));
+#if defined(PC_COMMAND_CHIP_INFO)
+    complete_test_power_off();
+    CHECK(pc_dispatch_next_response(77U, &response) == PC_DISPATCH_RESPONSE_READY);
+    cJSON *end = decode(&response, PC_COMMAND_COMMAND_RESP, 77U);
+    number_is(end, "requestCommandId", PC_COMMAND_ROUND_END);
+    string_is(end, "status", "completed");
+    cJSON_Delete(end);
+#endif
     CHECK(pc_dispatch_next_response(78U, &response) == 0 && !pc_test_service_busy());
     CHECK(led_writes == writes);
     round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "invalidState");
     round_begin();
+#if defined(PC_COMMAND_CHIP_INFO)
+    mock_power_state = PWR_CTRL_STATE_ON;
+#endif
     round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
     inject(RK_RESPONSE_TIMEOUT, 0U);
     CHECK(pc_dispatch_next_response(78U, &response) == 1);
     round_end();
+#if defined(PC_COMMAND_CHIP_INFO)
+    CHECK(!pc_test_service_busy());
+#else
     CHECK(pc_test_service_busy());
+#endif
     inject(RK_RESPONSE_RECOVERED, 0U);
     CHECK(pc_dispatch_next_response(79U, &response) == 0 && !pc_test_service_busy());
-    round_begin(); pc_dispatch_disconnected();
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+#if defined(TEST_RK_DDR_CAPACITY)
+    observe_ddrbin_boot(2048U);
+    check_round_capacity(true, 8192U, 4096U);
+#endif
+    pc_dispatch_disconnected();
+#if defined(TEST_RK_DDR_CAPACITY)
+    check_round_capacity(false, 0U, 4096U);
+#endif
     round_command(PC_COMMAND_START_TEST, START_JSON, "failed", "invalidState");
     round_begin(); round_end();
     /* B2模式独立于轮次保存：未知灭灯、局部更新，结束后不能覆盖PASS/FAIL。 */
     b2_known = 1U; b2_modes[0] = 1U;
+#if defined(PC_COMMAND_SITE_ENABLE)
+    /* B2 已将 eMCP 标为高温，B1 开始 DDR 整轮时仍要保持该灯熄灭。 */
+    b2_known |= 4U;
+    b2_modes[2] = 1U;
+#endif
     round_begin();
     CHECK(led_states[0] == RESULT_LED_TEST_HOT && led_states[1] == RESULT_LED_OFF &&
           led_states[2] == RESULT_LED_OFF);
     const uint8_t update[] = {0U, 1U, 0U};
+#if defined(PC_COMMAND_SITE_ENABLE)
+    writes = led_writes;
+    CHECK(pc_test_round_update_modes(4U, hot) && led_writes == writes);
+    CHECK(pc_test_round_update_modes(6U, hot));
+#else
     CHECK(pc_test_round_update_modes(2U, update));
+#endif
     CHECK(led_states[0] == RESULT_LED_TEST_HOT && led_states[1] == RESULT_LED_TEST_HOT &&
           led_states[2] == RESULT_LED_OFF);
+#if defined(PC_COMMAND_SITE_ENABLE)
+    CHECK(pc_test_round_update_modes(1U, update));
+    CHECK(led_states[0] == RESULT_LED_OFF && led_states[1] == RESULT_LED_TEST_HOT);
+    CHECK(pc_test_round_update_modes(7U, clear_modes));
+    CHECK(led_states[0] == RESULT_LED_OFF && led_states[1] == RESULT_LED_OFF &&
+          led_states[2] == RESULT_LED_OFF);
+    CHECK(pc_test_round_update_modes(2U, update) && led_states[1] == RESULT_LED_TEST_HOT);
+#endif
     writes = led_writes;
     CHECK(!pc_test_round_update_modes(8U, update) && led_writes == writes);
     led_failure = 1;
-    CHECK(!pc_test_round_update_modes(4U, update) && led_writes == writes);
+    CHECK(!pc_test_round_update_modes(2U, update) && led_writes == writes);
     led_failure = 0;
     round_end(); writes = led_writes;
     CHECK(pc_test_round_update_modes(1U, update) && led_writes == writes);
     CHECK(led_states[0] == RESULT_LED_PASS);
+#if defined(PC_COMMAND_SITE_ENABLE)
+    pc_dispatch_disconnected();
+    CHECK(led_states[0] == RESULT_LED_PASS && led_writes == writes);
+    round_begin();
+    CHECK(led_states[0] == RESULT_LED_TEST_HOT);
+    pc_dispatch_disconnected();
+    CHECK(led_states[0] == RESULT_LED_OFF && led_states[1] == RESULT_LED_OFF &&
+          led_states[2] == RESULT_LED_OFF);
+#endif
     b2_known = 7U; memset(b2_modes, 0, sizeof(b2_modes));
     message("PASS: PC RK service round lifecycle, atomic list validation, late result discard, busy, removed 070x\n");
     message("PASS: B2 partial thermal display, unknown OFF and final-result preservation\n");
@@ -1626,6 +2038,9 @@ static void timing_sent(unsigned count)
 /* 输入JSON会在dispatch内释放；校验副本寿命、拒绝不覆盖以及逐分配点失败无副作用。 */
 static void timing_storage_check(void)
 {
+#if defined(PC_COMMAND_CHIP_INFO)
+    mock_power_state = PWR_CTRL_STATE_ON; /* 这一组从已启动的外部RK读取/写入时序。 */
+#endif
     pc_dispatch_response_t response;
     cJSON *root = cJSON_Parse(START_JSON); CHECK(root);
     cJSON *timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters"); CHECK(cJSON_IsObject(timing));
@@ -1709,6 +2124,9 @@ static void timing_storage_check(void)
 /* 完整16字段、边界数值、发送失败和中途收尾：PC决定数值，MCU仅转换并有序发送。 */
 static void timing_forward_check(void)
 {
+#if defined(PC_COMMAND_CHIP_INFO)
+    mock_power_state = PWR_CTRL_STATE_ON;
+#endif
     static const char *const fields[] = {"CASWriteLatency", "CASReadLatency", "tREFI", "tWR", "tRTP",
         "tRCD", "tRP", "tRASmin", "tRASmax", "tWTR", "tRFCmin", "tFAW", "tCCD", "tRRD", "BL"};
     static const uint16_t commands[] = {0x25,0x26,0x28,0x29,0x2A,0x2B,0x2C,0x2D,0x2E,0x2F,0x30,0x31,0x32,0x33,0x34};
@@ -1758,6 +2176,9 @@ static void timing_forward_check(void)
     timing_sent(1U); CHECK(queue_calls == before && !pc_test_service_busy());
     cJSON_free(json);
     round_begin();
+#if defined(PC_COMMAND_CHIP_INFO)
+    mock_power_state = PWR_CTRL_STATE_ON;
+#endif
     root = cJSON_Parse(START_JSON); timing = cJSON_GetObjectItemCaseSensitive(root, "TimingParameters");
     CHECK(cJSON_AddStringToObject(timing, "Freq", "1600"));
     json = cJSON_PrintUnformatted(root); CHECK(json); cJSON_Delete(root);
@@ -1989,6 +2410,13 @@ static void slt_complete(int discarded)
     }
     CHECK(delivered == !discarded && !pc_power_service_busy() && pc_test_service_busy());
     CHECK(queue_calls == queued);
+#ifdef PC_COMMAND_SHMOO_START
+    if (!discarded) {
+        char status[256];
+        pc_test_format_status(status, sizeof(status));
+        CHECK(strstr(status, "type=slt algorithm=memtest86 phase=waitRelease progress=--"));
+    }
+#endif
 }
 
 static void mutated_slt(uint16_t command, const char *source, const char *field,
@@ -2139,19 +2567,19 @@ static void slt_lifecycle_check(void)
     slt_finish_session();
     slt_legacy_rejected(); round_end();
 
-    /* 0107前后收到旧010B均无副作用；提前汇总不能抢先归还或清掉本轮Freq。 */
+    /* EDK仍占用协议口时收到0107也要关电；010B前后到达均不影响收尾。 */
     for (unsigned report_first = 0U; report_first < 2U; ++report_first) {
         configure_power(); round_begin();
         frequency_token = slt_frequency_start(); slt_complete(0);
         handoff_test.cancel_allowed = 0;
         if (report_first) slt_legacy_rejected();
+        off = power_off_calls;
         round_end(); unsigned writes = led_writes;
-        slt_frequency_is(frequency_token, 0);
+        CHECK(mock_power_state == PWR_CTRL_STATE_OFF && power_off_calls == off + 1U);
+        CHECK(!pc_test_service_busy() && !handoff_mcu_busy());
+        CHECK(rk_link_frequency_get(NULL) == -1 && rk_link_frequency_status(frequency_token) == -1);
         if (!report_first) slt_legacy_rejected();
-        CHECK(pc_dispatch_next_response(96U, &response) == 0 && pc_test_service_busy());
-        rk_link_frequency_note_tx(frequency_token, 1);
-        slt_frequency_is(frequency_token, 1);
-        slt_finish_session();
+        CHECK(pc_dispatch_next_response(96U, &response) == 0);
         CHECK(led_writes == writes);
         slt_legacy_rejected();
         round_command(PC_COMMAND_START_TEST, COLD_START, "failed", "invalidState");
@@ -2170,7 +2598,7 @@ static void slt_lifecycle_check(void)
     slt_frequency_is(frequency_token, 1);
     slt_finish_session();
     round_begin(); slt_legacy_rejected(); round_end();
-    message("PASS: automatic SLT release without 010B, TC/OFF/baud gates, ignored legacy report, frequency and owner survive 0107/disconnect\n");
+    message("PASS: automatic SLT release without 010B, early 0107 shuts down, disconnect preserves running SLT\n");
 }
 
 typedef enum { ROUND_CASE_FUNC, ROUND_CASE_PARA, ROUND_CASE_SLT } round_case_t;
@@ -2391,7 +2819,7 @@ static void slt_flow_check(void)
         slt_finish_session();
         CHECK(!pc_test_service_busy() && rk_link_frequency_get(NULL) == -1);
     }
-    /* 0107提前结束不伪造执行完成；B1仍须等EDK归还或安全撤销后的OFF恢复。 */
+    /* SLT上电准备阶段收到0107。B1撤销预约并维持OFF，V2保持原来的完成路径。 */
 #if defined(PC_POWER_SEQUENCE_TEST)
     unsigned on = power_on_calls, off = power_off_calls, boot = boot_calls;
     unsigned expected_off = mock_power_state == PWR_CTRL_STATE_ON ? 1U : 0U;
@@ -2406,25 +2834,17 @@ static void slt_flow_check(void)
     round_end(); unsigned writes = led_writes;
 #if defined(TEST_B1_AUTO_SLT)
     CHECK(rk_link_frequency_get(NULL) == -1 && rk_link_frequency_status(discarded_frequency_token) == -1);
-#endif
+    CHECK(mock_power_state == PWR_CTRL_STATE_OFF && !handoff_mcu_busy());
+    CHECK(power_on_calls == on && power_off_calls == off + expected_off && boot_calls == boot);
+    CHECK(pc_dispatch_next_response(82U, &response) == 0);
+#else
     slt_complete(1);
 #if defined(PC_POWER_SEQUENCE_TEST)
-#if defined(TEST_B1_AUTO_SLT)
-    /* 未prepared的预约可安全取消；自动收尾已关电，但仍须恢复协议口后才解除占用。 */
-    CHECK(handoff_test.cancelled && mock_power_state == PWR_CTRL_STATE_OFF);
-    CHECK(power_on_calls == on + 1U && power_off_calls == off + expected_off + 1U && boot_calls == boot + 1U);
-#else
     CHECK(power_on_calls == on + 1U && power_off_calls == off + expected_off && boot_calls == boot + 1U);
-#endif
 #else
     CHECK(v2_power_sim_cycles() == cycles + 1U);
 #endif
     round_command(PC_COMMAND_ROUND_BEGIN, "{}", "failed", "busy");
-#if defined(TEST_B1_AUTO_SLT)
-    CHECK(handoff_mcu_busy());
-    handoff_test_set_status(HANDOFF_SLT_OFF_READY);
-    CHECK(pc_dispatch_next_response(82U, &response) == 0);
-#else
     slt_finish_session();
 #endif
     CHECK(!pc_test_service_busy() && led_writes == writes);
@@ -2438,7 +2858,11 @@ static void slt_flow_check(void)
     unsigned queued = queue_calls;
     round_command(PC_COMMAND_START_TEST, COLD_START, "accepted", NULL);
     round_end(); writes = led_writes;
+#if defined(TEST_B1_AUTO_SLT)
+    CHECK(mock_power_state == PWR_CTRL_STATE_OFF);
+#else
     cold_to_ready(); confirm_power(1); step_power(0U);
+#endif
     CHECK(pc_dispatch_next_response(83U, &response) == 0);
     CHECK(!pc_test_service_busy() && !pc_power_service_busy() && queue_calls == queued && led_writes == writes);
     round_begin();
@@ -2493,7 +2917,12 @@ static void trace_exchange(uint16_t command, const char *json, uint32_t sequence
     frame.length = PC_PROTOCOL_HEADER_SIZE + frame.json_length;
     pc_dispatch_response_t reply;
     pc_trace_rx(&frame);
-    CHECK(pc_dispatch_handle(&frame, sequence, &reply) == PC_DISPATCH_RESPONSE_READY);
+    int result = pc_dispatch_handle(&frame, sequence, &reply);
+    if (command == PC_COMMAND_ROUND_END && result == PC_DISPATCH_NO_RESPONSE) {
+        complete_test_power_off();
+        result = pc_dispatch_next_response(sequence, &reply);
+    }
+    CHECK(result == PC_DISPATCH_RESPONSE_READY);
     pc_trace_tx(&reply, sequence, reply.length, 0);
 }
 
@@ -2508,6 +2937,16 @@ static void pc_protocol_trace_check(void)
     trace_capture_begin(); pc_trace_connected(peer_ip, 59178U);
     CHECK(strstr(trace_capture_text(), "connected peer=192.168.1.111:59178 listener=closed"));
     trace_exchange(PC_COMMAND_ROUND_BEGIN, "{}", 1U);
+#if defined(PC_COMMAND_CHIP_INFO)
+    observe_ddrbin_boot(1024U);
+    CHECK(pc_dispatch_next_response(60U, &result) == PC_DISPATCH_RESPONSE_READY);
+    CHECK(result.command_id == PC_COMMAND_CHIP_INFO);
+    pc_trace_tx(&result, 60U, result.length, 0);
+    CHECK(strstr(trace_capture_text(),
+        "{\"chipinfo\":[{\"mirrorIndex\":0,\"MemoryType\":\"LPDDR4X\",\"MemorySize\":2048},"
+        "{\"mirrorIndex\":1,\"MemoryType\":\"LPDDR4X\",\"MemorySize\":2048}]}\r\n"));
+    pc_dispatch_response_sent(PC_COMMAND_CHIP_INFO);
+#endif
     trace_exchange(PC_COMMAND_START_TEST, start, 2U);
     CHECK(strstr(trace_capture_text(), "[PC RX] conn=1 cmd=0106 seq=1 len=20\r\n"));
     CHECK(strstr(trace_capture_text(), "req=0106") && strstr(trace_capture_text(), "\"completed\""));
@@ -2598,6 +3037,157 @@ static void measurement_precision_check(void)
     message("PASS: PC RK service measurement JSON rounding, 3 decimals, query/result consistency and null\n");
 }
 
+#if defined(PC_COMMAND_CHIP_INFO) && defined(PC_POWER_SEQUENCE_TEST) && defined(PC_TEST_ROUND_TEST)
+static void feed_ddr_log(const char *text)
+{
+    rk_ddr_capacity_observe(true, (const uint8_t *)text, (int)strlen(text));
+}
+
+static void chip_info_first_tests(void)
+{
+    pc_dispatch_response_t response;
+    power_fixture = 1;
+    configure_power();
+    /* 旧启动的完整缓存不能单独触发下一轮的010D。 */
+    observe_ddrbin_boot(4096U);
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+    CHECK(pc_dispatch_next_response(70U, &response) == 0);
+    /* 旧启动已读全但尚未上报；本次冷启动只能采用下次上电的通道表。 */
+    observe_ddrbin_boot(4096U);
+    round_command(PC_COMMAND_START_TEST, COLD_START, "accepted", NULL);
+    unsigned queued = queue_calls;
+    CHECK(pc_dispatch_next_response(70U, &response) == 0);
+    rk_ddr_capacity_observe(false, NULL, 0);
+    /* PC 已受理很久，但 RK 尚未上电，不能在 OFF 停留阶段冻结空容量。 */
+    mock_tick += B1_RK_CHIP_INFO_TIMEOUT_MS;
+    CHECK(pc_dispatch_next_response(70U, &response) == 0 && queue_calls == queued);
+    step_power(0U); step_power(5U);
+    mock_power_state = PWR_CTRL_STATE_ON; step_power(1U);
+    feed_ddr_log("LPDDR4, 1600MHz\nchannel[3] Size=256MB\nchannel[1] Size=1024MB\n");
+    confirm_power(1); step_power(0U);
+    CHECK(pc_dispatch_next_response(70U, &response) == 0 && queue_calls == queued);
+    feed_ddr_log("channel[0] Size=512MB\nchannel[2] Size=2048MB\n");
+    pc_json_configure_allocator(no_memory, free);
+    CHECK(pc_dispatch_next_response(70U, &response) == 0 && queue_calls == queued);
+    pc_json_configure_allocator(NULL, NULL);
+    check_chip_report(70U, "LPDDR4", 1536U, "LPDDR4", 2304U);
+    pc_dispatch_response_sent(PC_COMMAND_SERVER_HEARTBEAT);
+    CHECK(pc_dispatch_next_response(71U, &response) == 0 && queue_calls == queued);
+    pc_dispatch_response_sent(PC_COMMAND_CHIP_INFO);
+    CHECK(pc_dispatch_next_response(71U, &response) == 1 && queue_calls == queued + 1U);
+    cJSON *body = decode(&response, PC_COMMAND_COMMAND_RESP, 71U);
+    string_is(body, "status", "completed"); cJSON_Delete(body);
+    result_is(0U, NULL, site_label);
+    round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
+    CHECK(queue_calls == queued + 2U && pc_dispatch_next_response(72U, &response) == 0);
+    result_is(0U, NULL, site_label);
+    round_end();
+
+    /* 外部已启动的PARA沿用同次日志；没有表尾时跨tick回绕仍按期限上报三路。 */
+#if defined(PC_COMMAND_CHIP_INFO)
+    mock_power_state = PWR_CTRL_STATE_ON;
+#endif
+    rk_ddr_capacity_observe(false, NULL, 0);
+    feed_ddr_log("LPDDR4X, 2133MHz\nchannel[0] Size=256MB\nchannel[1] Size=512MB\n"
+                 "channel[2] Size=2048MB\n");
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+    mock_tick = UINT32_MAX - B1_RK_CHIP_INFO_TIMEOUT_MS / 2U;
+    char *para = para_json("parametric", "idd_2NS", 3U);
+    round_command(PC_COMMAND_PARA_START, para, "accepted", NULL);
+    cJSON_free(para);
+    queued = queue_calls;
+    mock_tick += B1_RK_CHIP_INFO_TIMEOUT_MS - 1U;
+    CHECK(pc_dispatch_next_response(73U, &response) == 0 && queue_calls == queued);
+    ++mock_tick;
+    check_chip_report(73U, "LPDDR4X", 768U, "LPDDR4X", 2048U);
+    observe_ddrbin_boot(2048U);
+    rk_ddr_capacity_t frozen = rk_ddr_capacity_snapshot();
+    CHECK(frozen.chips[0].size_mib == 768U && frozen.chips[1].size_mib == 2048U && frozen.current_mib == 2816U);
+    pc_dispatch_response_sent(PC_COMMAND_CHIP_INFO);
+    CHECK(pc_dispatch_next_response(74U, &response) == 0 && queue_calls == queued + 1U);
+    CHECK(queued_request.command_id == 25U);
+    inject(RK_RESPONSE_COMPLETE, 0U);
+    CHECK(pc_dispatch_next_response(74U, &response) == 1 && response.command_id == PC_COMMAND_PARA_RESULT);
+    round_end();
+
+    /* SLT电源准备可结束；未发完整010D时不可授权EDK。 */
+    configure_power();
+    rk_ddr_capacity_observe(false, NULL, 0);
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+    mock_tick += B1_RK_CHIP_INFO_TIMEOUT_MS;
+    CHECK(pc_dispatch_next_response(75U, &response) == 0);
+    round_command(PC_COMMAND_SLT_START, SLT_START, "accepted", NULL);
+    step_power(10U); step_power(5U); mock_power_state = PWR_CTRL_STATE_ON; step_power(1U);
+    CHECK(pc_dispatch_next_response(75U, &response) == 0 && !handoff_test.prepared);
+    feed_ddr_log("LPDDR4X, 2133MHz\nchannel[1] Size=512MB\nchannel[3] Size=1024MB\n");
+    CHECK(pc_dispatch_next_response(75U, &response) == 0);
+    feed_ddr_log("Manufacturer ID:0xff\n");
+    check_chip_report(75U, "LPDDR4X", 512U, "LPDDR4X", 1024U);
+    CHECK(pc_dispatch_next_response(76U, &response) == 0 && !handoff_test.prepared);
+    pc_dispatch_response_sent(PC_COMMAND_CHIP_INFO);
+    CHECK(pc_dispatch_next_response(76U, &response) == 1 && handoff_test.prepared);
+    slt_finish_session(); round_end();
+
+    /* 没有日志也没有SPL心跳：先上传空容量，再给出两颗DDR训练失败的0105。 */
+    configure_power();
+    rk_ddr_capacity_observe(false, NULL, 0);
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+    round_command(PC_COMMAND_CHIP_INFO, "{}", "failed", "invalidDirection");
+    round_command(PC_COMMAND_START_TEST, COLD_START, "accepted", NULL);
+    queued = queue_calls;
+    cold_to_ready();
+    /* cold_to_ready 在本次上电后又推进了 1 ms。到期前 1 ms 仍等待日志。 */
+    mock_tick += B1_RK_CHIP_INFO_TIMEOUT_MS - 2U;
+    CHECK(pc_dispatch_next_response(77U, &response) == 0);
+    ++mock_tick;
+    check_chip_report(77U, "", 0U, "", 0U);
+    pc_dispatch_response_sent(PC_COMMAND_CHIP_INFO);
+    step_power(0U);
+    training_failed_result(0, 0U);
+    CHECK(queue_calls == queued);
+    round_end();
+
+    /* 首项在启动供电前失败：仍交付原错误，缺失的容量按受理时间有界上报。 */
+    configure_power();
+    rk_ddr_capacity_observe(false, NULL, 0);
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+    round_command(PC_COMMAND_START_TEST, COLD_START, "accepted", NULL);
+    boot_failure = 1;
+    step_power(sequence_config.off_hold_ms);
+    preparation_failed("executionFailed");
+    mock_tick += B1_RK_CHIP_INFO_TIMEOUT_MS - sequence_config.off_hold_ms;
+    check_chip_report(77U, "", 0U, "", 0U);
+    pc_dispatch_response_sent(PC_COMMAND_CHIP_INFO);
+    round_end();
+
+    /* 已组出的010D未发完就断开：原首项不执行，新连接不能领取原轮的事件。 */
+    mock_power_state = PWR_CTRL_STATE_ON;
+    observe_ddrbin_boot(2048U);
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+    round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
+    check_chip_report(78U, "LPDDR4X", 4096U, "LPDDR4X", 4096U);
+    pc_dispatch_disconnected(); pc_dispatch_poll();
+    CHECK(queue_calls == queued && !pc_test_service_busy() && pc_dispatch_next_response(1U, &response) == 0);
+    /* 缺类型且只收到CH2，out结束本次训练；缺记录的镜像0保持空串和0。 */
+    rk_ddr_capacity_observe(false, NULL, 0);
+    round_command(PC_COMMAND_ROUND_BEGIN, "{}", "completed", NULL);
+    feed_ddr_log("channel[2] Size=512MB\nout\nchannel[3] Size=1024MB\n");
+    round_command(PC_COMMAND_START_TEST, START_JSON, "accepted", NULL);
+    check_chip_report(2U, "", 0U, "", 512U);
+    round_end();
+    pc_dispatch_response_sent(PC_COMMAND_CHIP_INFO);
+    CHECK(pc_dispatch_next_response(3U, &response) == 0 && !pc_test_service_busy() && queue_calls == queued);
+
+    /* 超出double精确整数范围也使用完整的无引号uint64，与实际板级容量上限独立。 */
+    cJSON *array = cJSON_CreateArray(); CHECK(array);
+    CHECK(pc_chip_info_append(array, 0U, NULL, UINT64_MAX));
+    char *json = cJSON_PrintUnformatted(array); CHECK(json);
+    CHECK(strcmp(json, "[{\"mirrorIndex\":0,\"MemoryType\":\"\",\"MemorySize\":18446744073709551615}]") == 0);
+    cJSON_free(json); cJSON_Delete(array);
+    message("PASS: PC RK service 010D channel mapping, timeout, send gate, FUNC/PARA/SLT and disconnect\n");
+}
+#endif
+
 void test_main(void)
 {
     measurement_precision_check();
@@ -2621,6 +3211,9 @@ void test_main(void)
     slt_order_check();
 #endif
     slt_flow_check();
+#endif
+#if defined(PC_COMMAND_CHIP_INFO) && defined(PC_POWER_SEQUENCE_TEST)
+    chip_info_first_tests();
 #endif
     finish(0U);
 #endif

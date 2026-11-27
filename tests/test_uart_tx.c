@@ -1,6 +1,9 @@
 /* 实际发送环测试：TXE只搬入硬件，TC才完成；后续载荷不能越过跟踪帧边界。 */
 #include "port.h"
 #include "uart_under_test.h"
+#if defined(TEST_B1)
+#include "uart_router.h"
+#endif
 #define S1(x) #x
 #define S(x) S1(x)
 #define CHECK(x) do { if (!(x)) fail("FAIL " S(__LINE__) ": " #x "\n"); } while (0)
@@ -45,7 +48,11 @@ int HAL_UART_Init(UART_HandleTypeDef *uart)
     return HAL_OK;
 }
 int HAL_UARTEx_ReceiveToIdle_DMA(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size)
-{ (void)uart; (void)data; (void)size; return HAL_OK; }
+{
+    (void)data; (void)size;
+    uart->hdmarx->interrupts |= DMA_IT_HT;
+    return HAL_OK;
+}
 static void txe(UART_HandleTypeDef *uart)
 {
     CHECK(uart->TxISR != NULL && (uart->Instance->CR1 & UART_IT_TXE));
@@ -64,6 +71,34 @@ void test_main(void)
 {
     uint8_t frame[] = {1, 2, 3}, later[] = {4, 5};
     uint32_t ticket = 77U, other = 88U, completed = 99U;
+#if defined(UART_RK_LOG_RX_CAPACITY)
+    /* 连续DMA必须保留半满中断以识别整圈写入，控制台仍由IDLE/TC交付。 */
+    DMA_HandleTypeDef dma = {0};
+    huart2.hdmarx = &dma;
+    CHECK(uart2_if.start_rx(&uart2_if, frame, sizeof(frame)) == IF_ERR);
+    dma.Init.Mode = DMA_CIRCULAR;
+    CHECK(uart2_if.start_rx(&uart2_if, frame, sizeof(frame)) == IF_OK && (dma.interrupts & DMA_IT_HT));
+    huart4.hdmarx = &dma;
+#if defined(UART_RK_PROTOCOL_RX_CAPACITY)
+    CHECK(uart4_if.start_rx(&uart4_if, frame, sizeof(frame)) == IF_OK && (dma.interrupts & DMA_IT_HT));
+    dma.remaining = 1U;
+    CHECK(uart_hw_rx_position(&uart4_if, sizeof(frame)) == 2U);
+    dma.remaining = 0U;
+    CHECK(uart_hw_rx_position(&uart4_if, sizeof(frame)) == 0U);
+    dma.remaining = sizeof(frame);
+    CHECK(uart_hw_rx_position(&uart4_if, sizeof(frame)) == 0U);
+    dma.Init.Mode = DMA_NORMAL;
+    CHECK(uart4_if.start_rx(&uart4_if, frame, sizeof(frame)) == IF_ERR);
+    huart1.hdmarx = &dma;
+    CHECK(uart1_if.start_rx(&uart1_if, frame, sizeof(frame)) == IF_OK && !(dma.interrupts & DMA_IT_HT));
+    huart1.hdmarx = NULL;
+#else
+    CHECK(uart4_if.start_rx(&uart4_if, frame, sizeof(frame)) == IF_ERR);
+    dma.Init.Mode = DMA_NORMAL;
+    CHECK(uart4_if.start_rx(&uart4_if, frame, sizeof(frame)) == IF_OK && !(dma.interrupts & DMA_IT_HT));
+#endif
+    huart2.hdmarx = huart4.hdmarx = NULL;
+#endif
     CHECK(uart_hw_send_tracked(&uart1_if, frame, sizeof(frame), &ticket) == IF_ERR);
     CHECK(ticket == 77U);
     uart_tx_mutex_init(); uart_tx_isr_attach();
@@ -117,17 +152,20 @@ void test_main(void)
     /* 改速只能在TX环和TC同时空闲时执行；HAL失败恢复原值，重挂本端TX钩子。 */
     huart4.Init.BaudRate = 115200U;
     registers[2].ISR = 0U;
-    CHECK(uart_hw_set_baud(&uart4_if, 2000000U) == IF_ERR && init_calls == 0);
+    CHECK(uart_hw_set_baud(&uart4_if, 2000000U) == UART_BAUD_UNCHANGED && init_calls == 0);
     registers[2].ISR = UART_FLAG_TC;
-    CHECK(uart_hw_set_baud(&uart4_if, 2000000U) == IF_OK && huart4.Init.BaudRate == 2000000U);
+    lock_failure = 1;
+    CHECK(uart_hw_set_baud(&uart4_if, 2000000U) == UART_BAUD_UNCHANGED && init_calls == 0);
+    lock_failure = 0;
+    CHECK(uart_hw_set_baud(&uart4_if, 2000000U) == UART_BAUD_CHANGED && huart4.Init.BaudRate == 2000000U);
     CHECK(huart4.TxISR != NULL && init_calls == 1);
     init_failures = 1;
-    CHECK(uart_hw_set_baud(&uart4_if, 115200U) == IF_ERR && huart4.Init.BaudRate == 2000000U);
+    CHECK(uart_hw_set_baud(&uart4_if, 115200U) == UART_BAUD_RX_STOPPED && huart4.Init.BaudRate == 2000000U);
     CHECK(huart4.TxISR != NULL && init_calls == 3);
     abort_failure = 1;
-    CHECK(uart_hw_set_baud(&uart4_if, 115200U) == IF_ERR && init_calls == 3);
+    CHECK(uart_hw_set_baud(&uart4_if, 115200U) == UART_BAUD_RX_FAULT && init_calls == 3);
     abort_failure = 0;
-    CHECK(uart_hw_set_baud(&uart4_if, 115200U) == IF_OK && huart4.Init.BaudRate == 115200U);
+    CHECK(uart_hw_set_baud(&uart4_if, 115200U) == UART_BAUD_CHANGED && huart4.Init.BaudRate == 115200U);
     message("PASS: UART actual baud switch, TX drain, RX abort failure and HAL rollback\n");
 #endif
     message("PASS: UART tracked TC, queued boundary, ring wrap, failures and IRQ mask preservation\n");

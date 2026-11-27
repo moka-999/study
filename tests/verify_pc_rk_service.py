@@ -16,20 +16,30 @@ def main():
     parser.add_argument("--power-sequence", action="store_true", help="执行正式电源编排与0103的故障注入，不访问设备")
     parser.add_argument("--round", action="store_true", help="验证整轮、SLT收尾和070x删除；只运行离线实际C")
     parser.add_argument("--stop", action="store_true", help="B1的0104中止及掉电清理回归")
+    parser.add_argument("--shmoo", action="store_true", help="B1的010E冷启动扫描和010F逐点结果回归")
     parser.add_argument("--site", action="store_true", help="B1的010C站点开关、灯屏蔽及下电交错回归")
+    parser.add_argument("--site-id-checks", nargs=2, type=int, choices=(0, 1), metavar=("TESTER", "SITE"),
+                        help="在 --site 回归中分别覆盖 010C 的 testerId 和 siteId 校验开关")
     parser.add_argument("--timing-switches", nargs=2, type=int, choices=(0, 1),
                         metavar=("TIMING", "FREQ"), help="B1普通时序/Freq编译开关专项，0关闭、1启用")
     parser.add_argument("--slt-fault", choices=("off", "transport", "transport-after", "power-off"),
                         help="B1整轮专项：独立进程验证SLT故障只报告一次并保持占用")
     args = parser.parse_args()
     root = args.app_root.resolve()
+    if args.shmoo:
+        # 启用离线电源模拟端口及整轮互斥用例，010E 本身仍从独立连接状态启动。
+        args.power_sequence = args.round = True
+    if args.site_id_checks is not None and not args.site:
+        parser.error("--site-id-checks 需与 --site 一起使用")
     if args.timing_switches is not None and (root.name != "b1" or not args.power_sequence or
                                              not args.round or args.stop or args.slt_fault):
         parser.error("时序开关专项要求B1、--power-sequence、--round，不能混用停止/SLT故障专项")
     if args.site and (args.stop or args.timing_switches is not None or args.slt_fault):
         parser.error("--site单独运行")
-    if (args.stop or args.site) and (root.name != "b1" or not args.power_sequence or not args.round):
-        parser.error("停止回归要求B1、--power-sequence和--round")
+    if args.shmoo and (args.site or args.stop or args.slt_fault):
+        parser.error("--shmoo 单独运行，可与 --timing-switches 配合")
+    if (args.stop or args.site or args.shmoo) and (root.name != "b1" or not args.power_sequence or not args.round):
+        parser.error("停止、站点或扫描回归要求B1、--power-sequence和--round")
     if args.power_simulation and (args.b1_guard or root.name == "b1"):
         parser.error("B1禁止电源模拟")
     if args.mats_fail_test and not args.power_simulation:
@@ -47,8 +57,12 @@ def main():
         suffix += "-round"
     if args.stop:
         suffix += "-stop"
+    if args.shmoo:
+        suffix += "-shmoo"
     if args.site:
         suffix += "-site"
+        if args.site_id_checks is not None:
+            suffix += "-ids%d-%d" % tuple(args.site_id_checks)
     if args.slt_fault:
         suffix += "-slt-fault-" + args.slt_fault
     if args.timing_switches is not None:
@@ -89,6 +103,8 @@ uint32_t HAL_GetTick(void);
         "HAL_Drv/ddr_power.c", "Middlewares/Third_Party/cJSON/cJSON.c")]]
     if args.timing_switches is not None:
         sources[0] = root / "tests/test_pc_timing_switches.c"
+    if args.shmoo:
+        sources[0] = Path(__file__).with_name("test_pc_shmoo.c")
     if args.site:
         sources[0] = root / "tests/test_pc_site_control.c"
     if (root / "App/protocol/pc/pc_site_control.c").is_file():
@@ -112,10 +128,15 @@ uint32_t HAL_GetTick(void);
     if args.b1_guard or root.name == "b1":
         command += ["-DB1_RK_UART=4"]
     if root.name == "b1":
+        sources.append(root / "App/protocol/pc/pc_shmoo.c")
         command += ["-DTEST_B1_CONSOLE_POWER=1", "-DTEST_B1_PROTOCOL_TRACE=1", "-DTEST_B1_AUTO_SLT=1"]
         includes += [root / "App/diagnostics", support]
         sources += [support / "trace_capture.c", *[root / "App/diagnostics" / name for name in
                     ("protocol_trace.c", "pc_trace.c", "rk_trace.c")]]
+        capacity = root / "App/diagnostics/rk_ddr_capacity.c"
+        if capacity.is_file():
+            command.append("-DTEST_RK_DDR_CAPACITY=1")
+            sources.append(capacity)
     if args.power_simulation:
         command += ["-DENABLE_V2_POWER_SIMULATION=1"]
     if args.mats_fail_test:
@@ -124,10 +145,13 @@ uint32_t HAL_GetTick(void);
         command += ["-DPC_POWER_SEQUENCE_TEST=1"]
     if args.round:
         command += ["-DPC_TEST_ROUND_TEST=1"]
+    if args.site_id_checks is not None:
+        tester, site = args.site_id_checks
+        command += [f"-DB1_010C_CHECK_TESTER_ID={tester}", f"-DB1_010C_CHECK_SITE_ID={site}"]
     if args.timing_switches is not None:
         timing, frequency = args.timing_switches
         command += [f"-DB1_RK_TIMING_ENABLE={timing}", f"-DB1_RK_FREQ_ENABLE={frequency}"]
-    elif root.name == "b1" and args.round and not args.site:
+    elif root.name == "b1" and args.round and not args.site and not args.shmoo:
         # 原整轮/停止用例明确检查主动时序和频率交互；独立于开发板当前用于对照的宏值。
         command += ["-DB1_RK_TIMING_ENABLE=1", "-DB1_RK_FREQ_ENABLE=1"]
     if args.slt_fault:

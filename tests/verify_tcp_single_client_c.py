@@ -41,6 +41,8 @@ struct netif { struct { uint32_t addr; } ip_addr; };
 #define EWOULDBLOCK 11
 #define EAGAIN 11
 #define ECONNRESET 104
+#define EBADF 9
+#define ENOMEM 12
 #define errno test_errno
 #define pdMS_TO_TICKS(x) ((TickType_t)(x))
 extern int test_errno;

@@ -91,6 +91,7 @@ void monitor_set_sample_observer(monitor_sample_observer_t);
         (build / 'main.h').write_text('#include "port.h"\n#define HAL_GetTick xTaskGetTickCount\n', encoding='utf-8')
         command += ['-DTEST_B1_PROTOCOL_TRACE=1', '-I' + str(support), '-I' + str(root / 'App/diagnostics'),
                     '-I' + str(root / 'Core/Inc'), str(support / 'trace_capture.c'),
+                    str(root / 'App/tasks/rk/rk_timing_readback.c'),
                     str(root / 'App/diagnostics/protocol_trace.c'), str(root / 'App/diagnostics/rk_trace.c'),
                     '-Wl,--defsym=end=_ebss']
     command += [str(support / 'qemu_start.s'), '-nostartfiles', '--specs=nosys.specs',

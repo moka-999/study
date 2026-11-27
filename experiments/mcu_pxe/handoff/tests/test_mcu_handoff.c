@@ -5,6 +5,7 @@ static ETH_TypeDef test_eth;
 #define ETH (&test_eth)
 #include "handoff_mcu.c"
 #include "protocol_trace.h"
+#include "rk_timing_readback.h"
 
 #define TEXT0(x) #x
 #define TEXT(x) TEXT0(x)
@@ -39,9 +40,12 @@ static char last_log[256];
 static int log_result = 1, log_calls;
 static uint8_t uart_input[SN_WIRE_MAX], last_tlv[TLV_FRAME_MAX];
 static uint16_t uart_input_length, last_tlv_length;
-static int uart_fail, jump_attempts, tlv_sends;
+static int uart_fail, jump_attempts, tlv_sends, serial_sends;
+static int check_on_tx_idle;
 static uint32_t actual_baud = SN_BOOT_BAUD, baud_changes;
 static int baud_fail;
+static int baud_gap;
+static uint16_t before_baud_gap;
 static uint64_t heartbeat_sequence, jump_sequence;
 QueueHandle_t rkRequestQueue = (QueueHandle_t)(uintptr_t)3U;
 QueueHandle_t rkResponseQueue = (QueueHandle_t)(uintptr_t)4U;
@@ -69,12 +73,36 @@ int pc_site_enabled(void) { return site_enabled; }
 int pc_power_service_busy(void) { return power_busy; }
 UBaseType_t uxQueueMessagesWaiting(const QueueHandle_t queue)
 { CHECK(queue == rkRequestQueue || queue == rkResponseQueue); return rk_idle ? 0U : 1U; }
-int uart_tx_idle(int id) { CHECK(id == UART_PORT_RK_PROTOCOL); return uart_idle; }
-int uart_set_baud(int id, uint32_t baud)
+int uart_tx_idle(int id)
 {
-    CHECK(id == UART_PORT_RK_PROTOCOL && uart_idle);
+    CHECK(id == UART_PORT_RK_PROTOCOL);
+    if (check_on_tx_idle) {
+        check_on_tx_idle = 0;
+        CHECK(rk_task_check_timing("CASReadLatency") == NULL);
+    }
+    return uart_idle;
+}
+int uart_rk_set_baud(uint32_t baud, uint16_t *old_rx_bytes)
+{
+    CHECK(uart_idle);
     if (baud_fail) { actual_baud = baud; return IF_ERR; }
     actual_baud = baud; ++baud_changes;
+    before_baud_gap = uart_input_length;
+    baud_gap = 1;
+    if (old_rx_bytes) *old_rx_bytes = before_baud_gap;
+    return IF_OK;
+}
+int uart_set_baud(int id, uint32_t baud)
+{
+    CHECK(id == UART_PORT_RK_PROTOCOL);
+    return uart_rk_set_baud(baud, NULL);
+}
+int uart_rk_end_rx_session(void)
+{
+    CHECK(uart_idle && power_state == PWR_CTRL_STATE_OFF && actual_baud == SN_BOOT_BAUD);
+    uart_input_length = 0U;
+    before_baud_gap = 0U;
+    baud_gap = 0;
     return IF_OK;
 }
 int handoff_eth_tx_idle(void) { return eth_idle; }
@@ -97,6 +125,14 @@ int uart_poll_rx(int id, uint8_t *buffer, uint16_t capacity)
 {
     CHECK(id == UART_PORT_RK_PROTOCOL);
     uint16_t length = uart_input_length < capacity ? uart_input_length : capacity;
+    if (baud_gap) {
+        if (!before_baud_gap) {
+            baud_gap = 0;
+            return UART_RX_GAP;
+        }
+        if (length > before_baud_gap) length = before_baud_gap;
+        before_baud_gap -= length;
+    }
     memcpy(buffer, uart_input, length);
     uart_input_length -= length;
     memmove(uart_input, uart_input + length, uart_input_length);
@@ -118,10 +154,13 @@ int uart_send(int id, uint8_t *buffer, uint16_t length)
             ++jump_attempts;
             jump_sequence = frame.sequence;
         }
-    }
+    } else ++serial_sends;
     return uart_fail ? IF_ERR : IF_OK;
 }
 void rk_trace_ready(uint64_t sequence, int queried) { (void)sequence; (void)queried; }
+void rk_trace_timing_values(uint8_t index, const rk_timing_readback_t *result)
+{ (void)index; (void)result; }
+void rk_trace_timing_unavailable(uint8_t index, const char *reason) { (void)index; (void)reason; }
 void rk_trace_sent(uint16_t command, const uint8_t *wire, int length, int queued)
 { (void)command; (void)wire; (void)length; (void)queued; }
 void rk_trace_received(const tlv_frame_t *frame) { (void)frame; }
@@ -208,7 +247,9 @@ static void arm_boot_test(void)
     CHECK(!handoff_mcu_busy() && power_state == PWR_CTRL_STATE_OFF);
     CHECK(handoff_mcu_console_request(HANDOFF_COMMAND_RK));
     handoff_mcu_tcp_poll(0, 1);
+    CHECK(!handoff_mcu_tlv_allowed()); /* 正在重新准备串口。 */
     CHECK(handoff_mcu_rk_poll() == 1 && s_boot_phase == HANDOFF_BOOT_PROBE);
+    CHECK(handoff_mcu_tlv_allowed());
 }
 
 static void end_boot_test(void)
@@ -227,11 +268,20 @@ static void receive_heartbeat(uint64_t sequence)
     CHECK(handoff_mcu_rk_poll() == 1);
 }
 
+static void queue_serial(const sn_frame_t *request)
+{
+    uint8_t wire[SN_WIRE_MAX];
+    uint16_t length = sn_pack(request, wire, sizeof(wire));
+    CHECK(length && length <= sizeof(uart_input) - uart_input_length);
+    memcpy(uart_input + uart_input_length, wire, length);
+    uart_input_length += length;
+}
+
 static void receive_serial(sn_frame_t *request)
 {
     CHECK(!uart_input_length);
-    uart_input_length = sn_pack(request, uart_input, sizeof(uart_input));
-    CHECK(uart_input_length && handoff_mcu_rk_poll() == 1);
+    queue_serial(request);
+    CHECK(handoff_mcu_rk_poll() == 1);
 }
 
 /* 已授权会话中的真实串口解析：改速不能早于低速ACK的TC，丢ACK可低速重试。 */
@@ -265,11 +315,33 @@ static void test_baud(void)
     now += SN_RATE_TRIAL_MS;
     handoff_mcu_rk_poll();
     CHECK(!s_rate_trial && actual_baud == SN_BOOT_BAUD && baud_changes == 2U);
-    receive_serial(&request);
-    CHECK(s_rate_pending);
+    /* 一个低速批次含同号重试、另一档改速及普通查询，应逐帧答复，只切换一次。 */
+    int previous_sends = serial_sends;
+    queue_serial(&request);
+    queue_serial(&request);
+    ++request.sequence;
+    for (unsigned i = 0U; i < SN_RATE_REQUEST_SIZE; ++i)
+        request.data[i] = (uint8_t)(SN_LEGACY_DATA_BAUD >> (i * 8U));
+    queue_serial(&request);
+    ++request.sequence; request.op = SN_POLL; request.length = 0U;
+    queue_serial(&request);
+    /* 低速 HELLO 横跨读块：前半先交给解析器，后半停在旧 DMA，切到高速才读到。 */
+    ++request.sequence; request.op = SN_HELLO;
+    uint8_t hello[SN_WIRE_MAX];
+    uint16_t size = sn_pack(&request, hello, sizeof(hello));
+    uint16_t prefix = size / 2U;
+    CHECK(prefix && uart_input_length + prefix <= sizeof(uart_input));
+    memcpy(uart_input + uart_input_length, hello, prefix);
+    uart_input_length += prefix;
+    CHECK(handoff_mcu_rk_poll() == 1 && serial_sends == previous_sends + 4);
+    CHECK(s_response.op == (SN_POLL | SN_REPLY) && s_response.status == SN_EMPTY);
+    CHECK(s_rate_pending && s_requested_baud == SN_DATA_BAUD && actual_baud == SN_BOOT_BAUD);
+    memcpy(uart_input, hello + prefix, size - prefix);
+    uart_input_length = size - prefix;
     handoff_mcu_rk_poll();
-    CHECK(s_rate_trial && actual_baud == SN_DATA_BAUD);
-    ++request.sequence; request.length = 0U;
+    CHECK(s_server.request.sequence == request.sequence && s_server.request.op == SN_HELLO);
+    CHECK(s_rate_trial && actual_baud == SN_DATA_BAUD && serial_sends == previous_sends + 4);
+    /* 同号 HELLO 确实从新速到达才能确认；旧速尾段不会在高速线上发应答。 */
     receive_serial(&request);
     CHECK(!s_rate_trial && s_response.status == SN_OK && s_response.length == SN_HELLO_INFO_SIZE);
     now += SN_RATE_TRIAL_MS * 2U;
@@ -327,9 +399,18 @@ static void test_spl_boot(void)
     test_busy = 0; rk_idle = 0;
     handoff_mcu_rk_poll(); CHECK(!jump_attempts);
     rk_idle = 1;
+    /* 在确认 UART 空闲和提交 003E 之间模拟控制台刚接到查询。 */
+    check_on_tx_idle = 1;
+    continue_spl_boot();
+    CHECK(!jump_attempts && rk_timing_readback_manual_pending());
     handoff_mcu_rk_poll();
-    CHECK(jump_attempts == 1 && jump_sequence == current + 1U);
+    CHECK(!jump_attempts && tlv_unpack(last_tlv, last_tlv_length, &reply) == 2);
+    CHECK(reply.payload[0] == RK_CMD_QUERY_TIMING && reply.payload[2] == 1U);
+    now += RK_TIMING_READBACK_TIMEOUT_MS;
+    handoff_mcu_rk_poll(); handoff_mcu_rk_poll();
+    CHECK(jump_attempts == 1 && jump_sequence == current + 2U);
     CHECK(last_tlv_length == sizeof(golden) && s_boot_phase == HANDOFF_BOOT_WAIT_TX);
+    CHECK(!handoff_mcu_tlv_allowed());
     CHECK(!handoff_mcu_power_allowed(0) && handoff_mcu_power_allowed(1));
     CHECK(tlv_pack_cmd(HANDOFF_RK_CMD_CONTINUE_BOOT, NULL, 0U, jump_sequence,
                       expected, sizeof(expected)) == sizeof(golden));
@@ -346,6 +427,7 @@ static void test_spl_boot(void)
     uart_idle = 1;
     handoff_mcu_rk_poll();
     CHECK(!uart_input_length && s_boot_phase == HANDOFF_BOOT_EDK);
+    CHECK(!handoff_mcu_tlv_allowed());
     CHECK(s_state.session == 101U && !s_active && s_response.status == SN_NOT_READY);
     handoff_mcu_tcp_poll(1, 1);
     CHECK(s_state.phase == HANDOFF_ARMED && !pending_callback && !s_saved);
@@ -369,17 +451,22 @@ static void test_spl_boot(void)
 
     /* 自动引导仍兼容：坏HELLO不切换，合法HELLO直接接EDK，不发003E。 */
     arm_boot_test();
+    rk_timing_readback_arm(0);
     power_state = PWR_CTRL_STATE_ON;
     handoff_mcu_tcp_poll(1, 1);
+    now += 1000U;
+    handoff_mcu_rk_poll();
+    receive_heartbeat(heartbeat_sequence);
+    CHECK(rk_timing_readback_busy() && !rk_task_handoff_idle() && jump_attempts == 2);
     hello.status = SN_INVALID;
     uart_input_length = sn_pack(&hello, uart_input, sizeof(uart_input));
     handoff_mcu_rk_poll();
-    CHECK(s_boot_phase == HANDOFF_BOOT_PROBE && !s_state.session);
+    CHECK(s_boot_phase == HANDOFF_BOOT_PROBE && !s_state.session && rk_timing_readback_busy());
     hello.status = 0U;
     uart_input_length = sn_pack(&hello, uart_input, sizeof(uart_input));
     sends = tlv_sends;
     handoff_mcu_rk_poll();
-    CHECK(s_boot_phase == HANDOFF_BOOT_EDK && s_state.session == hello.session);
+    CHECK(s_boot_phase == HANDOFF_BOOT_EDK && s_state.session == hello.session && !rk_timing_readback_busy());
     CHECK(tlv_sends == sends && jump_attempts == 2);
     end_boot_test();
     message("PASS: SPL 003E golden frame, live Seq, readiness, TC, no retry and auto EDK\n");

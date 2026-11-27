@@ -40,7 +40,7 @@ MCU作为TCP server等待PC连接，沿用端口8888和单客户端模型。网�
 - 初版固定`Version=1`、`Flag=8`、`ServiceID=0`。非法头前缀逐字节丢弃并有界寻找下一头；两次完整帧消费之间累计丢弃超过4096字节才关闭连接。完整帧的UTF-8/JSON错误回`0006 failed/invalidArgument`并继续；认可长度后不扫描正文内部。仍无法收齐的半帧超过500ms字节间空闲则断连，正常空闲不受此限制。详见[TCP接收恢复](doc/pc_tcp_recovery_20260929.md)。
 - 每条连接中PC和MCU分别维护发送u32 Seq，每发一帧本端加1，不回显请求Seq；接收不改变本端发送计数，两个方向允许同号且可同时发送。Seq仅是发送流水号，业务关联另行定义；绝不能把内部RK Seq写入PC响应头。ServiceID保留2字节但固定0、不参与分发。首值、重连初始化和回绕边界仍待PC双方最终确认，暂定实现与验证状态见任务清单，测试通过不等于批准。
 - 心跳固定为PC主动发送`CMD_CLIENT_HEART_BEAT(0x0002)+{}`，MCU返回`CMD_SERVER_HEART_BEAT(0x0001)+{}`，新合同使用MCU本端递增Seq；心跳不承载其他状态。
-- 测试须先0106 `{}`建立当前连接的整轮，再串行0103/0105 FUNC、0108/0109 PARA或010A SLT，最后0107提交failChips失败数组。mirrorIndex 0/1/2映射两组LPDDR/eMCP灯，未知编号整包拒绝；0701/0702/0703已从固件删除，合法旧请求回0006/notSupported。0108按FUNC格式接入16项IDD名称，0109仅MCU方向；21..36统一发送101A进入，实际发完等5ms、逐点采集5s、发完退出再报0109。两颗暂默认PASS/resultDesc=null，measurementData沿用FUNC的18字段；判限待定。提前0107只废弃结果、不取消RK或提前解除busy；未入RK队列的FUNC/PARA不再投递。SLT固定slt/memtest86，index键必填但忽略其值、应答仍为null；默认空时序只准备电源/Boot，仅在RK查询时回复本轮Freq，未查询也继续，非空普通时序等本轮SPL心跳后发送；V2不检查EDK，仍按原同连接010B回收占用，断线不自动认领或释放SLT。B1正式EDK流程以RELEASE最终OK实际TC后自动OFF、恢复115200及解析器，再释放占用，不等010B且不发送010B completed；010A completed仍仅为启动准备完成。B1的010B编号保留，合法JSON回notSupported且无业务副作用；下一项早到回busy，PC等待后重试。PC断线不取消SLT，但后续RELEASE仍自主清理，不向新连接交付旧响应。PC可在同一0106内继续任意下一项并并行解析上一份报告，全部解析后以0107.failChips汇总三类失败颗粒；RELEASE不代表上传成功或PASS。0106按B2已知模式显示常温/高温闪，未知镜像灭；轮内允许B2部分更新，0107后只缓存模式、不覆盖最终结果。
+- 测试须先0106 `{}`建立当前连接的整轮，再串行0103/0105 FUNC、0108/0109 PARA或010A SLT，最后0107提交failChips失败数组。mirrorIndex 0/1/2映射两组LPDDR/eMCP灯，未知编号整包拒绝；0701/0702/0703已从固件删除，合法旧请求回0006/notSupported。0108按FUNC格式接入16项IDD名称，0109仅MCU方向；21..36统一发送101A进入，实际发完等5ms、逐点采集5s、发完退出再报0109。两颗暂默认PASS/resultDesc=null，measurementData沿用FUNC的18字段；判限待定。提前0107时，B1废弃未交付结果并关闭RK/DDR，电源确认OFF并收尾后才回completed；V2只废弃结果并保留在途占用。两者均停止投递未入RK队列的FUNC/PARA。SLT固定slt/memtest86，index键必填但忽略其值、应答仍为null；默认空时序只准备电源/Boot，仅在RK查询时回复本轮Freq，未查询也继续，非空普通时序等本轮SPL心跳后发送；V2不检查EDK，仍按原同连接010B回收占用，断线不自动认领或释放SLT。B1正式EDK流程以RELEASE最终OK实际TC后自动OFF、恢复115200及解析器，再释放占用，不等010B且不发送010B completed；010A completed仍仅为启动准备完成。B1的010B编号保留，合法JSON回notSupported且无业务副作用；下一项早到回busy，PC等待后重试。PC断线不取消SLT，但后续RELEASE仍自主清理，不向新连接交付旧响应。PC可在同一0106内继续任意下一项并并行解析上一份报告，全部解析后以0107.failChips汇总三类失败颗粒；RELEASE不代表上传成功或PASS。B1在0106整轮内只让在线B2已通过0004设为高温的镜像闪烁。常温、未知及B2失联时对应结果灯熄灭。0107后按最终PASS/FAIL显示。V2整轮内保留常温双通道闪、高温FAIL通道闪、未知熄灭。
 - TCP解析必须支持半包、粘包和连续多包；第一组测试JSON已确认，其余命令与字段分批冻结。
 - 已固定引入cJSON v1.7.19，使用FreeRTOS堆、递归深度16；完整PDU上限4096字节。
 - FUNC0103、PARA0108、SLT010A均必须携带`TimingParameters`对象；默认时序传`{}`，缺失或null回invalidArgument。16个子字段可部分提供字符串：CASReadLatency/CASWriteLatency/Freq/tREFI/tWR/tRTP/tRCD/tRP/tRASmin/tRASmax/tWTR/tRFCmin/tFAW/tCCD/tRRD/BL。Freq为int64，其余为u32十进制整数；PC判定取值及适用性，MCU只检查格式/位宽并原值编码。空串/省略不下发普通时序，Freq缺省回复-1；不继承上一请求。Freq变化走既有冷启动并在0x35查询中回复，普通时序在SPL就绪后无应答逐项发送，再下发算法；发送完成不代表生效。见[接入记录](doc/rk_timing_frequency_20261105.md)。旧包补字段后必须重算Length。
@@ -169,14 +169,14 @@ python -B -X utf8 tests/rk_gateway_network_test.py --serial COM5 --report build/
 
 自有代码、汇编及脚本的注释统一使用中文，说明用途、参数/返回值及关键约束；触及的自有代码遗留英文注释一并整理，第三方版权和许可保留原文。
 
-1. **MCU 是单客户端 TCP server**：单 accept 循环，一次只服务 1 个连接；accept后关闭listener清理未接手连接，当前connfd退出后重开监听，不能只依赖listen的backlog参数限制并发。测试脚本开新连接前必须 `close_tcp()`。 B1另有独立TCP8889纯文本调试服务，与8888各自单客户端、生命周期独立；不改变正式PC协议或V2。网络日志及命令说明见`../b1/docs/network_debug_console_20261116.md`。
+1. **正式测试端口8888为单客户端 TCP server**：单 accept 循环，一次只服务 1 个连接；accept后关闭listener清理未接手连接，当前connfd退出后重开监听，不能只依赖listen的backlog参数限制并发。测试脚本开新连接前必须 `close_tcp()`。B1 的独立调试端口 8889 可同时接两个纯文本客户端，各自选源、各自收发。网络日志及命令说明见`../b1/docs/network_debug_console_20261116.md`。
 2. **RK背压**：`rkRequestQueue`与`rkResponseQueue`各8槽，但只允许一个已发出的测试在途。结果队列满时保留待交付副本，不取下一请求。`uart_send`整帧入队失败返回TX_FAILED，不自动回插或重发。
 3. **RK结果匹配**：RK填最近收到的MCU Seq，仅按本次命令至最新成功入UART队列Seq窗口过滤，允许滞后/重复。完整3/5/7 TLV包原子校验、算法匹配才交付一次；残缺/矛盾/重复die拒绝并保持等待。完成后重复包忽略，无自动ACK/重发；同算法旧结果被重标当前窗口Seq无法区分，不宣称执行实例级防重放。
 4. **超时**：timeout_ms=0表示不限制算法等待（用户确认十几分钟算法不设时限）；非零仍为显式最终结果时限。超时只报一次TIMEOUT，RK状态未知时暂停后续命令。匹配迟到结果/B1确定掉电通过内部RECOVERED解除未知，不再报成功；恢复通知不得覆盖尚未交付的TIMEOUT。无自动重试，心跳不代表算法完成或超时恢复；B1启动编排按新约定使用本轮普通心跳确认初始化。
 5. **正式业务门禁**：外部已启动模式不接管电源/Boot；FUNC发编号，PARA附带进入/退出动作；B1完整电源/Boot路径采用可调初值，PC确认训练安全范围，MCU校验TPS编码并等待本轮有效普通心跳，保留notReady、互斥及故障处理。0105/0109每算法一包、两颗mirrorIndex=0/1，siteId/measurementData顶层共享；缺失编号/测量如实留空。断线不取消算法，新测试/电源改动在途busy，handler不阻塞等结果。V2显式MATS假FAIL只改第一颗PC视图，第二颗真实；B1禁止。
 6. **D-Cache 已关** → 无 cache 一致性顾虑，**勿再加 `SCB_InvalidateDCache_by_Addr`**（否则 UsageFault 升级 HardFault）。
 7. **DMA 够不到 DTCMRAM**（DMA 在 D2 域），DMA 缓冲放 AXI SRAM (RAM, 0x24000000)。
-8. **FreeRTOS 堆(128KB)手动挪到 AXI SRAM**（`heap_4.c` 的 `.heap` section + linker），不是 CubeMX 默认位置。
+8. **FreeRTOS 堆位于 AXI SRAM**（`heap_4.c` 的 `.heap` 段和链接脚本），V2 为 128 KiB，B1 为 192 KiB。
 9. **SPI按板型分配**：Apollo V2的SPI2仅给AD7124开发（Mode 3），B2链路另用SPI3（PA15/PB3/PB4/PB5）；B1用SPI2从机接B2、SPI4主机接AD7124。B2任务独立于RK，DMA1 Stream3/4与`.b2_dma` AXI缓冲专用，禁止占用UART的Stream0～2。
 10. **自定义接口归属**：总线实例统一由`board_interfaces.h`声明，UART内部钩子只在`uart_hw.h`；RK任务用`rk_link_next_sequence()`分配独立序号，禁止外部直接修改计数器。`uart_start_all()`在调度前初始化TX互斥锁；分配失败拒绝发送。注释/风格及剩余耦合约束见`doc/code_quality_review.md`。
 11. **RK解析错误必须上送调用方**：tlv_sm_feed完成后还须检查tlv_sm_get_frame；负数失败、0为零TLV心跳。Length为0或4..1024，最多16 TLV；底层保留未知TLV，最终业务只接受3/5/7合同，不能部分交付。tlv_unpack输入从5A起的完整帧和真实长度。V2/B1字节间门限均100ms，连续完整帧无需外部reset。
@@ -207,7 +207,7 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 - B1 AD7124使用SPI4 PE11–PE14、Mode 3，实板ID=0x07符合AD7124-4白名单0x04/0x06/0x07。当前首板用AVDD基准，内部REF_EN关闭；`../b1/Core/Inc/board_adc_config.h`集中选择和实测3333mV换算。V2默认仍用内部2.5V。保持增益1、无缓冲及约240ms三轨扫描；AVDD方案精度待实测，内部基准方案须先补齐REFOUT去耦。分析仪CPHA标签有歧义时查看原始上升采样沿，不据标签改为Mode 2。
 - MCP4725在I2C2、地址0x60，Boot目标电压0–1.8V；不得超过1.8V，实际3V3与VOUT误差待真板校准。
 - B1 PG12是PHY复位，不是RK复位。B2的`/RESET_n`接RK/RK806复位（1.8V域），`/MCU_RESET_n`接B1 NRST（3.3V域），只作异常恢复；`PWRON_L`人工按键与24V软开关不是同一网络，未见B1 GPIO驱动。
-- 三颗双色结果灯使用PG0–PG5，显示2组LPDDR4/4X和1组eMCP；以FAIL/PASS通道定义常亮及闪烁，常温双通道闪烁、高温FAIL通道闪烁，亮/灭各500ms。实际颜色、对象顺序及复位高阻瞬态待B1验证，不以图面红绿旁注代替实物。B1的PG6/LED7已确认表示MCU正常上电，初始化时灭、默认任务完成初始化后常亮，不是RK/DDR电源或网络连通指示；另一单色灯由RK的CPU_GPIO_PWR控制。
+- 三颗双色结果灯使用PG0–PG5，显示2组LPDDR4/4X和1组eMCP；以FAIL/PASS通道定义常亮及闪烁，B1整轮内由在线B2指定的高温镜像闪FAIL通道，亮/灭各500ms。实际颜色、对象顺序及复位高阻瞬态待B1验证，不以图面红绿旁注代替实物。B1的PG6/LED7已确认表示MCU正常上电，初始化时灭、默认任务完成初始化后常亮，不是RK/DDR电源或网络连通指示；另一单色灯由RK的CPU_GPIO_PWR控制。
 - B1 PB3/PB4/PB5配置输入、无内部上下拉；B1外部4.7kΩ上拉、B2按位贴0Ω接地，PB3最低位。`board_slot_code()`返回0..7，111有效；加1形成siteId，B2在位检测另走SLOT_ONLINE#。仅在B2配置成功后将该siteId用于运行IP及PC结果，不写FRU；后续0004重新读取槽位，变化仍受改IP的busy门禁。真实贴装与电平待验收，见[原引脚核对](../b1/docs/board_status_slot_20261010.md)和[最新接入](doc/b2_spi_integration_20261020.md)。
 
 原理图版本变化时先核对受影响引脚、网络和电气条件并记录原图页码。`tools/sch_netlist.py`可辅助适用的矢量PDF；不适用时使用当前可用的PDF查看/渲染工具，关键网络仍须回到原图复核。
@@ -244,7 +244,7 @@ Word文档的最新版保持固定文件名，历史版本改名归档；PC协�
 - 新全链路脚本只适用于临时联调镜像；`tests/legacy_rk/`的旧CRC/大端命令/重传脚本不得用于现行固件。
 
 ### 内存布局
-- 任务栈：rk 32KB（含心跳）/ tcp 16KB，不再创建独立hb任务；堆128KB，实际余量须以当前镜像运行时测量为准。
+- RK 任务栈 32 KiB（含心跳）。TCP 任务栈在 V2 为 16 KiB，在 B1 为 24 KiB。实际余量以对应镜像运行时测量为准。
 - 看门狗启用时监测默认任务、TCP、监测和RK四项存活，B1 OFF时RK仍须推进；它不再承担升级健康确认，不阻塞PC业务等待30秒。B1的`Core/Inc/board_watchdog_config.h`现默认`BOARD_IWDG_ENABLE=0`供验板，不启动IWDG或喂狗任务；设1重编可恢复，V2不变。该宏不修改Option Bytes，也不能停止旧固件已启动的IWDG，首次下载仍须处理暂停时的调试冻结。
 - 确认堆余量用 `xPortGetFreeHeapSize()`
 

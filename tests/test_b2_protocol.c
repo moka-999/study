@@ -29,6 +29,7 @@ static struct { unsigned size; int full; uint8_t bytes[80]; } queues[2];
 static unsigned created, net_writes, mode_calls, published;
 static int connected, test_busy, power_busy, network_ok = 1, led_ok = 1;
 static uint8_t slot = 1U;
+static uint8_t displayed_hot;
 static uint32_t now = 100U;
 static uint8_t last_reply[B2_RESPONSE_SIZE];
 static size_t last_length;
@@ -73,7 +74,15 @@ int pc_test_round_update_modes(uint8_t mask, const uint8_t *modes)
 {
     CHECK(mask <= 7U && modes);
     if (mask) ++mode_calls;
-    return led_ok;
+    if (!led_ok) return 0;
+    for (unsigned i = 0U; i < B2_MIRROR_COUNT; ++i) {
+        uint8_t bit = (uint8_t)(1U << i);
+        if (!(mask & bit)) continue;
+        CHECK(modes[i] <= 1U);
+        if (modes[i]) displayed_hot |= bit;
+        else displayed_hot &= (uint8_t)~bit;
+    }
+    return 1;
 }
 int b2_spi_start(void) { fail("Hardware forbidden\n"); }
 int b2_spi_receive(b2_spi_packet_t *packet) { (void)packet; fail("Hardware forbidden\n"); }
@@ -210,14 +219,11 @@ static void business_checks(void)
     master_state_t empty = {0}, full = {3U, 7U, {1U,0U,0U}};
     CHECK(transact(1U, empty).tester_id == 0U && !net_writes);
 #if defined(B2_TESTER_ID_MAX)
-    CHECK(b2_service_matches_site(21U, 8U) && !b2_service_matches_site(22U, 8U));
-    CHECK(!b2_service_matches_site(0U, 1U) && !b2_service_matches_site(1U, 0U) &&
-          !b2_service_matches_site(1U, 9U));
+    CHECK(b2_service_tester_id() == 0U && b2_service_site_id() == 0U);
 #endif
     CHECK(transact(2U, full).status == 0U && net_writes == 1U);
 #if defined(B2_TESTER_ID_MAX)
-    CHECK(b2_service_matches_site(3U, 1U) && !b2_service_matches_site(3U, 2U) &&
-          !b2_service_matches_site(4U, 1U));
+    CHECK(b2_service_tester_id() == 3U && b2_service_site_id() == 1U);
 #endif
     uint8_t modes[3];
     CHECK(b2_service_site_id() == 1U && b2_service_thermal_modes(modes) == 7U && modes[0] == 1U);
@@ -261,10 +267,69 @@ static void business_checks(void)
     CHECK(net_writes == writes && s_diagnostics.invalid_frames == 1U);
 }
 
+#if defined(B1_RK_UART)
+static void hot_reconnect_checks(void)
+{
+    master_state_t hot = {0U, 7U, {1U, 1U, 1U}};
+    master_state_t normal = {0U, 2U, {0U, 0U, 0U}};
+    master_state_t tester_only = {.tester_id = b2_service_tester_id()};
+    master_state_t empty = {0};
+    uint8_t site = b2_service_site_id();
+    uint8_t modes[B2_MIRROR_COUNT];
+    unsigned address_changes = net_writes;
+    b2_link_diagnostics_t diag;
+    connected = 1;
+    test_busy = 1;
+
+    /* 三秒边界跨过毫秒计数器回绕；损坏的帧不能为旧高温续期。 */
+    now = UINT32_MAX - 1000U;
+    CHECK(transact(20U, hot).status == B2_STATUS_OK && displayed_hot == 7U);
+    now += 100U;
+    CHECK(transact(21U, normal).status == B2_STATUS_OK && displayed_hot == 5U);
+    now += 2999U;
+    s_packet.data[s_packet.length - 3U] ^= 1U;
+    unsigned replies = published;
+    handle_packet();
+    CHECK(published == replies);
+    b2_service_poll(connected);
+    b2_link_diagnostics(&diag);
+    CHECK(diag.online && displayed_hot == 5U && b2_service_thermal_modes(modes) == 7U);
+    ++now;
+    b2_link_diagnostics(&diag);
+    CHECK(!diag.online && b2_service_thermal_modes(modes) == 0U);
+    b2_service_poll(connected);
+    CHECK(displayed_hot == 0U);
+    CHECK(transact(22U, tester_only).status == B2_STATUS_OK);
+    CHECK(b2_service_thermal_modes(modes) == 0U && displayed_hot == 0U);
+
+    /* 两帧之间未调度 TCP 任务，重连后的空状态包也不得恢复旧灯态。 */
+    CHECK(transact(23U, hot).status == B2_STATUS_OK && displayed_hot == 7U);
+    now += 3000U;
+    CHECK(transact(24U, empty).status == B2_STATUS_OK);
+    CHECK(b2_service_thermal_modes(modes) == 0U && displayed_hot == 0U);
+    hot.thermal_mask = 2U;
+    CHECK(transact(25U, hot).status == B2_STATUS_OK);
+    CHECK(b2_service_thermal_modes(modes) == 2U && displayed_hot == 2U);
+
+    /* B2 重启可能复用同一个流水号；新会话的明确高温仍应生效。 */
+    now += 3000U;
+    b2_service_poll(connected);
+    CHECK(displayed_hot == 0U);
+    CHECK(transact(25U, hot).status == B2_STATUS_OK && displayed_hot == 2U);
+    CHECK(b2_service_tester_id() == tester_only.tester_id && b2_service_site_id() == site);
+    CHECK(net_writes == address_changes);
+    test_busy = 0;
+    connected = 0;
+}
+#endif
+
 void test_main(void)
 {
     parser_checks();
     business_checks();
+#if defined(B1_RK_UART)
+    hot_reconnect_checks();
+#endif
     message("PASS: B2 protocol / CS state machine / task retry / service atomicity / master codec\n");
     finish(0U);
 }
